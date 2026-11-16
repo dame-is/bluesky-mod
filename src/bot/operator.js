@@ -2,17 +2,17 @@
 //
 // The classic path splits every turn in two. What the owner types is matched
 // against a fixed grammar and executed by code; anything that does not match
-// goes to an analyst that can read and cannot write. That split is what makes "only acts
-// on commands from me" literally true, and it is also why the bot answers in
-// numbered menus and asks for plan codes: a model never touches the list, so
-// every write has to be spelled out by a person.
+// goes to an analyst that can read and cannot write. That split is what makes
+// "only acts on commands from me" literally true, and it is also why the bot
+// answers in numbered menus and asks for plan codes: a model never touches the
+// list, so every write has to be spelled out by a person.
 //
 // This file is the other trade. One model gets the read tools AND the write
-// tools, and the owner talks to it in sentences: "block everyone being nasty
-// in the quotes on this", "undo that, the third one is a friend of mine". It decides
-// which tools to call. Classic mode still exists beside it (MOD_DM_MODE, and a
-// leading "!" on any one message), so the deterministic surface is a keystroke
-// away rather than gone.
+// tools, and the owner talks to it in sentences: "block everyone being nasty in
+// the quotes on this", "undo that, the third one is a friend of mine". It
+// decides which tools to call. Classic mode still exists beside it
+// (MOD_DM_MODE, and a leading "!" on any one message), so the deterministic
+// surface is a keystroke away rather than gone.
 //
 // WHAT IS STILL ENFORCED IN CODE, because it is enforced below the model rather
 // than by it, and costs nothing in normal use:
@@ -118,12 +118,12 @@ export const OPERATOR_TIMEOUT_MS = num(
 /**
  * How long ONE model call may take before the model counts as stalled.
  *
- * Timed around the model call alone: armed when a call starts, disarmed when
- * it returns, so a long harvest or triage (tool time) never trips it. Once a
+ * Timed around the model call alone: armed when a call starts, disarmed when it
+ * returns, so a long harvest or triage (tool time) never trips it. Once a
  * "block" with a post attached spent nearly three minutes on about four
- * DeepSeek calls and came back empty. Replayed, the same message took about
- * six seconds. A healthy first-wave call takes 2 to 15 seconds. The second wave reasons
- * longer over a bigger context, and nothing comes after it, so it waits
+ * DeepSeek calls and came back empty. Replayed, the same message took about six
+ * seconds. A healthy first-wave call takes 2 to 15 seconds. The second wave
+ * reasons longer over a bigger context, and nothing comes after it, so it waits
  * longer. 0 turns the watchdog off.
  */
 export const OPERATOR_CALL_TIMEOUT_MS = num(
@@ -329,9 +329,10 @@ const failed = (err) => ({
 /**
  * What goes in the decision log's note for a write.
  *
- * The owner's literal message first, because "The owner wrote this sentence on this
- * date" is the part of "why am I on your list" that needs no reconstruction.
- * The model's stated reason rides after it, marked as the model's.
+ * The owner's literal message first, because "The owner wrote this sentence on
+ * this date" is the part of "why am I on your list" that needs no
+ * reconstruction. The model's stated reason rides after it, marked as the
+ * model's.
  */
 function noteFor(raw, reason) {
   const why = String(reason || '')
@@ -562,7 +563,7 @@ export function buildActionTools(ctx, deps = DEPS) {
   const accountSource = async (account, plan = null) =>
     (await accountInfo(account, plan)).phrase;
 
-  /** The same, with what a question to the owner needs: the source and a label. */
+  /** The same, plus what a question to the owner needs: source and label. */
   const accountInfo = async (account, plan = null) => {
     const given = String(account ?? '')
       .trim()

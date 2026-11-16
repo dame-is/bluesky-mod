@@ -6,11 +6,11 @@
 // from "scores a DID" into something that can answer "what has this person been
 // posting about", which is a different and more useful question.
 //
-// WHO IS TRUSTED HERE, AND WHO IS NOT. The server is trusted to report what
-// the network says; the CONTENT it returns is not. Post text, bios and display names are written by the people
-// being analysed, and this is the change that puts a lot more of that writing in
-// front of the model than the handful of handles it saw before. So every result
-// goes back fenced, whole, as data.
+// WHO IS TRUSTED HERE, AND WHO IS NOT. The server is trusted to report what the
+// network says; the CONTENT it returns is not. Post text, bios and display
+// names are written by the people being analysed, and this is the change that
+// puts a lot more of that writing in front of the model than the handful of
+// handles it saw before. So every result goes back fenced, whole, as data.
 //
 // THE GUARD IS AN ALLOW-PATTERN, NOT A DENY-PATTERN. A denylist of write verbs
 // only protects against the writes someone thought of; this file does not

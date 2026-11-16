@@ -22,12 +22,12 @@
 //
 // WHAT IS NOT HERE, ON PURPOSE. A personalised For You feed. It is a real
 // atproto feed generator (`did:web:foryou.club`) and it personalises off the
-// requester's DID in a service JWT, so the only way to read the owner's
-// version is to hold the owner's identity. Unauthenticated `getFeed` against it answers 200
-// with a generic feed, which is the dangerous outcome: a plausible answer to a
-// question nobody asked. Approximating it and calling it theirs would be exactly
-// the kind of claim the rest of this system exists to refuse, so there is no
-// `foryou` slice until there is an honest way to fetch one.
+// requester's DID in a service JWT, so the only way to read the owner's version
+// is to hold the owner's identity. Unauthenticated `getFeed` against it answers
+// 200 with a generic feed, which is the dangerous outcome: a plausible answer
+// to a question nobody asked. Approximating it and calling it theirs would be
+// exactly the kind of claim the rest of this system exists to refuse, so there
+// is no `foryou` slice until there is an honest way to fetch one.
 
 import { APPVIEW } from '../constants.js';
 import { resolveActor } from './target.js';
@@ -340,10 +340,10 @@ export async function authorWindow(
 /**
  * The circle's posts inside the window, read one author feed at a time.
  *
- * Unreadable members are counted, not thrown: an account the owner follows that has
- * since been deactivated answers 400 forever, and one of those must not take
- * the other 231 down with it. The count goes into `coverage` so the answer can
- * say how much of the circle it actually saw.
+ * Unreadable members are counted, not thrown: an account the owner follows that
+ * has since been deactivated answers 400 forever, and one of those must not
+ * take the rest down with it. The count goes into `coverage` so the answer
+ * can say how much of the circle it actually saw.
  */
 export async function circleWindow({
   dids,
@@ -570,8 +570,8 @@ export function summariseWindow(
  * reposting something huge.
  *
  * Then a per-account cap, because engagement order alone hands the whole sample
- * to the two loudest accounts and produces a confident answer about two
- * hundred people built from the output of three. Breadth is the thing being measured.
+ * to the two loudest accounts and produces a confident answer about two hundred
+ * people built from the output of three. Breadth is the thing being measured.
  */
 export function selectPosts(
   posts,
@@ -694,9 +694,10 @@ function renderOne(p, now, chars, n) {
  * character of this is written by other people.
  *
  * The two groups are LABELLED rather than interleaved. A model handed one list
- * cannot tell "someone the owner follows wrote this" from "someone the owner follows
- * passed this on", and those become the same sentence in the reply, which is
- * the specific way a digest of a follow graph turns into a digest of Bluesky.
+ * cannot tell "someone the owner follows wrote this" from "someone the owner
+ * follows passed this on", and those become the same sentence in the reply,
+ * which is the specific way a digest of a follow graph turns into a digest of
+ * Bluesky.
  *
  * Text is trimmed rather than summarised. A digest tool that pre-summarised
  * each post would be making the editorial call the model is there to make, one

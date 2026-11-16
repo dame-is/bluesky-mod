@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Measure the agent's pre-write intent check against scripts/evals/intent-cases.js.
+// Measure the agent's pre-write intent check against
+// scripts/evals/intent-cases.js.
 //
 // For each case it asks the evaluation model (Jev) once and each candidate
 // second-wave model once, then reports three things per candidate:

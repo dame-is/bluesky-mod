@@ -18,12 +18,13 @@
 // summed into a threat number, because a threat number built from them would
 // mostly detect being new to Bluesky.
 //
-// One number did hold up, and the bands are built on it: how many of the
-// people you follow also follow this account. In that deployment, 97% of the
-// accounts in a big bulk sweep had zero, and 44% of the accounts blocked by
-// hand had at least one. That asymmetry is the useful signal, and it is useful
-// in one direction only: a vouch is good evidence to LEAVE SOMEONE ALONE, and the absence of one is no evidence at all,
-// because most harmless strangers have none either.
+// One number did hold up, and the bands are built on it: how many of the people
+// you follow also follow this account. In that deployment, 97% of the accounts
+// in a big bulk sweep had zero, and 44% of the accounts blocked by hand had at
+// least one. That asymmetry is the useful signal, and it is useful in one
+// direction only: a vouch is good evidence to LEAVE SOMEONE ALONE, and the
+// absence of one is no evidence at all, because most harmless strangers have
+// none either.
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
 
@@ -46,9 +47,9 @@ export const BANDS = [
  *
  * Against the original bulk sweep these put 1.0% in CONNECTED, 2.2% in
  * PERIPHERAL and 1.5% in NOTABLE: 4.7% needing a named look, 95.3% passing
- * through. Against the accounts picked by hand, 54% need a look. That asymmetry is the point: the
- * gate should be nearly frictionless on strangers and hard to get past for
- * people near you.
+ * through. Against the accounts picked by hand, 54% need a look. That asymmetry
+ * is the point: the gate should be nearly frictionless on strangers and hard to
+ * get past for people near you.
  */
 export const DEFAULT_THRESHOLDS = {
   connectedVouches: 3,
@@ -125,7 +126,8 @@ export function assignBand(f, thresholds = DEFAULT_THRESHOLDS) {
  *
  * Note the ceiling: 3 means "not found", not "three hops away". Establishing a
  * real distance of 3+ would mean walking the follow graph of every account in
- * the neighbourhood, tens of thousands of them, which is not worth what it would cost to learn something the bands do not use.
+ * the neighbourhood, tens of thousands of them, which is not worth what it
+ * would cost to learn something the bands do not use.
  */
 export function distanceFrom({ inCircle, vouches, inNeighbourhood }) {
   if (inCircle) return 0;

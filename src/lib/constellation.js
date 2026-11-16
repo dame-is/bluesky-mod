@@ -9,8 +9,8 @@ import { CONSTELLATION_URL } from '../constants.js';
 const CONSTELLATION_BASE = CONSTELLATION_URL;
 const RETRY_DELAYS_MS = [1000, 2500, 5000, 10_000];
 // The longest a Retry-After is taken at its word. A DM answer waits on these
-// calls, and an instance that asks for ten minutes has effectively said no; a capped wait still backs off, and the last retry still
-// gives up.
+// calls, and an instance that asks for ten minutes has effectively said no; a
+// capped wait still backs off, and the last retry still gives up.
 const MAX_RETRY_DELAY_MS = 15_000;
 
 async function fetchJsonOrNull(url, init) {

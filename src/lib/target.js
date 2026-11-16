@@ -13,11 +13,11 @@
 // stale every time someone ships a new client. A host allowlist would reject a
 // fork that shipped this morning; a path match will not.
 //
-// Handle-form links (`/profile/alice.example.com/post/abc`) carry a handle,
-// not a DID, and a handle is a rented name: whoever holds it today is who the
-// link resolves to. That is fine for a link you just copied and wrong for anything stored, so
-// resolution happens HERE, once, at the edge, and everything downstream carries
-// the DID.
+// Handle-form links (`/profile/alice.example.com/post/abc`) carry a handle, not
+// a DID, and a handle is a rented name: whoever holds it today is who the link
+// resolves to. That is fine for a link you just copied and wrong for anything
+// stored, so resolution happens HERE, once, at the edge, and everything
+// downstream carries the DID.
 
 import { APPVIEW } from '../constants.js';
 

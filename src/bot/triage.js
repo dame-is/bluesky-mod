@@ -235,8 +235,8 @@ async function labelBatch(items, { generate, model, usage = [] }) {
 /**
  * Second-wave calls at once. Fewer than the first wave's twelve: the second
  * reader is a smaller provider pool, and a burst of twelve is how one run lost
- * about a quarter of its posts to upstream failures. A triage of 240 sends about 100 posts
- * here, so this is two or three rounds either way.
+ * about a quarter of its posts to upstream failures. A triage of 240 sends
+ * about 100 posts here, so this is two or three rounds either way.
  */
 const SECOND_CONCURRENCY = 4;
 

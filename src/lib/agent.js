@@ -130,16 +130,16 @@ THIS REPLY IS PUBLIC. Anyone can read it, including the accounts you are describ
 /**
  * The canned question behind `read @handle`.
  *
- * A FIXED QUESTION, not the owner's free text, because this is the one path where a
- * model is asked for an opinion about a person rather than an explanation of a
- * number. Fixing the wording is what stops the answer drifting with how the
- * question happened to be phrased that day, and it is what lets the framing
- * below be guaranteed rather than hoped for.
+ * A FIXED QUESTION, not the owner's free text, because this is the one path
+ * where a model is asked for an opinion about a person rather than an
+ * explanation of a number. Fixing the wording is what stops the answer drifting
+ * with how the question happened to be phrased that day, and it is what lets
+ * the framing below be guaranteed rather than hoped for.
  *
  * THE FRAMING IS THE POINT. The band measures social proximity: who would
- * notice if the owner blocked them. It says nothing about conduct, which is usually
- * what someone actually wants to know, and the gap between those two is where
- * a tool like this gets misused. So the reply is asked to be a reading of
+ * notice if the owner blocked them. It says nothing about conduct, which is
+ * usually what someone actually wants to know, and the gap between those two is
+ * where a tool like this gets misused. So the reply is asked to be a reading of
  * posts, to say how far back it looked, to say what it did NOT find, and to
  * stay out of the band entirely. "Nothing in the last 50 posts" is a real
  * answer and is not the same sentence as "they are fine".
@@ -168,11 +168,11 @@ export function readRequest(actor) {
 /**
  * The canned question behind `pulse`.
  *
- * FIXED, for the same reason `readRequest` is. This is the other path where
- * the model is handed a pile of other people's writing and asked what it
- * amounts to, and the framing that keeps the answer honest -- say what the
- * circle WROTE apart from what it passed on, say how much you actually read --
- * has to be guaranteed rather than hoped for. Building it from the owner's free text
+ * FIXED, for the same reason `readRequest` is. This is the other path where the
+ * model is handed a pile of other people's writing and asked what it amounts
+ * to, and the framing that keeps the answer honest -- say what the circle WROTE
+ * apart from what it passed on, say how much you actually read -- has to be
+ * guaranteed rather than hoped for. Building it from the owner's free text
  * would mean the framing drifts with how they happened to phrase it.
  *
  * The arguments are named back to the model rather than left for it to choose,

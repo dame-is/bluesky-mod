@@ -191,7 +191,8 @@ export function parseActor(token) {
  * @returns {null | { action: string, actor: string|null, needsTarget: boolean, raw: string }}
  *   `null` means it is not a command: hand it to the analyst.
  *   `needsTarget` means the owner used a verb but named nobody, which is asked
- *   back rather than guessed. "block them" is precisely the case that must not work.
+ *   back rather than guessed. "block them" is precisely the case that must not
+ *   work.
  */
 export function parseCommand(
   text,
@@ -207,8 +208,9 @@ export function parseCommand(
   const rest = raw.replace(verb.match, '').trim();
 
   // --- bulk: propose, then approve -----------------------------------------
-  // A plan names a POST, and the post comes from the owner's own message: a link they
-  // pasted, or the post they shared. Never from anything the analyst read.
+  // A plan names a POST, and the post comes from the owner's own message: a
+  // link they pasted, or the post they shared. Never from anything the analyst
+  // read.
   if (verb.action === 'plan') {
     const kind = matched[1].toLowerCase();
     const target =
@@ -341,12 +343,12 @@ export function parseCommand(
   // Defaulting is safe HERE and nowhere else in this file. Every other verb
   // adds someone to a block list, so guessing a target is the failure that
   // matters; undo only ever REMOVES people from it, so the worst a wrong guess
-  // does is un-block accounts that the owner can add again. The safe direction to be
-  // wrong in is the one that acts on fewer people.
+  // does is un-block accounts that the owner can add again. The safe direction
+  // to be wrong in is the one that acts on fewer people.
   //
   // A token that was clearly MEANT as a code is not defaulted, though. Undoing
-  // the most recent plan because a code was mistyped would act on a batch the owner
-  // did not name, which is the one thing defaulting must not buy.
+  // the most recent plan because a code was mistyped would act on a batch the
+  // owner did not name, which is the one thing defaulting must not buy.
   if (verb.action === 'undo') {
     const token = rest.split(/\s+/).filter(Boolean)[0] || '';
     const code = /^[0-9a-f]{4,36}$/.test(token) ? token.toLowerCase() : null;
@@ -425,11 +427,11 @@ export function parseCommand(
   // This is NOT the thing `block them` is refused for, and the distinction is
   // the whole of why the refusal is worth keeping. A pronoun gets resolved
   // against something the analyst read mid-turn, so the target is chosen by a
-  // stranger's post. An attached record was put there by the owner, in this message,
-  // and the author is read out of the URI by a regex. Same provenance as typing
-  // the handle; no model anywhere near it. It is exactly the rule `add likers`
-  // already follows -- the post comes from the owner's own message, never from
-  // anything the analyst read.
+  // stranger's post. An attached record was put there by the owner, in this
+  // message, and the author is read out of the URI by a regex. Same provenance
+  // as typing the handle; no model anywhere near it. It is exactly the rule
+  // `add likers` already follows -- the post comes from the owner's own
+  // message, never from anything the analyst read.
   // THREE OUTCOMES, NOT TWO. The first version of this refused anything whose
   // words it did not recognise, which meant "block em" and "block this guy"
   // both got a lecture about naming the account -- with the account attached to
@@ -530,9 +532,9 @@ export function needsTargetReply(action) {
  * A reply that is just a choice: "2", "b", "option 3".
  *
  * Numbered options only ever come from deterministic replies (a plan, a
- * review), so resolving one runs a command this file wrote. A number offered by the
- * analyst's prose is not stored and does not resolve, because "2" would then
- * execute whatever a model decided while reading a stranger's posts.
+ * review), so resolving one runs a command this file wrote. A number offered by
+ * the analyst's prose is not stored and does not resolve, because "2" would
+ * then execute whatever a model decided while reading a stranger's posts.
  *
  * @returns {number|null} a 1-based index
  */
@@ -551,9 +553,9 @@ export function parseChoice(text) {
  * A pulse command, rendered canonically.
  *
  * Round-trips: `parseCommand(pulseCommand(x))` gives back `x`. That property is
- * what makes a follow-up menu safe to build in code -- the option the owner presses
- * is re-parsed by the same parser their typing goes through, so there is no
- * second grammar that could drift from the first.
+ * what makes a follow-up menu safe to build in code -- the option the owner
+ * presses is re-parsed by the same parser their typing goes through, so there
+ * is no second grammar that could drift from the first.
  */
 export function pulseCommand({
   slice = 'circle',
@@ -624,9 +626,9 @@ export function safePhrase(phrase) {
 /**
  * The arguments a digest ran with, as the shape `followUpsFor` takes.
  *
- * When the owner asks in words the model chooses the source and the window, so the
- * menu has to describe THAT and not what they might have meant. The source is
- * validated rather than trusted: it is rendered straight back into a command
+ * When the owner asks in words the model chooses the source and the window, so
+ * the menu has to describe THAT and not what they might have meant. The source
+ * is validated rather than trusted: it is rendered straight back into a command
  * string, and a value that does not re-parse would produce an option whose
  * label and behaviour disagree. Anything unrecognised falls back to the circle,
  * which is what an unqualified question means anyway.
@@ -1053,8 +1055,8 @@ const TRUNCATED_LINK = /(\.\.\.|…)|bsky\.app|\/profile\//;
 /**
  * "block" with one target and nothing else to it: the quick lane.
  *
- * Most of what the owner sends is this -- a shared post and the word "block", often
- * twenty in an evening -- and it never needed a model. One verb (block or
+ * Most of what the owner sends is this -- a shared post and the word "block",
+ * often twenty in an evening -- and it never needed a model. One verb (block or
  * unblock), exactly one account (a typed handle, a pasted profile or post link,
  * or the author of the attached post), and every other word filler. Anything
  * more -- two accounts, "and everyone who liked it", a reason with its own

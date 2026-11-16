@@ -6,10 +6,10 @@
 // template with variables, filled from what score.js already computed, and no
 // model runs.
 //
-// The template is editable in the config file. The VALUES are not, and one of them
-// is dangerous: `displayName` is written by the account being looked at. A
-// display name carrying a newline could forge a line of the report, and a forged
-// "Band: PROTECTED" reads exactly like a field this code produced. Every
+// The template is editable in the config file. The VALUES are not, and one of
+// them is dangerous: `displayName` is written by the account being looked at. A
+// display name carrying a newline could forge a line of the report, and a
+// forged "Band: PROTECTED" reads exactly like a field this code produced. Every
 // substituted value is flattened to one line and capped before it is used.
 
 /** What a lookup looks like unless the owner changes it. */

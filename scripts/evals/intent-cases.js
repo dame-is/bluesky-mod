@@ -20,7 +20,7 @@ const POST =
 const AUTHOR = { label: '@poster.example.social', source: 'attached' };
 
 export const CASES = [
-  // ---- ADD, target pointed at by the owner: allow --------------------------------
+  // ---- ADD, target pointed at by the owner: allow ----------------------------
   {
     id: 'add-typed-handle',
     want: true,
@@ -604,7 +604,7 @@ export const CASES = [
     accounts: [{ label: '@sam.example.social', source: 'said' }],
   },
 
-  // ---- THE OWNER SAID NO OR NOT YET: refuse -----------------------------------------
+  // ---- THE OWNER SAID NO OR NOT YET: refuse ---------------------------------
   {
     id: 'no-leave-it',
     want: false,

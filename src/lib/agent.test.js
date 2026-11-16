@@ -207,8 +207,8 @@ describe('the system prompt states what the score is not', () => {
   });
 
   it('separates a slice of the network from the whole of it', () => {
-    // Trending answers for a population the owner is barely in. The distinction is
-    // the entire reason network_pulse exists, so losing it from the prompt
+    // Trending answers for a population the owner is barely in. The distinction
+    // is the entire reason network_pulse exists, so losing it from the prompt
     // would leave a tool the model has no reason to reach for.
     expect(SYSTEM_PROMPT).toMatch(/network_pulse/);
     expect(SYSTEM_PROMPT).toMatch(/they mean their circle/i);
@@ -216,9 +216,9 @@ describe('the system prompt states what the score is not', () => {
   });
 
   it('forbids passing anything off as the For You feed', () => {
-    // It personalises off the requester's identity and the bot is not the owner, so
-    // the only honest answer is that it cannot be fetched. A substitute would
-    // be indistinguishable from the real thing in the reply.
+    // It personalises off the requester's identity and the bot is not the
+    // owner, so the only honest answer is that it cannot be fetched. A
+    // substitute would be indistinguishable from the real thing in the reply.
     expect(SYSTEM_PROMPT).toMatch(/FOR YOU FEED IS NOT READABLE/);
     expect(SYSTEM_PROMPT).toMatch(/Never substitute/);
   });

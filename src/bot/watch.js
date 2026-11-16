@@ -340,9 +340,9 @@ export async function endExpired({ now = Date.now() } = {}) {
   return ended;
 }
 
-// --- the owner's own posts ----------------------------------------------------------
+// --- the owner's own posts ---------------------------------------------------
 
-/** New quotes and replies in an hour, on one of the owner's posts, worth a message. */
+/** New quotes and replies in an hour on one of the owner's posts, worth a DM. */
 export const ALERT_THRESHOLD = Number(process.env.MOD_ALERT_THRESHOLD) || 15;
 const ALERT_AGAIN_MS = 6 * 3_600_000;
 const BASELINE_MS = 60 * 60_000;

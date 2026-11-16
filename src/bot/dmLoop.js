@@ -225,8 +225,8 @@ export function composeMessage(message) {
  * How long a numbered option stays live.
  *
  * Expired rather than deleted: a stale "1" falls through to the analyst as a
- * question instead of firing a command the owner typed a number for an hour ago and
- * has since forgotten.
+ * question instead of firing a command the owner typed a number for an hour ago
+ * and has since forgotten.
  */
 const CHOICE_TTL_MS = 30 * 60_000;
 
@@ -367,7 +367,8 @@ function renderReview(plan, review) {
  * Run one typed command and return what to say back.
  *
  * Every branch is deterministic. Nothing here consults the model, and the only
- * inputs are the owner's literal text and what Constellation and score.js returned.
+ * inputs are the owner's literal text and what Constellation and score.js
+ * returned.
  */
 export async function runCommand(
   cmd,
@@ -959,8 +960,8 @@ const LOUD_BANDS = new Set(['CONNECTED', 'NOTABLE']);
 /**
  * The quick lane: "block" or "unblock" with one target, no model.
  *
- * Quiet when there is nothing to say: a ✅ on the owner's message and a line in the
- * burst summary. Out loud when there is: PROTECTED, a CONNECTED or NOTABLE
+ * Quiet when there is nothing to say: a ✅ on the owner's message and a line in
+ * the burst summary. Out loud when there is: PROTECTED, a CONNECTED or NOTABLE
  * account (done, but worth knowing), an unblock of someone who was not on the
  * list, or a failure.
  */
@@ -1291,10 +1292,9 @@ export async function readCursor() {
  *
  * The DM poll runs every 2s by default, so writing unconditionally is 43,200
  * updates a day to a single row for the sake of the handful that change
- * anything. The
- * write still happens BEFORE any reply is sent, which is the property that
- * matters: it is what makes a crashed turn a dropped message rather than a
- * replayed one.
+ * anything. The write still happens BEFORE any reply is sent, which is the
+ * property that matters: it is what makes a crashed turn a dropped message
+ * rather than a replayed one.
  */
 let lastWritten = null;
 
@@ -1735,8 +1735,9 @@ export async function runDmPass({
       // forgotten. See pulseRequest in agent.js for why the wording is fixed.
       const pulsing = cmd?.action === 'pulse' ? cmd : null;
       // The third canned question. A digest says a thing was discussed; this is
-      // how the owner asks what was actually said, without leaving the conversation
-      // and without the answer having to be a scoring decision about anybody.
+      // how the owner asks what was actually said, without leaving the
+      // conversation and without the answer having to be a scoring decision
+      // about anybody.
       const threading =
         cmd?.action === 'thread' && !cmd.needsTarget
           ? cmd.url || cmd.target
@@ -1748,10 +1749,10 @@ export async function runDmPass({
         if (account?.handle) reading = account.handle;
       }
 
-      // Say something before the work starts. A harvest or a model call is five to
-      // twenty seconds of silence, which reads as broken rather than busy.
-      // Swallowed on failure: an ack that did not send is not a reason to lose the
-      // answer behind it.
+      // Say something before the work starts. A harvest or a model call is five
+      // to twenty seconds of silence, which reads as broken rather than busy.
+      // Swallowed on failure: an ack that did not send is not a reason to lose
+      // the answer behind it.
       // Only announce work that takes time. A rendered reply arrives instantly,
       // and announcing it means two messages for one answer.
       if (!acked && worthAcking(cmd)) {
@@ -1859,8 +1860,8 @@ export async function runDmPass({
       }
 
       let text = reply.text || 'No answer produced.';
-      // The analyst quotes commands in backticks. Lift them into a menu so the owner
-      // can answer "2" instead of retyping one. Parsed, not copied: see
+      // The analyst quotes commands in backticks. Lift them into a menu so the
+      // owner can answer "2" instead of retyping one. Parsed, not copied: see
       // offersFrom for what that does and does not guarantee.
       let offers = offerable(offersFrom(text));
       // After a read, the useful next step is the decision it was for. Built from
@@ -1881,10 +1882,10 @@ export async function runDmPass({
       // function of the arguments the digest actually ran with, so pressing 2
       // runs a read this codebase wrote. Same standing as the menu behind a plan.
       //
-      // Built from the TOOL CALL and not from what the owner typed, because when they
-      // ask in words the model picks the window -- and a menu offering to widen
-      // to three days under an answer that already covered three days is a menu
-      // that has not been reading along.
+      // Built from the TOOL CALL and not from what the owner typed, because
+      // when they ask in words the model picks the window -- and a menu
+      // offering to widen to three days under an answer that already covered
+      // three days is a menu that has not been reading along.
       const ranPulse = reply.pulses?.[reply.pulses.length - 1] ?? null;
       // URLs this message is allowed to render as tappable. Empty for every
       // reply that is not a digest, which is every reply that has not just been

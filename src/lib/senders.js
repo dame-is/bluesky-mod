@@ -20,11 +20,10 @@
 //
 // WHAT A READ-ONLY GUEST CAN STILL REACH is worth being honest about. They get
 // the analyst, which reads author feeds and the follow graph, and reports that
-// print bands, vouch counts and follower numbers for third parties. That is
-// the owner's private read of their own social graph. Adding someone here
-// hands them that, and on the public path it hands it to everyone in the
-// thread. The tier
-// limits what they can CHANGE, not what they can SEE.
+// print bands, vouch counts and follower numbers for third parties. That is the
+// owner's private read of their own social graph. Adding someone here hands
+// them that, and on the public path it hands it to everyone in the thread. The
+// tier limits what they can CHANGE, not what they can SEE.
 
 /** DIDs out of a comma or whitespace separated env value. */
 export function parseDids(value) {

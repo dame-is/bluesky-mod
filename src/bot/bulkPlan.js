@@ -70,9 +70,10 @@ const shortCode = (uuid) => uuid.replace(/-/g, '').slice(0, 8);
  * The `approved_via` for a write, given who asked for it.
  *
  * `by` is null for a typed command and 'agent' when agent mode called the
- * function on the owner's behalf. Prefixed rather than replaced, because the basis
- * still holds -- a band is still a band -- and what changed is that a model
- * chose it from their sentence instead of them typing it. "agent:band" says both.
+ * function on the owner's behalf. Prefixed rather than replaced, because the
+ * basis still holds -- a band is still a band -- and what changed is that a
+ * model chose it from their sentence instead of them typing it. "agent:band"
+ * says both.
  */
 const viaFor = (basis, by) => (by ? `${by}:${basis}` : basis);
 
@@ -105,9 +106,9 @@ export function engagedAs(row, kinds, plan) {
  * Bulk approvals used to skip this check, so an account in two plans got two
  * listitems, five minutes apart, and the list ended up holding many more
  * listitems than accounts. Read from the held copy (graphFacts.js), which this
- * process's own writes keep current. If the list
- * cannot be read, everything is written: a duplicate is the cheaper mistake
- * than a block that silently did not happen.
+ * process's own writes keep current. If the list cannot be read, everything is
+ * written: a duplicate is the cheaper mistake than a block that silently did
+ * not happen.
  */
 async function splitListed(uri, rows) {
   const facts = await graphFacts({ list: uri }).catch(() => null);
@@ -583,7 +584,8 @@ export async function handlesFor(dids) {
       }
     } catch {
       // A profile we cannot fetch still has a DID and a band, which is the part
-      // that matters. Reviewing with a DID instead of a handle is ugly, not wrong.
+      // that matters. Reviewing with a DID instead of a handle is ugly, not
+      // wrong.
     }
   }
   return out;
@@ -594,8 +596,8 @@ export async function handlesFor(dids) {
  *
  * Defaults to everything that is not UNKNOWN, sorted by trust, because that is
  * the review queue the whole system is built around: the accounts most embedded
- * in the owner's world read first, so if attention runs out it runs out in the right
- * place.
+ * in the owner's world read first, so if attention runs out it runs out in the
+ * right place.
  *
  * DM ONLY. This prints handles and follower counts; the public reply path must
  * never reach it.

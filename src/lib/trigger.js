@@ -145,8 +145,8 @@ export function classify(
   const self = { uri, cid: commit.cid };
 
   // What to analyse, best evidence first. A pasted link is an explicit request.
-  // Failing that, the post the owner is quoting or replying to is the thing in front
-  // of them, unless it is the bot's own post, which is a follow-up in an
+  // Failing that, the post the owner is quoting or replying to is the thing in
+  // front of them, unless it is the bot's own post, which is a follow-up in an
   // existing conversation rather than a new subject.
   let target = null;
   let targetSource = null;

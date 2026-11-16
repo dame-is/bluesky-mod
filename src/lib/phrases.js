@@ -6,13 +6,11 @@
 //
 // THE SAME SPLIT AS VOICE AND SURFACE. An OPENER is character and is editable
 // in the config file: "Acknowledged.", "On it boss.", whatever the owner wants
-// the thing to sound like. A CLAUSE is a statement of fact about what is happening next,
-// and stays here. An editable clause could say "Writing to the list" while the
-// thing is actually harvesting, which is a receipt that lies.
+// the thing to sound like. A CLAUSE is a statement of fact about what is
+// happening next, and stays here. An editable clause could say "Writing to the
+// list" while the thing is actually harvesting, which is a receipt that lies.
 //
-// No em dashes. They are everywhere in this codebase's comments and nowhere in
-// what it says out loud, which is a deliberate difference: the comments are
-// prose for a reader and these are a machine talking.
+// No em dashes in anything here. phrases.test.js checks.
 
 /** Openers. Overridden by `openers` in the config file. */
 export const DEFAULT_OPENERS = [

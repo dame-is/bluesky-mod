@@ -59,10 +59,10 @@ async function protectedReason(did) {
  * @param {object} [opts]
  * @param {string} [opts.raw]   the owner's literal message, for the decision log
  * @param {string} [opts.band]  the band at the time, if it was scored
- * @param {string} [opts.via]   how it was asked for. 'command' is the owner's typed
- *   verb; 'agent' is agent mode acting on what they wrote in words. Both are their
- *   say-so, and the log still has to tell them apart: one is their literal
- *   target and the other is a model's reading of their sentence.
+ * @param {string} [opts.via]   how it was asked for. 'command' is the owner's
+ *   typed verb; 'agent' is agent mode acting on what they wrote in words. Both
+ *   are their say-so, and the log still has to tell them apart: one is their
+ *   literal target and the other is a model's reading of their sentence.
  * @returns {Promise<{ ok: boolean, message: string, did?: string,
  *   changed?: boolean, already?: boolean, vetoed?: string, account?: object }>}
  *   `changed` is whether the list moved; `already` is "was already on / not

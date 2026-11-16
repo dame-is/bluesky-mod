@@ -121,8 +121,8 @@ describe('resolveSlice', () => {
   });
 
   it('refuses a collection that is not a stream of posts', async () => {
-    // A post URI is the thing the owner pastes at this tool most often by mistake,
-    // and "no posts found" would be a lie about a post that exists.
+    // A post URI is the thing the owner pastes at this tool most often by
+    // mistake, and "no posts found" would be a lie about a post that exists.
     await expect(
       resolveSlice('at://did:plc:x/app.bsky.feed.post/abc'),
     ).rejects.toThrow(/not a feed or a list/);
@@ -788,7 +788,8 @@ describe('pulse', () => {
 
   it('has no For You slice, and does not invent one from the unauthenticated feed', async () => {
     // The generator personalises off the requester's DID. Reading it as nobody
-    // returns a real feed that is not the owner's, which is the dangerous outcome.
+    // returns a real feed that is not the owner's, which is the dangerous
+    // outcome.
     await expect(resolveSlice('foryou')).rejects.toThrow(
       /not a slice I can read/,
     );

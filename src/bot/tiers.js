@@ -27,10 +27,9 @@
 //
 // MEASURED in the original deployment, not assumed (762 real triage rows, 52
 // intent cases, and 60 contested posts labelled by hand against the triage
-// prompt). Jev
-// alone over-calls "hostile" -- 80 posts DeepSeek did not flag, a stronger
-// model agreed with 12 -- so it is never the one that puts someone on the
-// list. On the intent cases it refused every overreach and was unsure on
+// prompt). Jev alone over-calls "hostile" -- 80 posts DeepSeek did not flag, a
+// stronger model agreed with 12 -- so it is never the one that puts someone on
+// the list. On the intent cases it refused every overreach and was unsure on
 // legitimate bulk requests, which is what the middle band is for.
 
 import { gateway, experimental_evaluate, generateText } from 'ai';

@@ -324,8 +324,8 @@ describe('offersFrom', () => {
   });
 
   it('labels from the parse, not from the prose', () => {
-    // What the owner reads has to be what runs. A label copied from model text could
-    // say one thing and execute another.
+    // What the owner reads has to be what runs. A label copied from model text
+    // could say one thing and execute another.
     const out = offersFrom('try `block @someone.example`');
     expect(out[0].label).toBe('Add @someone.example to the list');
   });

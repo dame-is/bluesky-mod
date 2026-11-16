@@ -29,9 +29,9 @@ import {
  * `links` are the URLs this code built and may render tappable.
  *
  * A QUESTION FROM THE CONVERSATION WINS. There is one stored question per
- * convo, and this runs on a timer while the owner may be mid-answer to something the
- * agent asked. When one is open, the message still goes, without its 👍 line
- * and without replacing what a "yes" or a 👍 would run.
+ * convo, and this runs on a timer while the owner may be mid-answer to
+ * something the agent asked. When one is open, the message still goes, without
+ * its 👍 line and without replacing what a "yes" or a 👍 would run.
  */
 export async function say(
   chat,
@@ -66,8 +66,8 @@ export async function say(
  *
  * A digest waits while a question from the conversation is open in its convo:
  * the watch keeps reading, its counts keep adding up, and the update goes once
- * the owner has answered or the question has lapsed. A closing digest cannot wait,
- * so say() sends that one without a question of its own.
+ * the owner has answered or the question has lapsed. A closing digest cannot
+ * wait, so say() sends that one without a question of its own.
  */
 export async function tickWatches({
   chat,

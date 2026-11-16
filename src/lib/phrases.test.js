@@ -13,9 +13,6 @@ import {
 const always = (i) => () => i;
 
 describe('nothing it says out loud contains an em dash', () => {
-  // The comments in this codebase are full of them and the replies are not.
-  // That difference is deliberate: comments are prose for a reader, replies are
-  // a machine talking.
   const everything = [
     ...DEFAULT_OPENERS,
     ...Object.values(ACK_CLAUSE).flat(),
