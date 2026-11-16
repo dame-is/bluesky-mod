@@ -52,9 +52,9 @@ export const KINDS = {
  * weight is between attacking a person and attacking an argument.
  *
  * NOT BANDS. A band comes from the follow graph and is reproducible against a
- * snapshot; these come from a model reading text and are reproducible by nobody.
- * They are kept apart everywhere -- different column, different approval, a
- * different `approved_via` in the log.
+ * snapshot; these come from a model reading text and are reproducible by
+ * nobody. They are kept apart everywhere: different column, different approval,
+ * a different `approved_via` in the log.
  */
 export const LABELS = ['hostile', 'arguing', 'neutral'];
 
@@ -97,7 +97,7 @@ const VERBS = [
   { match: /^review\b/i, action: 'review' },
   { match: /^undo\b/i, action: 'undo' },
   { match: /^history\b/i, action: 'history' },
-  // Reads posts and reports. Not a write, so a read-only account keeps it --
+  // Reads posts and reports. Not a write, so a read-only account keeps it,
   // and it is the one verb here that produces a MODEL's opinion rather than a
   // graph fact, which is why it is named for reading rather than for judging.
   { match: /^read\b/i, action: 'read' },
@@ -106,7 +106,7 @@ const VERBS = [
   // it labels and never acts.
   { match: /^triage\b/i, action: 'triage' },
   // Reads a SLICE of the network rather than an account. Like `read`, it is a
-  // canned question for the analyst rather than a branch of its own -- the
+  // canned question for the analyst rather than a branch of its own. The
   // digest is the model's job, and this verb exists so the follow-ups to one
   // can be real commands that a number is allowed to resolve to.
   { match: /^(?:pulse|digest)\b/i, action: 'pulse' },
@@ -119,7 +119,7 @@ const VERBS = [
   // ANCHORED TO THE WHOLE MESSAGE, unlike every other verb here. The others
   // take an argument, so a trailing `\b` is how they find it; this one takes
   // none, and matching a prefix would swallow "help me understand why they are
-  // connected" -- a real question -- and answer it with a menu.
+  // connected" (a real question) and answer it with a menu.
   { match: /^(?:help|commands|what can you do)[\s?!.]*$/i, action: 'help' },
   { match: /^cancel\b/i, action: 'cancel' },
   { match: /^list\s+add\b/i, action: 'list_add' },
@@ -222,7 +222,7 @@ export function parseCommand(
   }
 
   // `thread` names a POST, and like `plan` the post comes from the owner's own
-  // message -- typed, pasted, attached, or picked from a menu this codebase
+  // message: typed, pasted, attached, or picked from a menu this codebase
   // built. Never from anything the analyst read.
   if (verb.action === 'thread') {
     const url =
@@ -250,7 +250,7 @@ export function parseCommand(
 
   // `pulse` names a SLICE, a window and how to cut it. Every part is optional
   // and every part is matched literally, so a follow-up the system composed
-  // round-trips back through this parser unchanged -- which is what lets a
+  // round-trips back through this parser unchanged, which is what lets a
   // number resolve to one. See `followUpsFor`.
   if (verb.action === 'pulse') {
     const tokens = rest.split(/\s+/).filter(Boolean);
@@ -285,7 +285,7 @@ export function parseCommand(
       // A window, as a person types one: `72`, `72h`, `3d`, `2 days`.
       //
       // The unit is looked for in the NEXT token as well as this one, because
-      // splitting on whitespace puts "2 days" in two of them -- and a bare "2"
+      // splitting on whitespace puts "2 days" in two of them, and a bare "2"
       // read as two hours is a window nobody meant, answered with an almost
       // empty digest rather than with an error.
       const win = lower.match(/^(\d{1,4})(h|hr|hrs|hour|hours|d|day|days)?$/);
@@ -419,7 +419,7 @@ export function parseCommand(
 
   // AN ATTACHED POST NAMES ITS AUTHOR. Sharing a post from the Bluesky app and
   // captioning it "block" was answered with "name the account and I will do
-  // it", while PASTING that same post's link blocked the author immediately --
+  // it", while PASTING that same post's link blocked the author immediately,
   // because a post URL contains /profile/<handle>/ and parseActor above reads
   // it. One intent, two behaviours, and the difference was only ever which
   // affordance the client offered.
@@ -430,11 +430,11 @@ export function parseCommand(
   // stranger's post. An attached record was put there by the owner, in this
   // message, and the author is read out of the URI by a regex. Same provenance
   // as typing the handle; no model anywhere near it. It is exactly the rule
-  // `add likers` already follows -- the post comes from the owner's own
+  // `add likers` already follows: the post comes from the owner's own
   // message, never from anything the analyst read.
   // THREE OUTCOMES, NOT TWO. The first version of this refused anything whose
   // words it did not recognise, which meant "block em" and "block this guy"
-  // both got a lecture about naming the account -- with the account attached to
+  // both got a lecture about naming the account, with the account attached to
   // the message. A whitelist of acceptable phrasings is wrong about ordinary
   // speech forever, and each word it is missing fails the same way.
   //
@@ -476,14 +476,14 @@ export function parseCommand(
  * The verbs that change something the owner owns.
  *
  * `list_add`, `list_remove`, `approve` and `undo` write listitems; `cancel`
- * stamps a plan as declined. Everything else -- a lookup, a post scan, `plan`,
- * `review`, `history` -- only reads and reports, so a read-only account on the
+ * stamps a plan as declined. Everything else (a lookup, a post scan, `plan`,
+ * `review`, `history`) only reads and reports, so a read-only account on the
  * roster keeps all of it.
  *
  * `plan` is deliberately NOT here even though it writes rows to `plan` and
  * `decision`. Nobody is added to the list by a plan, an unapproved one is a
  * record of what was nearly done, and refusing it while a bare shared post
- * scans anyway -- which is the same call -- would be a distinction the person
+ * scans anyway (which is the same call) would be a distinction the person
  * typing cannot see.
  */
 export const WRITE_ACTIONS = new Set([
@@ -553,7 +553,7 @@ export function parseChoice(text) {
  * A pulse command, rendered canonically.
  *
  * Round-trips: `parseCommand(pulseCommand(x))` gives back `x`. That property is
- * what makes a follow-up menu safe to build in code -- the option the owner
+ * what makes a follow-up menu safe to build in code: the option the owner
  * presses is re-parsed by the same parser their typing goes through, so there
  * is no second grammar that could drift from the first.
  */
@@ -591,9 +591,9 @@ function sliceWords(slice) {
  * A term safe to put in a menu label and in a command.
  *
  * Domains come from links other people posted, so the suggestion behind
- * "narrow to github.com" is attacker-controlled. Bounded to a domain shape --
- * no spaces, no newlines, no backticks, nothing that could read as prose or
- * close a fence -- because the guarantee this menu makes is that the label
+ * "narrow to github.com" is attacker-controlled. Bounded to a domain shape (no
+ * spaces, no newlines, no backticks, nothing that could read as prose or close
+ * a fence) because the guarantee this menu makes is that the label
  * names the filter and pressing it runs exactly the command shown. The worst a
  * hostile value can buy is a read that matches nothing.
  */
@@ -607,7 +607,7 @@ export function safeTerm(term) {
 /**
  * A focus phrase safe to render into a command and a label.
  *
- * Wider than SAFE_TERM because a focus is a subject, not a domain -- "trans
+ * Wider than SAFE_TERM because a focus is a subject, not a domain: "trans
  * athletes" and "feed generators" are the normal case, and rejecting them would
  * drop the focus from the menu while the digest above it was filtered, which is
  * a menu that misdescribes what the owner is looking at. Still no newlines, no
@@ -668,7 +668,7 @@ export function pulseFromArgs(args = {}) {
  * something this codebase produced, and keep only what survives. The model
  * writes `[7]`; what `[7]` MEANS is decided here, by indexing a table the tool
  * built. So the analyst chooses which post it is pointing at and cannot point
- * at a post the digest never saw -- which is what makes the resulting link safe
+ * at a post the digest never saw, which is what makes the resulting link safe
  * to render as tappable, a thing this account otherwise never does for a URL it
  * did not construct.
  *
@@ -708,7 +708,7 @@ export function renderCitations(cited) {
 }
 
 export function followUpsFor(cmd, { terms = [], posts = [], max = null } = {}) {
-  // Four options when there is nothing to drill into, six when there is --
+  // Four options when there is nothing to drill into, six when there is,
   // rather than letting three cited posts crowd the digest variants out of a
   // menu sized for a world without them.
   const cap = max ?? (posts.length ? 6 : 4);
@@ -735,7 +735,7 @@ export function followUpsFor(cmd, { terms = [], posts = [], max = null } = {}) {
     seen.add(command);
     // The marker is appended to the label, not taken from the parse like every
     // other label here. Two posts by the same account produce two identical
-    // options otherwise -- the menu that teaches you to stop reading menus --
+    // options otherwise (the menu that teaches you to stop reading menus),
     // and the number ties each one to the link printed above it.
     //
     // It is safe for the reason the URL is: both come from the same validated
@@ -868,7 +868,7 @@ export function offersFrom(text, { max = 4 } = {}) {
 /**
  * Words that clearly mean "whoever wrote the thing I just attached".
  *
- * Not a safety boundary -- a word missing from here costs a confirmation, not a
+ * Not a safety boundary: a word missing from here costs a confirmation, not a
  * wrong block, which is why it can afford to be a plain list. Swearing is in
  * because people swear when they are blocking somebody, and leaving it out
  * would have made "block this asshole" the one phrasing that needed a second
@@ -946,7 +946,7 @@ const FILLER = new Set([
  *
  * So: exactly one account named, and every other word is filler. Anything
  * carrying its own verb falls through to the analyst, which is the safe
- * direction to be wrong in -- a question answered as a report is a worse failure
+ * direction to be wrong in. A question answered as a report is a worse failure
  * than a report answered as a question.
  *
  * @returns {string|null} the actor, or null if this is not a lookup
@@ -989,7 +989,7 @@ export function parseLookup(text, { links = [], mentions = [] } = {}) {
  * Is this message just putting a post in front of the bot?
  *
  * Same narrow rule as parseLookup, for the same reason. Sharing a post should
- * scan it -- a scan is a form and costs no model call -- but "what is the
+ * scan it (a scan is a form and costs no model call), but "what is the
  * sentiment of the replies to this" carries its own verb and belongs to the
  * analyst.
  *
@@ -1055,12 +1055,12 @@ const TRUNCATED_LINK = /(\.\.\.|…)|bsky\.app|\/profile\//;
 /**
  * "block" with one target and nothing else to it: the quick lane.
  *
- * Most of what the owner sends is this -- a shared post and the word "block",
- * often twenty in an evening -- and it never needed a model. One verb (block or
+ * Most of what the owner sends is this: a shared post and the word "block",
+ * often twenty in an evening. It never needed a model. One verb (block or
  * unblock), exactly one account (a typed handle, a pasted profile or post link,
  * or the author of the attached post), and every other word filler. Anything
- * more -- two accounts, "and everyone who liked it", a reason with its own
- * verb -- returns null and goes to the agent, which is the safe direction to be
+ * more (two accounts, "and everyone who liked it", a reason with its own
+ * verb) returns null and goes to the agent, which is the safe direction to be
  * wrong in.
  *
  * A typed account AND an attached post is ambiguous (block the poster, or
@@ -1215,7 +1215,7 @@ export function parseWatchCommand(text, { embedUri = null, links = [] } = {}) {
   if (/^(stop watching|unwatch|stop watch|done watching)\b/.test(lower)) {
     return { action: 'unwatch', target };
   }
-  // "watch this", "watch https://...", "keep an eye on it" -- but not "watch
+  // "watch this", "watch https://...", "keep an eye on it", but not "watch
   // out, this one is nasty", which is a warning with a post attached.
   if (
     !/^(?:watch|monitor|keep (?:an eye on|watching))(?:\s+(?:this|that|it|the|my|bsky\.app|https?:\/\/|at:\/\/)|\s*[.!]*$)/.test(

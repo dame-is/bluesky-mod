@@ -526,8 +526,8 @@ export async function runTriage(
     gone: after.filter((r) => r.triage === 'gone').length,
     counts: countLabels(after),
     // What is left to DO, as opposed to what was found. A menu offering to add
-    // 231 accounts when 182 of them are already on the list is offering a
-    // number that describes nothing anyone can act on.
+    // a few hundred accounts when most of them are already on the list is
+    // offering a number that describes nothing anyone can act on.
     pending: countLabels(after.filter(addable)),
     total: after.length,
   };

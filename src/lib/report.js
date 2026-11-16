@@ -280,8 +280,8 @@ export function planActions(plan) {
   }
 
   // Sorting by band tells you who would notice. On a post with hundreds of
-  // quotes that is 639 UNKNOWN and no way to tell the person who wrote an
-  // insult from the person arguing about a policy -- so when there are words to
+  // quotes that is mostly UNKNOWN, with no way to tell the person who wrote an
+  // insult from the person arguing about a policy. So when there are words to
   // read, offer to read them BEFORE offering to add everyone.
   if (plan.withText) {
     out.push({
