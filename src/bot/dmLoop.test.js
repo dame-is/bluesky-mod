@@ -10,8 +10,7 @@ import {
 
 describe('a post shared into a DM', () => {
   // Sharing from the Bluesky app puts no link in the text: the post travels in
-  // embed.record.uri. Scanning the text found nothing and the analyst answered
-  // "no link in your message" about a message with a post attached to it.
+  // embed.record.uri.
   const embed = (uri) => ({ record: { uri, cid: 'bafy' } });
 
   it('finds the uri in the embed', () => {
@@ -91,8 +90,8 @@ describe('help', () => {
   const cmd = { action: 'help', needsTarget: false, raw: 'help' };
 
   it('answers with no session at all', async () => {
-    // It returns before the writeAgent guard on purpose: asking what the thing
-    // does is the one question that should work when nothing else does.
+    // Help returns before the writeAgent guard on purpose: asking what the
+    // bot does should work when nothing else does.
     const out = await runCommand(cmd, null, { canWrite: true });
     expect(out.text).toContain('WHAT THE NETWORK IS SAYING');
     expect(out.text).toContain('pulse');
@@ -175,7 +174,7 @@ describe('agent replies in a DM', () => {
     );
   });
 
-  it('sends "^" to the stronger model, and a lone "^" to the ordinary one', () => {
+  it('sends "^" to the escalation model, and a lone "^" to the agent model', () => {
     expect(routeFor('^ what is the vibe here', { mode: 'agent' })).toEqual({
       route: 'agent',
       escalate: true,

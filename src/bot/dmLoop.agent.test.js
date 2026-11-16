@@ -1,11 +1,10 @@
 // One whole DM pass in agent mode, against an in-memory database and a fake
-// chat service. The unit tests pin routeFor and the tools separately; this is
-// the wiring between them, the part a live probe cannot reach without moving
-// the real cursor.
+// chat service. The unit tests pin routeFor and the tools separately; this
+// covers the wiring between them.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const db = { dm_cursor: [{ id: 1, cursor: 'c0' }], dm_choice: [], writes: [] };
+const db = { dm_cursor: [], dm_choice: [], writes: [] };
 
 vi.mock('./db.js', () => ({
   select: vi.fn(async (table, opts = {}) => {
@@ -17,6 +16,7 @@ vi.mock('./db.js', () => ({
   update: vi.fn(async () => {}),
   upsert: vi.fn(async (table, rows) => {
     db.writes.push({ table, rows });
+    if (table === 'dm_cursor') db.dm_cursor = rows.map((r) => ({ ...r }));
     if (table === 'dm_choice') {
       for (const row of rows) {
         const i = db.dm_choice.findIndex((r) => r.convo_id === row.convo_id);
@@ -88,6 +88,7 @@ const io = {
 };
 
 beforeEach(() => {
+  db.dm_cursor = [{ id: 1, cursor: 'c0' }];
   db.dm_choice.length = 0;
   db.writes.length = 0;
 });
@@ -147,8 +148,9 @@ describe('a DM pass in agent mode', () => {
   it('runs a live classic menu option for a bare number, and the agent otherwise', async () => {
     db.dm_choice.push({
       convo_id: 'convo1',
-      options: [{ label: 'Help', command: 'help' }],
-      created_at: new Date().toISOString(),
+      options: [
+        { label: 'Help', command: 'help', offered_at: new Date().toISOString() },
+      ],
     });
     const generate = vi.fn(async () => ({ text: 'ok', steps: [] }));
     const first = chatWith('1');
@@ -180,7 +182,7 @@ describe('a DM pass in agent mode', () => {
   });
 
   it('lets a menu lapse thirty minutes after it was offered, however recently a post was remembered', async () => {
-    // Offered forty minutes ago; the row was touched since by a block+post.
+    // Offered forty minutes ago; a post was remembered on the same row since.
     db.dm_choice.push({
       convo_id: 'convo1',
       options: [
@@ -190,7 +192,8 @@ describe('a DM pass in agent mode', () => {
           offered_at: new Date(Date.now() - 40 * 60_000).toISOString(),
         },
       ],
-      created_at: new Date().toISOString(),
+      last_post: 'at://did:plc:author/app.bsky.feed.post/3abc',
+      last_post_at: new Date().toISOString(),
     });
     const generate = vi.fn(async () => ({ text: 'ok', steps: [] }));
     const { chat } = chatWith('1');
@@ -229,7 +232,7 @@ describe('a DM pass in agent mode', () => {
     );
   });
 
-  it('is unchanged in classic mode', async () => {
+  it('gives the classic analyst no write tools', async () => {
     const { chat } = chatWith('what is going on');
     const generate = vi.fn(async () => ({ text: 'ok', steps: [] }));
     await runDmPass({
@@ -246,5 +249,74 @@ describe('a DM pass in agent mode', () => {
     const { tools } = generate.mock.calls[0][0];
     expect(tools).not.toHaveProperty('add_to_list');
     expect(tools).toHaveProperty('look_up_account');
+  });
+
+  it('never answers its own messages, even with its DID on the roster', async () => {
+    const { chat, sent } = chatWith('hello');
+    const generate = vi.fn(async () => ({ text: 'ok', steps: [] }));
+    const fromBot = await chat.chat.bsky.convo.getLog();
+    fromBot.data.logs[0].message.sender.did = BOT;
+    chat.chat.bsky.convo.getLog = async () => fromBot;
+    await runDmPass({
+      chat,
+      writeAgent: { session: { did: BOT } },
+      getIo: async () => io,
+      botDid: BOT,
+      roster: { ...roster, answers: () => true, writes: () => true },
+      generate,
+      mode: 'agent',
+      model: 'test/model',
+    });
+    expect(generate).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('answers the first message on an account whose chat log was empty at start', async () => {
+    db.dm_cursor = [];
+    const message = {
+      $type: 'chat.bsky.convo.defs#logCreateMessage',
+      convoId: 'convo1',
+      message: {
+        id: 'm1',
+        text: 'hello',
+        sender: { did: OWNER },
+        sentAt: new Date().toISOString(),
+      },
+    };
+    let logs = [];
+    const sent = [];
+    const chat = {
+      chat: {
+        bsky: {
+          convo: {
+            // No cursor at all while the log is empty.
+            getLog: async () =>
+              logs.length ? { data: { cursor: 'c1', logs } } : { data: { logs } },
+            getMessages: async () => ({ data: { messages: [] } }),
+            sendMessage: async ({ message: m }) => {
+              sent.push(m.text);
+            },
+          },
+        },
+      },
+    };
+    const generate = vi.fn(async () => ({ text: 'Hello.', steps: [] }));
+    const run = () =>
+      runDmPass({
+        chat,
+        writeAgent: { session: { did: BOT } },
+        getIo: async () => io,
+        botDid: BOT,
+        roster,
+        generate,
+        mode: 'agent',
+        model: 'test/model',
+      });
+
+    expect((await run()).coldStart).toBe(true);
+    logs = [message];
+    await run();
+    expect(sent).toEqual(['Hello.']);
+    expect(db.dm_cursor[0].cursor).toBe('c1');
   });
 });

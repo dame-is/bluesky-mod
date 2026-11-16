@@ -1,37 +1,30 @@
-// One pass of the moderator account's DM intake. src/index.js runs it on a
-// timer.
+// One pass of the bot account's DM intake. src/index.js runs it on a timer.
 //
-// TWO RULES hold this together, and both are about blast radius:
+// Two rules hold this together, and both are about blast radius:
 //
-//  1. Only senders on the roster are answered: the owner, and anyone the
-//     owner has added (see src/lib/senders.js). Every other sender is skipped
-//     silently. The bot account is reachable by anyone who can DM it, and the
-//     thing on the other end reads its input as instructions, so the sender
-//     check is the security boundary, not the prompt.
-//  2. The analyst has no write tools. It looks and explains. Acting still goes
-//     through the gate with the owner's approval, so a fully prompt-injected
-//     turn costs a wrong paragraph.
+//  1. Only senders on the roster are answered (src/lib/senders.js); everyone
+//     else is skipped without a reply. Anyone can DM the bot, and the model
+//     reads its input as instructions, so the sender check is the security
+//     boundary, not the prompt.
+//  2. In classic mode the analyst has no write tools. It looks and explains,
+//     and acting goes through a typed command or a numbered menu, so a fully
+//     prompt-injected turn costs a wrong paragraph.
 //
-// AGENT MODE (MOD_DM_MODE=agent) relaxes rule 2 on purpose: the model gets the
-// write tools and is talked to in sentences rather than commands. Rule 1 does
-// not move (the roster still decides who is answered and who may write), and
-// the classic path below is still here, reached by a leading "!" or by
-// answering a menu a classic reply just offered. See src/bot/operator.js.
+// Agent mode (MOD_DM_MODE=agent) relaxes rule 2 on purpose: the model gets the
+// write tools and is talked to in sentences. Rule 1 still decides who is
+// answered and who may write, and the classic path is reached by a leading
+// "!" or by answering a live classic menu. See src/bot/operator.js.
 //
-// AT MOST ONCE, on purpose. The cursor advances before any reply is sent, so a
-// message that crashes the turn is dropped rather than replayed. The other
-// choice (advance after) turns one poisoned message into an infinite loop of
-// DMs to the owner, which is worse than one missed answer they can see went
-// missing.
+// At most once, on purpose. The cursor advances before any reply is sent, so
+// a message that crashes its turn is dropped rather than replayed. Advancing
+// after would turn one poisoned message into an endless loop of DMs.
 
 import { generateText } from 'ai';
 import { modelsEnabled } from '../models.js';
 
 import { OWNER_DID } from '../constants.js';
 import { rosterFromEnv } from '../lib/senders.js';
-import {
-  ownLinkFacets,
-} from '../lib/links.js';
+import { ownLinkFacets, postWebUrl } from '../lib/links.js';
 import {
   resolveActor,
   extractTargets,
@@ -97,11 +90,10 @@ import {
   historyFor,
   shortCode,
 } from './bulkPlan.js';
-import { loadAgentConfig, LIMITS } from './agentConfig.js';
+import { loadAgentConfig, clampLimits } from './agentConfig.js';
 import { operate, fallbackText } from './operator.js';
 import { shortModel } from './tiers.js';
 import { authorOf } from '../lib/trigger.js';
-import { postWebUrl } from '../lib/links.js';
 import {
   REACTION,
   YES_REACTIONS,
@@ -129,7 +121,7 @@ import { startWatch, stopWatch, liveWatches, watchesText } from './watch.js';
 
 /**
  * Which surface answers by default. Anything but "agent" is classic, so an
- * unset or misspelt value keeps the behaviour that was there before.
+ * unset or misspelt value gets the mode where the model holds no write tools.
  */
 export function normaliseMode(value) {
   return String(value ?? '')
@@ -149,7 +141,7 @@ const CLASSIC_PREFIX = /^\s*!(?=\s*[\p{L}\p{N}@])/u;
 
 /**
  * "^ what's going on in these replies" sends that one message straight to the
- * stronger model. The cheap model never sees it.
+ * escalation model. The agent model never sees it.
  */
 const STEP_UP_PREFIX = /^\s*\^\s*/;
 
@@ -160,7 +152,7 @@ const STEP_UP_PREFIX = /^\s*\^\s*/;
  *   choice   a bare number: classic if the last reply offered a live menu,
  *            the agent otherwise
  *   agent    the agent, with write tools for a writer; `escalate` when the
- *            message asked for the stronger model
+ *            message asked for the escalation model
  *
  * Pure, so the routing rule is testable without a chat service.
  */
@@ -182,13 +174,10 @@ export function routeFor(text, { mode = 'classic' } = {}) {
 }
 
 /**
- * The post attached to a message, if it was SHARED rather than pasted.
+ * The post attached to a message, if it was shared rather than pasted.
  *
- * Sharing a post to a DM from the Bluesky app does not put a link in the text.
- * The text is whatever was typed alongside it and the post travels in
- * `embed.record.uri`, so scanning the message for a URL finds nothing and the
- * analyst answers "no link in your message" about a message with a post
- * visibly attached to it. Which is true of the text and useless to the reader.
+ * Sharing a post into a DM from the Bluesky app puts no link in the text: the
+ * post travels in `embed.record.uri`, so scanning the text alone misses it.
  */
 export function sharedPostUri(message) {
   const uri = message?.embed?.record?.uri;
@@ -196,9 +185,10 @@ export function sharedPostUri(message) {
 }
 
 /**
- * What the model is asked: what the owner typed, plus the shared post if there is
- * one. The added line is derived by us from the record rather than copied from
- * anyone's writing, so it is not untrusted input.
+ * What the model is asked: what the sender typed, plus the shared post, the
+ * full links and the mentioned DIDs when there are any. Those lines are built
+ * by code from the sender's own message, not copied from anyone else's
+ * writing, so they are not untrusted input.
  */
 export function composeMessage(message) {
   const text = message?.text || '';
@@ -208,9 +198,7 @@ export function composeMessage(message) {
   if (uri) extra.push(`The post the owner shared: ${uri}`);
 
   // A client truncates the visible text of a pasted link and keeps the whole
-  // URI in the facet, so the analyst was reading "bsky.app/profile/stra..."
-  // and correctly reporting that it could not resolve it. These come from
-  // the owner's own message, so they are derived fact, not untrusted input.
+  // URI in the facet, so the text alone can hold "bsky.app/profile/stra...".
   const links = facetLinks(message).filter((l) => !text.includes(l));
   if (links.length)
     extra.push(`Full links in that message: ${links.join(' ')}`);
@@ -223,63 +211,58 @@ export function composeMessage(message) {
 }
 
 /**
- * How long a numbered option stays live.
- *
- * Expired rather than deleted: a stale "1" falls through to the analyst as a
- * question instead of firing a command the owner typed a number for an hour ago
- * and has since forgotten.
+ * How long a numbered menu, and a remembered post, stay live. A stale "1"
+ * falls through to the analyst as a question instead of running a command
+ * offered an hour ago.
  */
 const CHOICE_TTL_MS = 30 * 60_000;
+
+/** True while `at` (an ISO time) is within the TTL. A missing time is stale. */
+const fresh = (at, now = Date.now()) =>
+  now - Date.parse(at) <= CHOICE_TTL_MS;
 
 /**
  * The stored options, if they are still live.
  *
- * Timed from when the OPTIONS were offered, which each one carries. The row's
- * created_at is rewritten whenever a post is remembered, so an evening of
- * block+post messages kept renewing a menu shown hours earlier, and a bare "2"
- * could still run its bulk approve. Rows from before options carried a time
- * fall back to created_at.
+ * Timed from when the options were offered, which each one carries, because
+ * the row is also rewritten when a post is remembered, and that must not
+ * renew a menu shown hours earlier.
  */
 function liveOptions(row, now = Date.now()) {
   if (!row?.options?.length) return null;
-  const at = row.options[0].offered_at ?? row.created_at;
-  if (now - Date.parse(at) > CHOICE_TTL_MS) return null;
-  return row.options;
+  return fresh(row.options[0].offered_at, now) ? row.options : null;
 }
 
 async function offerChoices(convoId, options, lastPost) {
   if (!options?.length && !lastPost) return;
   const now = new Date().toISOString();
-  const row = { convo_id: convoId, created_at: now };
+  const row = { convo_id: convoId };
   if (options?.length) {
     row.options = options.map((o) => ({ ...o, offered_at: now }));
   }
   if (lastPost) {
     row.last_post = lastPost;
-    row.last_post_at = new Date().toISOString();
+    row.last_post_at = now;
   }
   await upsert('dm_choice', [row]).catch(() => {});
 }
 
 /**
  * Forget the menu. An agent reply offers none, and a "2" sent after it must
- * reach the agent rather than an option a classic reply offered ten minutes
- * earlier.
+ * reach the agent rather than an option an earlier classic reply offered.
  */
 async function clearChoices(convoId) {
-  await upsert('dm_choice', [
-    { convo_id: convoId, options: [], created_at: new Date().toISOString() },
-  ]).catch(() => {});
+  await upsert('dm_choice', [{ convo_id: convoId, options: [] }]).catch(
+    () => {},
+  );
 }
 
 /**
- * The post the owner last put in front of the bot here.
+ * The post last put in front of the bot in this conversation, while live.
  *
- * "add likers" with no link should not mean "send me that post again". It
- * was already sent, and asking twice is the interface forgetting what it was
- * just told. Only ever written from the owner's own message, so the target of
- * a bulk action still comes from them rather than from anything the analyst
- * read.
+ * Lets "add likers" with no link mean the post just sent. Only ever written
+ * from the sender's own message, so the target of a bulk action comes from
+ * them rather than from anything the analyst read.
  */
 async function lastPost(convoId) {
   const rows = await select('dm_choice', {
@@ -287,32 +270,20 @@ async function lastPost(convoId) {
     eq: { convo_id: convoId },
   }).catch(() => []);
   const row = rows?.[0];
-  if (!row?.last_post) return null;
-  if (Date.now() - Date.parse(row.last_post_at) > CHOICE_TTL_MS) return null;
+  if (!row?.last_post || !fresh(row.last_post_at)) return null;
   return row.last_post;
 }
 
 /**
- * Record the post the owner just put in front of the bot.
- *
- * REMEMBERED ON SIGHT, not only when a scan happens to run. The only writer
- * used to be the post-scan path, so attaching a post and asking about it IN
- * WORDS ("there are a lot of quote posts on this that are toxic") sent the
- * turn to the analyst and recorded nothing. "add quoters" one message later was
- * then answered with "send me the post", about a post two messages up the
- * screen. The interface forgetting what it was just told is the whole thing
- * last_post exists to prevent, and it was only doing it on the path that needed
- * it least.
- *
- * Still only ever written from the owner's own message, so the target of a bulk
- * action comes from them rather than from anything the analyst read.
+ * Remember the post in the sender's message. Done on every route, so a post
+ * attached to a question in words ("the quotes on this are toxic") is still
+ * there for "add quoters" one message later.
  */
 async function rememberPost(convoId, uri) {
   if (!uri) return;
   await upsert('dm_choice', [
     {
       convo_id: convoId,
-      created_at: new Date().toISOString(),
       last_post: uri,
       last_post_at: new Date().toISOString(),
     },
@@ -322,7 +293,7 @@ async function rememberPost(convoId, uri) {
 /** The command behind a numbered reply, if it is still live. */
 async function takeChoice(convoId, n) {
   const rows = await select('dm_choice', {
-    select: 'options,created_at',
+    select: 'options',
     eq: { convo_id: convoId },
   }).catch(() => []);
   return liveOptions(rows?.[0])?.[n - 1]?.command ?? null;
@@ -364,12 +335,15 @@ function renderReview(plan, review) {
   return { text: lines.join('\n'), options };
 }
 
+/** Every band but PROTECTED. */
+const ALL_BANDS = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED'];
+
 /**
  * Run one typed command and return what to say back.
  *
- * Every branch is deterministic. Nothing here consults the model, and the only
- * inputs are the owner's literal text and what Constellation and score.js
- * returned.
+ * No branch asks a model what to do. The inputs are the sender's literal text
+ * and what Constellation and score.js returned. Triage calls a model to label
+ * posts, and adds nobody.
  */
 export async function runCommand(
   cmd,
@@ -386,21 +360,15 @@ export async function runCommand(
 ) {
   const say = (text, options = null) => ({ text, options });
 
-  // The gate, before any branch that could reach a repo. Checked here rather
-  // than only where the options are built, because a command can arrive as
-  // typed text and never pass through a menu at all.
+  // The gate, before any branch that could reach a repo. Checked here and not
+  // only where menus are built, because a command can arrive as typed text.
   if (!canWrite && isWrite(cmd)) {
     return say(readOnlyReply(cmd));
   }
 
-  // A verb arrived with nobody and nothing to act on. Every branch here asks
-  // rather than guesses, which is the rule the whole command surface turns on.
-  //
-  // `history` and `undo` never land here any more (one takes an optional
-  // account, the other defaults to the last plan), except when undo was handed
-  // a token that was MEANT as a code and is not one. That case gets an answer
-  // naming the token, not a fallback that acts on a batch the owner did not
-  // name.
+  // A verb with nothing to act on. Every branch asks rather than guesses.
+  // `undo` lands here only when handed a token meant as a code that is not
+  // one: the answer names the token instead of undoing a plan nobody named.
   if (cmd.needsTarget) {
     if (cmd.action === 'plan') {
       return say(nudge('post'));
@@ -423,8 +391,8 @@ export async function runCommand(
   // Before the writeAgent guard: asking what the thing does needs no session,
   // and a read-only sender is shown the read-only half.
   if (cmd.action === 'help') {
-    // Derived, not written out, for the same reason every other option is: a
-    // hand-typed label is one that can quietly stop describing its command.
+    // The label comes from the parse, like every other option's, so it cannot
+    // drift from its command.
     const hasModel = modelsEnabled();
     return say(
       helpText({ canWrite, hasModel }),
@@ -494,9 +462,9 @@ export async function runCommand(
     if (cmd.action === 'triage') {
       const out = await runTriage(plan, { generate, model, log });
       const { counts } = out;
+      // How many were read as hostile and how many are not yet acted on can
+      // differ, and a button can only be about the second.
       const left = out.pending || counts;
-      // "231 hostile" and "49 you have not acted on" are different numbers and
-      // the second is the one a button can be about.
       const seen = (k) =>
         left[k] === counts[k]
           ? `${counts[k]}`
@@ -556,8 +524,8 @@ export async function runCommand(
       return say(`Cancelled ${cmd.code}. Nothing was added.`);
     }
 
-    // A label review prints the WORDS, which is the whole point: a label
-    // nobody can check is just a model's opinion with a number attached.
+    // A label review prints the words: a label nobody can check is only a
+    // model's opinion.
     if (cmd.action === 'review' && cmd.labels?.length) {
       const label = cmd.labels[0];
       const out = await reviewTriage(plan, label);
@@ -584,9 +552,8 @@ export async function runCommand(
         (r) =>
           `${r.band} - "${String(r.triage_quote).replace(/\s+/g, ' ').slice(0, 160)}"`,
       );
-      // Said plainly, because 231 quotes do not get read in a DM and a menu
-      // that implies they were is the lie this whole system is against. What
-      // this is, is a spot check on the LABELLING before a bulk action.
+      // Hundreds of quotes do not get read in a DM. This is a spot check on
+      // the labelling before a bulk action, and the header says so.
       const head =
         `${out.pending} read as ${label} and not yet on the list` +
         (out.added ? `, ${out.added} already added` : '') +
@@ -611,7 +578,7 @@ export async function runCommand(
       return renderReview(plan, review);
     }
 
-    // The personal path: named accounts the owner read and decided on.
+    // The personal path: named accounts the sender read and decided on.
     if (cmd.actors?.length) {
       const out = await applyPlanToActors(writeAgent, plan, cmd.actors);
       return say(out.message);
@@ -634,7 +601,7 @@ export async function runCommand(
     const bands = cmd.bands.length
       ? cmd.bands
       : cmd.kinds?.length
-        ? ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED']
+        ? ALL_BANDS
         : [];
     if (!bands.length) {
       return say(
@@ -660,11 +627,9 @@ export async function runCommand(
     );
   }
 
-  // Wording this could not read as "whoever wrote the attached post". Name the
-  // author, show what the gate knows about them, and let the owner say. Not a
-  // refusal and not a guess: the account is right there in the message, so the
-  // useful move is to put it in front of them rather than to argue about
-  // phrasing.
+  // Wording that might not mean the attached post's author. Name the author,
+  // show what the gate knows about them, and let the sender choose, rather
+  // than refuse or guess.
   if (cmd.fromPost && cmd.confirm) {
     const found = lookUp ? await lookUp(cmd.actor).catch(() => null) : null;
     if (!found) {
@@ -700,11 +665,9 @@ export async function runCommand(
     );
   }
 
-  // An actor that came out of an attached post is a DID, and "Added
-  // did:plc:2lp64i... to the list" is a receipt nobody can check. Resolve it to
-  // a handle and SAY where it came from: acting on an inference without showing
-  // it is how you find out later that the post on screen was a quote of
-  // somebody else's.
+  // An actor taken from an attached post is a DID, which makes a receipt
+  // nobody can check. Resolve it to a handle and say whose post it was, so a
+  // sender who meant the author of a quoted post sees the mistake at once.
   let actor = cmd.actor;
   let preface = '';
   if (cmd.fromPost) {
@@ -718,9 +681,8 @@ export async function runCommand(
     lookUp,
   });
 
-  // The way back, and the way to look closer, offered with the receipt while it
-  // is still in front of them. A single block is a plan of one, so "undo last"
-  // undoes exactly this and nothing else.
+  // The way back, and the way to look closer, offered with the receipt. A
+  // single block is a plan of one, so "undo last" undoes exactly this.
   const at = `@${String(actor).replace(/^@/, '')}`;
   const after =
     out.ok && cmd.action === 'list_add'
@@ -744,9 +706,9 @@ async function readHistory(chat, entry, { botDid, limits }) {
       limit: 40,
     });
     return historyFrom(page.data.messages, {
-      // The ASKER. With a roster this is not always the owner, and labelling a
-      // guest's own messages as somebody else's turns their follow-up into a
-      // conversation the model thinks it was watching rather than having.
+      // The asker, who is not always the owner. Labelling a guest's own
+      // messages as someone else's makes the model read the conversation as
+      // one it watched rather than one it is in.
       selfDid: entry.message?.sender?.did ?? OWNER_DID,
       botDid,
       beforeId: entry.message.id,
@@ -754,8 +716,8 @@ async function readHistory(chat, entry, { botDid, limits }) {
       maxAgeMs: limits.historyHours ? limits.historyHours * 3600_000 : null,
     });
   } catch {
-    // A conversation we cannot read is still a question we can answer, just
-    // without context. Better a reply that misses the reference than silence.
+    // A conversation we cannot read is still a question we can answer,
+    // without context. A reply that misses a reference beats silence.
     return [];
   }
 }
@@ -774,10 +736,9 @@ const AGENT_ACK_AFTER_MS = 5000;
 /**
  * One message, answered by the agent.
  *
- * The 👀 on the owner's message is the ack. The text ack on a timer is only the
- * fallback for when that reaction did not land: a scan-and-triage is a minute
- * of silence that reads as broken, but "Thinking." under every question was
- * one more message per answer.
+ * The 👀 on the sender's message is the ack. The text ack on a timer is only
+ * for when that reaction did not land, so a long turn does not read as broken
+ * and a short one costs no extra message.
  *
  * @returns {Promise<object>} the turn record, with `outcome`: 'done' when the
  *   list changed, 'failed' when the turn failed, null for an answer.
@@ -820,8 +781,8 @@ async function answerAsAgent({
   ]);
 
   // History is read as text, so a post shared three messages ago is gone from
-  // it. Name the last one here, as derived fact from the owner's own messages, so
-  // "add the quoters too" has something to point at.
+  // it. Name the last one here, as derived fact from the sender's own
+  // messages, so "add the quoters too" has something to point at.
   let message = composeMessage(entry.message);
   if (remembered && !message.includes(remembered)) {
     message += `\n\n[The post last sent in this conversation: ${remembered}]`;
@@ -859,18 +820,17 @@ async function answerAsAgent({
   clearTimeout(timer);
   await spoke;
 
-  // A DM renders no markdown, and some models write it anyway: "**Main
-  // theme:**" arrives with its asterisks. Emphasis and headings only; anything
-  // else a model writes is left as written.
+  // A DM renders no markdown, and some models write it anyway. Emphasis and
+  // headings are removed; anything else is left as written.
   let text = plainText(reply.text) || fallbackText(reply);
-  // Said only when the stronger model answered because something went wrong
-  // (a stall, a failure, an empty answer). A hand-off the first model chose,
-  // or a "^" the owner typed, needs no footnote.
+  // Said only when the escalation model answered because something went
+  // wrong (a stall, a failure, an empty answer). A hand-off the first model
+  // chose, or a "^" the sender typed, needs no footnote.
   if (reply.escalated?.kind === 'failure') {
     text += `\n\n(${shortModel(reply.escalated.model)} answered this: ${reply.escalated.reason})`;
   }
   // A question a thumbs-up can answer: the line is written by code from what
-  // was stored, so what the owner agrees to is what runs.
+  // was stored, so what the sender agrees to is what runs.
   const asked = reply.pending || [];
   if (asked.length) {
     text += `\n\n${confirmLine(asked.map((p) => p.describe))}`;
@@ -901,8 +861,8 @@ async function answerAsAgent({
     );
   }
 
-  // One row per model and kind: the first wave, the second, the check. A
-  // single "dm-agent" row would put Sonnet's tokens and Jev's under one name.
+  // One row per model and kind (first wave, escalation, write check), so
+  // spend can be told apart by model.
   const usageRows = (reply.usages || [])
     .filter((u) => u.inputTokens || u.outputTokens)
     .map((u) => ({
@@ -950,7 +910,7 @@ async function answerAsAgent({
 /** Keyed options a card offered, while they are live, or null. */
 async function readCardChoices(convoId) {
   const rows = await select('dm_choice', {
-    select: 'options,created_at',
+    select: 'options',
     eq: { convo_id: convoId },
   }).catch(() => []);
   const row = rows?.[0];
@@ -958,18 +918,16 @@ async function readCardChoices(convoId) {
   return liveOptions(row);
 }
 
-/** Bands an engagement-kind approval reaches: every band but PROTECTED. */
-const ALL_BANDS = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED'];
 /** Bands a quick block calls out rather than doing quietly. */
 const LOUD_BANDS = new Set(['CONNECTED', 'NOTABLE']);
 
 /**
  * The quick lane: "block" or "unblock" with one target, no model.
  *
- * Quiet when there is nothing to say: a ✅ on the owner's message and a line in
- * the burst summary. Out loud when there is: PROTECTED, a CONNECTED or NOTABLE
- * account (done, but worth knowing), an unblock of someone who was not on the
- * list, or a failure.
+ * Quiet when there is nothing to say: a ✅ on the sender's message and a line
+ * in the burst summary. Out loud when there is: PROTECTED, a CONNECTED or
+ * NOTABLE account (done, but worth knowing), an unblock of someone who was
+ * not on the list, or a failure.
  */
 async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
   let out;
@@ -1021,7 +979,11 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
   return { outcome: 'done', quick: quick.action };
 }
 
-/** "hostile" on a card: read the replies and quotes, then add the hostile. */
+/**
+ * "hostile" on a card: read the replies and quotes, then add the hostile.
+ * Three rounds of triage at most; anything still unread is said, so the
+ * counts are not taken for the whole post.
+ */
 async function runHostile(code, { writeAgent, generate, model, log }) {
   const plan = await findPlan(code);
   if (!plan) return { text: `No plan with code ${code}.`, failed: true };
@@ -1032,9 +994,12 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   }
   const added = await applyPlanToTriage(writeAgent, plan, 'hostile');
   const c = out?.counts || {};
+  const unread = out?.remaining
+    ? ` ${out.remaining} not read yet; "triage ${code}" reads them.`
+    : '';
   return {
     text:
-      `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral. ${added.message}`,
+      `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${unread} ${added.message}`,
   };
 }
 
@@ -1219,8 +1184,8 @@ async function withoutModel({
     }
   }
 
-  // A post with no words. The card, or (if the owner set it that way) a block
-  // of whoever wrote it, through the quick lane.
+  // A post with no words. The card, or (with "barePost": "author" in the
+  // config file) a block of whoever wrote it, through the quick lane.
   const post = parsePostScan(text, { embedUri, links: msgLinks });
   if (post) {
     if (config?.barePost === 'author' && canWrite && writeAgent) {
@@ -1260,8 +1225,8 @@ async function withoutModel({
 }
 
 /** Send the summaries of bursts that have gone quiet. */
-async function flushSummaries(chat, { force = false, log = () => {} } = {}) {
-  for (const burst of takeDueSummaries({ force })) {
+async function flushSummaries(chat, { log = () => {} } = {}) {
+  for (const burst of takeDueSummaries()) {
     try {
       await chat.chat.bsky.convo.sendMessage({
         convoId: burst.convoId,
@@ -1279,32 +1244,33 @@ async function flushSummaries(chat, { force = false, log = () => {} } = {}) {
   }
 }
 
-/** How many messages one pass will answer. */
-export const MAX_TURNS = 5;
-
-/** How many waiting messages a persistent caller works through in one pass. */
+/**
+ * How many waiting messages one pass answers. Past that the oldest are
+ * skipped: after an outage, the latest messages are the ones worth answering.
+ */
 const MAX_BACKLOG = 30;
 
 /** Pages of getLog a cold start will walk to reach the live tail. */
 const COLD_START_MAX_PAGES = 50;
 
-export async function readCursor() {
+/**
+ * Where the last pass got to: a cursor, null when the log was empty at cold
+ * start (so read it from the beginning), or undefined before any pass.
+ */
+async function readCursor() {
   const rows = await select('dm_cursor', { select: 'cursor', eq: { id: 1 } });
-  return rows?.[0]?.cursor ?? null;
+  return rows?.length ? (rows[0].cursor ?? null) : undefined;
 }
 
 /**
- * Store the resume point, but only when it has actually moved.
- *
- * The DM poll runs every 2s by default, so writing unconditionally is 43,200
- * updates a day to a single row for the sake of the handful that change
- * anything. The write still happens BEFORE any reply is sent, which is the
- * property that matters: it is what makes a crashed turn a dropped message
- * rather than a replayed one.
+ * Store the resume point, only when it has moved: the poll runs every couple
+ * of seconds and almost never finds anything. The write happens before any
+ * reply is sent, which is what makes a crashed turn a dropped message rather
+ * than a replayed one.
  */
-let lastWritten = null;
+let lastWritten;
 
-export async function writeCursor(cursor) {
+async function writeCursor(cursor) {
   if (cursor === lastWritten) return;
   await upsert('dm_cursor', [
     { id: 1, cursor, updated_at: new Date().toISOString() },
@@ -1315,38 +1281,43 @@ export async function writeCursor(cursor) {
 /**
  * Walk getLog to its end and remember where that was, answering nothing.
  *
- * `dm_cursor` starts empty, and getLog with no cursor replays the whole
- * conversation history from the beginning. Without this, the first run answers
- * whatever the owner happened to send weeks ago as though it had just arrived.
- * The Jetstream subscription starts from the live tail for the same reason.
+ * getLog with no cursor replays the whole chat history from the beginning, so
+ * without this the first run would answer messages sent weeks ago as though
+ * they had just arrived. The Jetstream subscription starts from the live tail
+ * for the same reason.
  */
-export async function seekToTail(chat, { log = () => {} } = {}) {
+async function seekToTail(chat, { log = () => {} } = {}) {
   let cursor = null;
+  let seen = 0;
   for (let page = 0; page < COLD_START_MAX_PAGES; page += 1) {
     const res = await chat.chat.bsky.convo.getLog(cursor ? { cursor } : {});
     const entries = res.data.logs || [];
+    seen += entries.length;
     if (res.data.cursor) cursor = res.data.cursor;
     if (!entries.length) break;
   }
-  if (cursor) await writeCursor(cursor);
+  // An empty log can come back with no cursor. Store null for it, so the next
+  // pass reads the log from the start and the first message anyone sends is
+  // answered rather than skipped as history.
+  if (cursor || !seen) await writeCursor(cursor);
   log('DM cursor initialised at the live tail', { cursor });
   return cursor;
 }
 
 /**
- * Answer everything the owner has sent since the stored cursor.
+ * Answer everything roster senders have sent since the stored cursor.
  *
  * @param {object} opts
  * @param {object} opts.chat      an agent proxied to the chat service
- * @param {object} [opts.writeAgent] the UNPROXIED agent, for list commands.
- *   Repo writes must not go through the chat proxy, and without this commands
- *   are simply unavailable rather than silently misrouted.
+ * @param {object} [opts.writeAgent] the unproxied agent, for list commands.
+ *   Repo writes must not go through the chat proxy; without this agent,
+ *   commands are unavailable rather than misrouted.
  * @param {Function} opts.getIo   async () => tool backends, from makeIo().
- *   A FACTORY, not an object: building it loads the whole vouch snapshot, and
- *   a poll that finds nothing (almost every poll) must not pay for that. The
- *   same laziness is what lets the snapshot be released while idle.
+ *   A factory, not an object: building it loads the vouch snapshot, and a
+ *   poll that finds nothing (almost every poll) must not pay for that. The
+ *   same laziness lets the snapshot be released while idle.
  * @param {string} [opts.model]
- * @param {string} opts.botDid    the moderator account's DID
+ * @param {string} opts.botDid    the bot account's DID
  * @param {Function} [opts.generate]  injected for tests
  * @returns {Promise<{ answered: number, scanned: number, turns: Array }>}
  */
@@ -1354,30 +1325,29 @@ export async function runDmPass({
   chat,
   writeAgent,
   getIo,
-  model = process.env.MOD_AGENT_MODEL || DEFAULT_MODEL,
+  model = DEFAULT_MODEL,
   botDid,
   roster = rosterFromEnv(process.env, OWNER_DID),
   generate = generateText,
   extraTools = {},
   mode = normaliseMode(process.env.MOD_DM_MODE),
-  operatorModel = process.env.MOD_OPERATOR_MODEL || null,
-  // A caller that keeps polling can hold a burst open until it goes quiet; a
-  // one-shot caller sends its summaries before it ends.
-  persistent = false,
   log = () => {},
 }) {
   const cursor = await readCursor();
-  if (!cursor) {
+  if (cursor === undefined) {
     await seekToTail(chat, { log });
     return { answered: 0, scanned: 0, turns: [], coldStart: true };
   }
 
-  const res = await chat.chat.bsky.convo.getLog({ cursor });
+  const res = await chat.chat.bsky.convo.getLog(cursor ? { cursor } : {});
   const entries = res.data.logs || [];
 
+  // Never the bot's own messages, even if its DID is on the roster: answering
+  // itself would loop forever.
   const inbound = entries.filter(
     (entry) =>
       entry.$type === 'chat.bsky.convo.defs#logCreateMessage' &&
+      entry.message?.sender?.did !== botDid &&
       roster.answers(entry.message?.sender?.did) &&
       typeof entry.message?.text === 'string',
   );
@@ -1396,24 +1366,18 @@ export async function runDmPass({
   if (res.data.cursor) await writeCursor(res.data.cursor);
 
   if (!inbound.length && !reactions.length) {
-    await flushSummaries(chat, { force: !persistent, log });
+    await flushSummaries(chat, { log });
     return { answered: 0, scanned: entries.length, turns: [] };
   }
 
-  // Only now is any of this worth loading. The config file is read per pass
-  // rather than cached in process, so an edit to it is felt on the next message
-  // instead of whenever a cache happened to expire. It is one file read against
-  // a model call that takes five to twenty seconds.
+  // Only now is any of this worth loading. The config file is read per pass,
+  // not cached, so an edit takes effect on the next message; one file read is
+  // small next to a model call.
   const [io, config] = await Promise.all([getIo(), loadAgentConfig()]);
   const openers = parseOpeners(config?.openers);
-  // The record can move these within a range someone chose; it cannot set
-  // maxSteps to 400. See LIMITS in agentConfig.js.
-  const limits = config?.limits || {
-    maxTurns: LIMITS.maxTurns.def,
-    maxSteps: LIMITS.maxSteps.def,
-    historyHours: LIMITS.historyHours.def,
-    reviewRows: LIMITS.reviewRows.def,
-  };
+  // The config file can move limits within the ranges in agentConfig.js,
+  // never past them.
+  const limits = config?.limits || clampLimits({});
   const activeModel = config?.model || model;
 
   /** Send to a convo, chunked, and hand back the message ids. */
@@ -1422,10 +1386,10 @@ export async function runDmPass({
     async (text, { allow = [] } = {}) => {
       const ids = [];
       for (const chunk of chunkForDm(text)) {
-        // Facets only for links this codebase built. chunkForDm splits on
-        // whitespace before it ever splits a word, and these are ~70
-        // characters against a 950 limit, so one never straddles a chunk. That
-        // matters, because a facet range is computed per chunk.
+        // Facets only for links this codebase built. A facet range is
+        // computed per chunk, and chunkForDm splits on whitespace before it
+        // splits a word, so a link of about 70 characters never straddles
+        // two chunks of 950.
         const facets = ownLinkFacets(chunk, { allow });
         const sent = await chat.chat.bsky.convo.sendMessage({
           convoId,
@@ -1439,39 +1403,46 @@ export async function runDmPass({
   const turns = [];
 
   // A 👍 or 👎 on a question the bot asked runs or drops exactly what it
-  // described. Nothing else about a reaction is read.
+  // described. Nothing else about a reaction is read. Each one is caught on
+  // its own: the cursor has moved, so a throw here would drop every message
+  // below it unanswered.
   for (const r of reactions) {
-    const value = r.reaction?.value;
-    if (!YES_REACTIONS.has(value) && !NO_REACTIONS.has(value)) continue;
-    const pending = await readPending(r.convoId);
-    if (!pending?.message_ids?.includes(r.message?.id)) continue;
-    await clearPending(r.convoId);
-    const send = sendTo(r.convoId);
-    if (NO_REACTIONS.has(value)) {
-      await send('Okay, nothing changed.');
-      turns.push({ convoId: r.convoId, pending: 'declined' });
-      continue;
+    try {
+      const value = r.reaction?.value;
+      if (!YES_REACTIONS.has(value) && !NO_REACTIONS.has(value)) continue;
+      const pending = await readPending(r.convoId);
+      if (!pending?.message_ids?.includes(r.message?.id)) continue;
+      await clearPending(r.convoId);
+      const send = sendTo(r.convoId);
+      if (NO_REACTIONS.has(value)) {
+        await send('Okay, nothing changed.');
+        turns.push({ convoId: r.convoId, pending: 'declined' });
+        continue;
+      }
+      const out = await runPending(pending, {
+        writeAgent,
+        getIo,
+        convoId: r.convoId,
+        generate,
+        model: activeModel,
+        log,
+      });
+      await send(out.text);
+      log('Ran a confirmed change', {
+        via: 'reaction',
+        commands: pending.commands.join(' | '),
+        ok: !out.failed,
+      });
+      turns.push({ convoId: r.convoId, pending: 'confirmed' });
+    } catch (err) {
+      log('A reaction failed', {
+        convoId: r.convoId,
+        err: String(err?.message || err),
+      });
     }
-    const out = await runPending(pending, {
-      writeAgent,
-      getIo,
-      convoId: r.convoId,
-      generate,
-      model: activeModel,
-      log,
-    });
-    await send(out.text);
-    log('Ran a confirmed change', {
-      via: 'reaction',
-      commands: pending.commands.join(' | '),
-      ok: !out.failed,
-    });
-    turns.push({ convoId: r.convoId, pending: 'confirmed' });
   }
 
-  for (const arrived of inbound.slice(
-    -(persistent ? MAX_BACKLOG : MAX_TURNS),
-  )) {
+  for (const arrived of inbound.slice(-MAX_BACKLOG)) {
     // "!" is stripped before anything parses the text, so "!block @x" is
     // exactly "block @x" to the classic path. Facets are read for their URIs
     // and DIDs only, never their byte ranges, so the shift does not matter.
@@ -1481,21 +1452,15 @@ export async function runDmPass({
         ? arrived
         : { ...arrived, message: { ...arrived.message, text: routed.text } };
 
-    // COMMANDS NEVER REACH THE MODEL. Matched on the owner's literal text,
-    // executed directly, replied to with a receipt. This is what makes "only
-    // acts on commands from me" true in the presence of tools that read
-    // strangers' posts: there is no path from the tool loop to a write, so a
-    // captured turn has nothing to capture. See src/lib/command.js.
     const send = sendTo(entry.convoId);
 
     // What this sender may do, decided once per message. The roster is the
     // only thing consulted; nothing downstream re-derives it from the text.
     const canWrite = roster.writes(entry.message?.sender?.did);
 
-    // A button that exists to be rejected is worse than no button. Same rule
-    // actionsFor already follows for PROTECTED, and the filter re-parses each
-    // command rather than matching on the label, so the menu and the gate in
-    // runCommand cannot disagree about what counts as a write.
+    // Options a read-only sender could only be refused are left out. Each
+    // command is re-parsed rather than matched on its label, so the menu and
+    // the gate in runCommand agree on what counts as a write.
     const offerable = (options) =>
       canWrite
         ? options
@@ -1505,8 +1470,7 @@ export async function runDmPass({
     const msgLinks = facetLinks(entry.message);
     const mentions = facetMentions(entry.message);
 
-    // Before any routing decision, because every route should leave the post
-    // remembered and only one of them used to.
+    // Before any routing decision, so every route leaves the post remembered.
     await rememberPost(
       entry.convoId,
       embedUri ||
@@ -1515,8 +1479,8 @@ export async function runDmPass({
         null,
     );
 
-    // 👀 before any work, so the owner can see it was picked up. It is swapped for
-    // ✅ or ❌, or simply taken away, when the message is done with.
+    // 👀 before any work, so the sender can see it was picked up. It is
+    // swapped for ✅ or ❌, or taken away, when the message is done with.
     const acked = await react(
       chat,
       entry.convoId,
@@ -1598,10 +1562,7 @@ export async function runDmPass({
           extraTools,
           config,
           limits,
-          model: operatorModel || activeModel,
-          // Labels come from the analyst's model in both modes, so "hostile"
-          // means the same thing whichever one asked, and a pricier agent
-          // model does not multiply the cost of reading 240 posts.
+          model: activeModel,
           triageModel: activeModel,
           writeAgent,
           canWrite,
@@ -1618,10 +1579,14 @@ export async function runDmPass({
         continue;
       }
 
+      // The classic path. Commands never reach a model: they are matched on
+      // the sender's literal text, run directly and answered with a receipt.
+      // With no path from the analyst's tool loop to a write, a captured turn
+      // has nothing to capture. See src/lib/command.js.
       let cmd = parseCommand(entry.message.text, {
         embedUri,
         links: msgLinks,
-        mentions: facetMentions(entry.message),
+        mentions,
       });
 
       // "add likers" with no post attached means the one they just sent.
@@ -1637,10 +1602,11 @@ export async function runDmPass({
         }
       }
 
-      // A bare "2" resolves against the options the LAST DETERMINISTIC REPLY
-      // offered, and only those. The analyst's prose never stores options, so a
-      // number can never execute something a model composed while reading a
-      // stranger's posts. The menu is as parsed as the commands behind it.
+      // A bare "2" runs option 2 of the last menu offered here, while it is
+      // live. Menus behind a plan, a lookup or a digest are written by code.
+      // Options lifted from the analyst's prose are parsed and labelled from
+      // the parse, so they are only as safe as the sender reading the label
+      // (see offersFrom). Either way the PROTECTED veto applies at the write.
       if (!cmd) {
         const choice = parseChoice(entry.message.text);
         if (choice) {
@@ -1650,8 +1616,8 @@ export async function runDmPass({
       }
 
       // A shared post is a form too. Scanning it stores a plan, so the code is
-      // already in hand when they pick an option: no re-sending the post to act
-      // on it.
+      // in hand when the sender picks an option, with no need to resend the
+      // post.
       if (!cmd) {
         const post = parsePostScan(entry.message.text, {
           embedUri,
@@ -1685,13 +1651,13 @@ export async function runDmPass({
         }
       }
 
-      // A lookup is a form, not a question. Rendered from what score.js already
-      // computed, with no model call: instant, free, and the same shape every
-      // time, which is what a report is for.
+      // A lookup is a form, not a question. Rendered from what score.js
+      // already computed, with no model call: instant, free, and the same
+      // shape every time.
       if (!cmd) {
         const actor = parseLookup(entry.message.text, {
-          links: facetLinks(entry.message),
-          mentions: facetMentions(entry.message),
+          links: msgLinks,
+          mentions,
         });
         if (actor) {
           try {
@@ -1700,8 +1666,8 @@ export async function runDmPass({
             if (account) {
               const actions = offerable(actionsFor(account));
               const body = renderReport(account, { template: config?.report });
-              // One line, at the end, for the case a report cannot serve: every
-              // decision ever recorded about them.
+              // One line at the end for what a report cannot hold: every
+              // decision recorded about them.
               const deeper = `\n\nFull record: history ${account.handle ? `@${account.handle}` : account.did}`;
               await send(
                 actions.length
@@ -1726,41 +1692,31 @@ export async function runDmPass({
         }
       }
 
-      // `read @handle` is a CANNED QUESTION FOR THE ANALYST rather than a
-      // branch of its own. Everything it needs already exists on that path (the
-      // model, the atmosphere tools, the untrusted fencing, the chunking, the
-      // usage row), and a second copy of all of it would be a second place for
-      // the fencing to be forgotten. See readRequest in agent.js for why the
-      // wording is fixed rather than taken from what the owner typed.
+      // `read`, `pulse` and `thread` are canned questions for the analyst
+      // rather than branches of their own. That path already has the model,
+      // the tools, the untrusted fencing and the chunking, and a second copy
+      // would be a second place to forget the fencing. The wording is fixed
+      // in src/lib/agent.js (readRequest, pulseRequest, threadRequest) rather
+      // than taken from what the sender typed.
       let reading =
         cmd?.action === 'read' && !cmd.needsTarget ? cmd.actor : null;
-      // Same shape as `read`: a canned question for the analyst rather than a
-      // branch of its own. The digest is the model's job (reading six hundred
-      // posts and saying what they amount to is the whole task), and a second
-      // copy of the tool loop would be a second place for the fencing to be
-      // forgotten. See pulseRequest in agent.js for why the wording is fixed.
       const pulsing = cmd?.action === 'pulse' ? cmd : null;
-      // The third canned question. A digest says a thing was discussed; this is
-      // how the owner asks what was actually said, without leaving the
-      // conversation and without the answer having to be a scoring decision
-      // about anybody.
       const threading =
         cmd?.action === 'thread' && !cmd.needsTarget
           ? cmd.url || cmd.target
           : null;
-      // Resolved from an attached post, so it is a DID. The read prompt names the
-      // account back to the owner, and a DID in that sentence is unreadable.
+      // Resolved from an attached post, so it is a DID. The read prompt names
+      // the account back to the sender, and a DID in that sentence is
+      // unreadable.
       if (reading && cmd.fromPost) {
         const account = await (await getIo()).lookUp(reading).catch(() => null);
         if (account?.handle) reading = account.handle;
       }
 
-      // Say something before the work starts. A harvest or a model call is five
-      // to twenty seconds of silence, which reads as broken rather than busy.
-      // Swallowed on failure: an ack that did not send is not a reason to lose
-      // the answer behind it.
-      // Only announce work that takes time. A rendered reply arrives instantly,
-      // and announcing it means two messages for one answer.
+      // Without a 👀, say something before slow work: a harvest or a model
+      // call is seconds of silence that reads as broken. Only for work that
+      // takes time, since an instant reply plus an ack is two messages for
+      // one answer. A failed ack is swallowed so it cannot cost the answer.
       if (!acked && worthAcking(cmd)) {
         await send(ackFor(cmd, { openers })).catch(() => {});
       }
@@ -1815,9 +1771,9 @@ export async function runDmPass({
         continue;
       }
 
-      // With no model configured, everything past the commands is out of
-      // reach. Say so, rather than failing on a call that cannot be made.
-      if (!activeModel) {
+      // With no model provider or no model id, everything past the commands is
+      // out of reach. Say so, rather than fail on a call that cannot be made.
+      if (!activeModel || !modelsEnabled()) {
         await send(
           'No AI model is set up for this bot, so I only understand commands. Send "help" for the list.',
         );
@@ -1849,10 +1805,8 @@ export async function runDmPass({
           reviewRows: limits.reviewRows,
         });
       } catch (err) {
-        // Said, like every other branch's failure, in the words the agent
-        // path uses (fallbackText). A model that timed out or a gateway that
-        // errored used to end the turn with the 👀 taken away and nothing
-        // else, which looks exactly like a deliberate non-answer.
+        // Said out loud, so a timeout or a gateway error does not look like a
+        // deliberate non-answer once the 👀 is taken away.
         const why = String(err?.message || err);
         await send(
           /abort|timeout/i.test(why)
@@ -1867,13 +1821,11 @@ export async function runDmPass({
 
       let text = reply.text || 'No answer produced.';
       // The analyst quotes commands in backticks. Lift them into a menu so the
-      // owner can answer "2" instead of retyping one. Parsed, not copied: see
+      // sender can answer "2" instead of retyping one. Parsed, not copied: see
       // offersFrom for what that does and does not guarantee.
       let offers = offerable(offersFrom(text));
-      // After a read, the useful next step is the decision it was for. Built
-      // from the scored account rather than lifted from the model's prose, and
-      // with the read itself dropped. Offering to read them again having just
-      // done it is the kind of menu that teaches you to stop reading menus.
+      // After a read, offer the decision it was for, built from the scored
+      // account rather than the model's prose, and without the read just done.
       if (reading) {
         const account = await io.lookUp(reading).catch(() => null);
         if (account) {
@@ -1883,23 +1835,18 @@ export async function runDmPass({
         }
       }
 
-      // A DIGEST'S FOLLOW-UPS ARE COMPOSED BY CODE, not lifted from the prose.
-      // offersFrom is only as safe as the owner reading the label; this menu is a
-      // function of the arguments the digest actually ran with, so pressing 2
-      // runs a read this codebase wrote. Same standing as the menu behind a plan.
-      //
-      // Built from the TOOL CALL and not from what the owner typed, because
-      // when they ask in words the model picks the window, and a menu
-      // offering to widen to three days under an answer that already covered
-      // three days is a menu that has not been reading along.
+      // A digest's follow-ups are composed by code from the arguments the
+      // digest ran with, not lifted from the prose, so pressing 2 runs a
+      // request this codebase wrote. They follow the tool call rather than the
+      // typed words because, asked in words, the model picks the window, and
+      // the menu should match what was actually read.
       const ranPulse = reply.pulses?.[reply.pulses.length - 1] ?? null;
-      // URLs this message is allowed to render as tappable. Empty for every
-      // reply that is not a digest, which is every reply that has not just been
-      // handed a table of posts it built itself.
+      // URLs this reply may render as links: only a digest's, which point at
+      // posts this code fetched.
       let allow = [];
       if (pulsing || ranPulse) {
         const from = pulsing ?? pulseFromArgs(ranPulse.args);
-        // Markers first: the link list and the menu are both built out of what
+        // Markers first: the link list and the menu are both built from what
         // survived resolution, so a post the analyst invented reaches neither.
         const resolved = citationsIn(text, ranPulse?.sample ?? []);
         text = resolved.text;
@@ -1915,9 +1862,8 @@ export async function runDmPass({
         );
       }
       if (offers.length) text += `\n\n${renderChoices(offers)}`;
-      // Counted before sending so the log reports what actually went out. A
-      // digest with a link list and a six-option menu is a longer reply than the
-      // model wrote, and the number worth having is the one the owner received.
+      // Counted on the text as sent, links and menu included, so the log
+      // reports what went out rather than what the model wrote.
       const chunks = chunkForDm(text);
       await send(text, { allow });
       await offerChoices(entry.convoId, offers);
@@ -1944,10 +1890,9 @@ export async function runDmPass({
         steps: reply.steps,
       });
     } catch (err) {
-      // One message that failed in a way nothing above caught. The cursor has
-      // already moved past it, so it is dropped either way; what this changes
-      // is that the rest of the batch is still answered, and the owner sees a ❌
-      // rather than an 👀 that quietly disappears.
+      // A failure nothing above caught. The cursor is already past this
+      // message, so it is dropped either way; catching it here keeps the rest
+      // of the batch answered and puts a ❌ on the message.
       log('A DM turn failed', {
         convoId: entry.convoId,
         err: String(err?.message || err),
@@ -1962,6 +1907,6 @@ export async function runDmPass({
     }
   }
 
-  await flushSummaries(chat, { force: !persistent, log });
+  await flushSummaries(chat, { log });
   return { answered: turns.length, scanned: entries.length, turns };
 }

@@ -1,6 +1,6 @@
 // Whole DM passes for the chat UX: the quick lane, reactions, the burst
 // summary, questions a thumbs-up answers, the post card, memory and watch
-// commands. Against an in-memory mod schema and a fake chat service, with the
+// commands. Against an in-memory database and a fake chat service, with the
 // list write and the plan functions faked, so nothing here reaches a network.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -223,15 +223,25 @@ describe('the quick lane', () => {
     expect(reactions).toEqual(['+👀@m1', '-👀@m1', '+✅@m1']);
   });
 
-  it('sums up a burst in one message', async () => {
+  it('sums up a burst in one message once it goes quiet', async () => {
     const { chat, sent } = chatWith([
       shared('m1', 'block'),
       shared('m2', 'block em'),
     ]);
     await pass(chat);
     expect(listWrite.applyCommand).toHaveBeenCalledTimes(2);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatch(/^Blocked 2 in the last 1 min: @/);
+    expect(sent).toEqual([]);
+
+    // A quiet minute later, the next poll sends the summary.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+    try {
+      const quiet = chatWith([]);
+      await pass(quiet.chat);
+      expect(quiet.sent).toHaveLength(1);
+      expect(quiet.sent[0]).toMatch(/^Blocked 2 in the last 1 min: @/);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('says so out loud for a CONNECTED account, and for the veto', async () => {
@@ -309,7 +319,8 @@ describe('the post card', () => {
 
     ({ chat, sent } = chatWith([msg('m2', 'likers')]));
     await pass(chat);
-    // "likers" out of a scan of everyone: every band but PROTECTED, likers only.
+    // "likers" from a scan of everyone: every band but PROTECTED, likers
+    // only.
     expect(plans.applyPlan.mock.calls[0][2]).toEqual([
       'UNKNOWN',
       'PERIPHERAL',
