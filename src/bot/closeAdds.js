@@ -1,19 +1,16 @@
 // Closing the record when someone comes off the list.
 //
-// A decision row that put someone on the list stays live until something says
-// otherwise, and "undo last", recent activity and the agent's intent check all
-// read a live row as "still on the list because of this". So every path that
-// takes someone off has to close the rows that put them on. A typed or agent
-// "unblock" once did not, which left "undo last" choosing a plan whose only
-// account was already gone and answering "1 left, send undo again" on every
-// try.
+// "undo last", recent activity and the write check all read a live `list_add`
+// row as "on the list because of this". So every path that takes someone off
+// closes the rows that put them on. Left open, "undo last" keeps choosing a
+// plan whose accounts are already gone.
 //
-// Stamped undone, never deleted, as everywhere else: "was I ever on this list"
-// stays answerable.
+// Rows are stamped undone, never deleted, so "was I ever on this list" stays
+// answerable.
 
 import { selectAll, upsert } from './db.js';
 
-/** DIDs per filtered read, so the query string stays a sensible length. */
+/** DIDs per read, to keep each statement's `in (...)` list short. */
 const CHUNK = 50;
 
 /**
@@ -40,9 +37,8 @@ export async function closeAdds(dids, reason) {
       order: 'plan_id.asc,did.asc',
     });
     if (!live.length) continue;
-    // Every column the row was written with, not only the two that change:
-    // the upsert inserts the payload before ON CONFLICT merges it, so a
-    // partial row fails any NOT NULL column it leaves out.
+    // The whole row, not only the two columns that change: SQLite checks NOT
+    // NULL columns such as `band` before it resolves the conflict.
     await upsert(
       'decision',
       live.map((r) => ({

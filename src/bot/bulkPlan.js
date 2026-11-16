@@ -1,46 +1,38 @@
-// The bulk operation, behind the gate that exists because of it.
+// Bulk plans: everyone who engaged with a post, scored, and held until the
+// owner approves.
 //
-// This is the thing the old tool did in one step: take a post, walk everyone
-// who touched it, add them all to a modlist. A bulk sweep done that way once
-// added thousands of accounts in a day, hundreds of them followed by someone
-// the owner follows, none of them looked at. The capability is genuinely
-// useful; what it lacked was a moment between "do this" and "done".
-//
-// So it is two commands, not one:
-//
-//   add likers <post>          -> harvest, score, write an UNAPPROVED plan,
+//   add likers <post>          -> harvest, score, store an UNAPPROVED plan,
 //                                 reply with the counts by band
-//   approve <code> <bands>     -> create the listitems for those bands only
+//   approve <code> <bands>     -> create listitems for those bands only
 //
-// CONSENT IS PER BAND, NOT PER ACCOUNT. That is what `plan.approved_bands`
-// models, and it is what makes "my system decided this, I did not review you
-// personally" an accurate sentence rather than a convenient one. Approving
-// UNKNOWN is a claim about a category the owner can defend; approving 400
-// individuals they never saw is not.
+// Two steps rather than one, so there is a moment between "do this" and
+// "done" in which the owner sees who is close to them.
 //
-// THE MODEL IS NOT IN THIS FILE. The post comes from the owner's own message,
-// the participants come from Constellation, the bands come from score.js, and
-// the approval is the owner's literal typed code. A prompt-injected turn cannot
-// reach any of it (see src/lib/command.js).
+// Consent is per band, not per account, and `plan.approved_bands` records it.
+// Approving UNKNOWN is a claim about a category the owner can defend;
+// approving 400 people they never looked at is not.
 //
-// PROTECTED IS NEVER CARRIED, whatever is approved. The veto is checked here as
-// well as in the parser, because this is where the record gets created.
+// No model is called here. The post comes from the owner's message, the
+// participants from Constellation and the bands from score.js. Writes happen
+// only on an approval: the owner's typed code in classic mode (see
+// src/lib/command.js), or agent mode and watches acting on what the owner
+// asked, which `by` marks in the log.
+//
+// PROTECTED is never written, whatever is approved. The veto is checked here
+// as well as in the parser, and against the live `protected` table at the
+// write, because a plan's bands are as old as the plan.
 
 import crypto from 'node:crypto';
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
-import { resolveActor } from '../lib/target.js';
-import { resolveTarget } from '../lib/target.js';
+import { fetchWithTimeout } from '../lib/atproto.js';
+import { resolveActor, resolveTarget } from '../lib/target.js';
 import { harvestPost } from '../lib/harvest.js';
-import {
-  createScorer,
-  summarise,
-  BANDS,
-} from '../lib/score.js';
+import { createScorer, summarise, BANDS } from '../lib/score.js';
 import { KINDS } from '../lib/command.js';
 import { select, selectAll, upsert, update, count } from './db.js';
 import { loadReference } from './reference.js';
-import { listUri } from './listWrite.js';
+import { listUri, protectedAmong } from './listWrite.js';
 import { evidenceUriFor } from './triage.js';
 import { closeAdds } from './closeAdds.js';
 import {
@@ -59,21 +51,20 @@ import {
  * again continues where it stopped, so the cap costs a second message rather
  * than a truncated result.
  */
-export const PER_APPROVAL = 500;
+const PER_APPROVAL = 500;
 
 const BATCH = 50;
 
 /** Short enough to retype in a DM, long enough not to collide. */
-const shortCode = (uuid) => uuid.replace(/-/g, '').slice(0, 8);
+export const shortCode = (uuid) => uuid.replace(/-/g, '').slice(0, 8);
 
 /**
  * The `approved_via` for a write, given who asked for it.
  *
- * `by` is null for a typed command and 'agent' when agent mode called the
- * function on the owner's behalf. Prefixed rather than replaced, because the
- * basis still holds (a band is still a band) and what changed is that a
- * model chose it from their sentence instead of them typing it. "agent:band"
- * says both.
+ * `by` is null for a typed command, 'agent' when agent mode acted on the
+ * owner's sentence, and 'watch' for a watch. Prefixed rather than replaced:
+ * the basis still holds (a band is still a band), and the prefix says who
+ * chose it. "agent:band" says both.
  */
 const viaFor = (basis, by) => (by ? `${by}:${basis}` : basis);
 
@@ -84,31 +75,24 @@ function matchesKind(row, kind) {
   return wanted.some((k) => (row.engagements || {})[k] > 0);
 }
 
-/**
- * Did this stored decision row engage in any of these ways?
- *
- * Rows from before `engaged` was recorded have none, and for those the plan's
- * own kind is the only evidence: every row of a likers scan liked the post.
- */
-export function engagedAs(row, kinds, plan) {
+/** Did this stored decision row engage in any of these ways? */
+function engagedAs(row, kinds) {
   if (!kinds?.length) return true;
-  if (Array.isArray(row.engaged)) {
-    return kinds.some((kind) =>
-      (KINDS[kind] || []).some((k) => row.engaged.includes(k)),
-    );
-  }
-  return kinds.includes(plan?.totals?.kind);
+  const engaged = Array.isArray(row.engaged) ? row.engaged : [];
+  return kinds.some((kind) =>
+    (KINDS[kind] || []).some((k) => engaged.includes(k)),
+  );
 }
 
+const NOT_OURS = 'That list is not owned by this account.';
+
 /**
- * Split rows into those to write and those already on the list.
+ * Split rows into those to write and those already on the list, so an account
+ * in two plans gets one listitem.
  *
- * Bulk approvals used to skip this check, so an account in two plans got two
- * listitems, five minutes apart, and the list ended up holding many more
- * listitems than accounts. Read from the held copy (graphFacts.js), which this
- * process's own writes keep current. If the list cannot be read, everything is
- * written: a duplicate is the cheaper mistake than a block that silently did
- * not happen.
+ * Read from the held copy (graphFacts.js), which this process's own writes
+ * keep current. If the list cannot be read, everything is written: a
+ * duplicate is a cheaper mistake than a block that silently did not happen.
  */
 async function splitListed(uri, rows) {
   const facts = await graphFacts({ list: uri }).catch(() => null);
@@ -130,21 +114,19 @@ export async function proposePlan({ link, kind }) {
   const { ref, takenAt } = await loadReference();
   const scorer = createScorer(ref);
 
-  // THE AUTHOR IS SCORED WITH THE PARTICIPANTS, in the same call. A post with
-  // no likes and no replies used to come back with every band at zero and "Do
-  // nothing" as the only option: a report about the graph AROUND a post,
-  // offering nothing about the person who wrote it, who is the one actually in
-  // front of the owner. summarise() maps over the harvest, so an extra entry in
-  // the score map cannot leak into the plan's rows.
+  // The author is scored in the same call as the participants, so a post with
+  // no engagement still says something about the person who wrote it.
+  // summarise() maps over the harvest, so the extra entry in the score map
+  // cannot leak into the plan's rows.
   const scores = await scorer.score([
     ...new Set([...harvest.participants.map((p) => p.did), target.did]),
   ]);
   const summary = summarise(harvest, scores, { excludeSelf: OWNER_DID });
   const author = scores.get(target.did) ?? null;
 
-  // The kind filter runs AFTER scoring so the stored plan records the band of
-  // everyone on the post, not only the slice being asked about. Re-reading an
-  // old plan then answers "who else was there" without a second harvest.
+  // Filtered to the kind after scoring, so the plan's totals keep the whole
+  // post's counts (participants, engagements) while its rows and band counts
+  // cover only the slice asked for.
   const chosen = summary.rows.filter((r) => matchesKind(r, kind));
 
   const planId = crypto.randomUUID();
@@ -174,8 +156,7 @@ export async function proposePlan({ link, kind }) {
       approved_bands: null,
       totals: {
         ...summary.totals,
-        // The post itself, so a later triage does not have to read it back out
-        // of a prose note.
+        // The post the plan came from, for triage and the agent's plan facts.
         uri: target.uri,
         kind,
         selected: chosen.length,
@@ -189,10 +170,9 @@ export async function proposePlan({ link, kind }) {
     },
   ]);
 
-  // One decision row per account, with the inputs that produced the band. This
-  // is the answer to "why am I on your list", written BEFORE anything is
-  // approved so a plan that is never approved is still a record of what was
-  // nearly done.
+  // One decision row per account, with the inputs that produced the band: the
+  // answer to "why am I on your list". Written before anything is approved,
+  // so a plan that never is still records what was nearly done.
   await upsert(
     'decision',
     chosen.map((r) => ({
@@ -228,9 +208,9 @@ export async function proposePlan({ link, kind }) {
     // Per-kind counts, so a scan can say "15 likes, 1 repost" rather than only
     // a participant total.
     engagements: summary.totals?.engagements || {},
-    // Said before the approval rather than discovered during it. The relay
-    // ceiling was nearly hit twice in one day with no warning anywhere.
-    cost: estimateWrites(chosen.length - (byBand.PROTECTED || 0)),
+    // Quoted before the approval, so a batch that would take hours says so up
+    // front. Counts only who an approval could still add.
+    cost: estimateWrites(fresh.total),
     truncated: summary.truncated,
     protectedCount: byBand.PROTECTED || 0,
     alreadyListed,
@@ -245,9 +225,8 @@ const PLAN_COLUMNS = 'id,created_at,approved_at,approved_bands,totals,note';
  * Find a plan by its short code.
  *
  * A code is the first eight hex digits of the plan's uuid, so every plan it
- * could name sits in one range of the primary key. Asked for as that range
- * rather than by reading every plan ever written to compare eight characters
- * in memory, which every approve, review and undo used to do.
+ * could name sits in one range of the primary key, and that range is what is
+ * read.
  */
 export async function findPlan(code) {
   const c = String(code ?? '').toLowerCase();
@@ -281,18 +260,10 @@ export async function applyPlan(
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
-  if (!uri.startsWith(`at://${bot}/`)) {
-    return {
-      ok: false,
-      message:
-        'That list is not owned by this account, so I cannot write to it. ' +
-        'Point MOD_LIST_URI at the migrated list.',
-    };
-  }
+  if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
-  // PROTECTED is dropped here as well as in the parser. This is where the
-  // record is created, and a veto that is only enforced upstream is a veto that
-  // holds until someone adds a second caller.
+  // PROTECTED is dropped here as well as in the parser, so the veto holds for
+  // every caller and not only the ones that parse.
   const wanted = bands.filter((b) => b !== 'PROTECTED' && BANDS.includes(b));
   if (!wanted.length) {
     return {
@@ -311,7 +282,7 @@ export async function applyPlan(
       wanted.includes(r.band) &&
       !r.acted_at &&
       !r.already_listed &&
-      engagedAs(r, kinds, plan),
+      engagedAs(r, kinds),
   );
   if (!pending.length) {
     return {
@@ -324,32 +295,38 @@ export async function applyPlan(
 
   const again = `approve ${shortCode(plan.id)} ${[...wanted, ...(kinds || [])].join(',')}`;
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, rateLimited, already } = await writeRows(
+  const { added, failed, rateLimited, already, vetoed } = await writeRows(
     agent,
     plan,
     slice,
     { uri, bot, via: viaFor('band', by) },
   );
-  if (rateLimited) {
-    return {
-      ok: true,
-      added,
-      already,
-      remaining: pending.length - added - already,
-      message: `Added ${added}. Hit the write rate limit. Send "${again}" again in an hour for the remaining ${pending.length - added - already}.`,
-    };
-  }
 
+  // Recorded as soon as anything was attempted, rate limit or not. Bands
+  // approved earlier stay in the record.
   await update(
     'plan',
     { eq: { id: plan.id } },
     {
       approved_at: plan.approved_at || new Date().toISOString(),
-      approved_bands: wanted,
+      approved_bands: [
+        ...new Set([...(plan.approved_bands || []), ...wanted]),
+      ],
     },
   );
 
-  const remaining = pending.length - added - already - failed;
+  if (rateLimited) {
+    const left = pending.length - added - already - vetoed;
+    return {
+      ok: true,
+      added,
+      already,
+      remaining: left,
+      message: `Added ${added}. Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
+    };
+  }
+
+  const remaining = pending.length - added - already - failed - vetoed;
   return {
     ok: true,
     added,
@@ -359,6 +336,7 @@ export async function applyPlan(
     message:
       `Added ${added} to the list${failed ? `, ${failed} failed` : ''}.` +
       alreadyNote(already) +
+      vetoNote(vetoed) +
       (remaining
         ? ` ${remaining} left. Send "${again}" again to continue.`
         : ''),
@@ -371,20 +349,31 @@ function alreadyNote(n) {
   return n === 1 ? ' 1 was already on it.' : ` ${n} were already on it.`;
 }
 
+/** " 2 refused: PROTECTED." when any were, nothing when none were. */
+function vetoNote(n) {
+  return n ? ` ${n} refused: PROTECTED.` : '';
+}
+
 /**
  * Create the listitems for a set of already-chosen rows.
  *
- * Shared by band approvals and label approvals so there is one place that knows
- * how a listitem gets made and how it gets logged. `via` is the whole reason
- * both exist: "you were in a category I approved", "I read your profile and
- * decided" and "a model read what you wrote and I approved that reading" are
- * three different answers to why someone is on the list, and the log has to be
- * able to tell them apart.
+ * Every plan approval writes through here, so there is one place that knows
+ * how a listitem is made and logged. `via` says why: "you were in a category
+ * I approved", "I read your profile and decided" and "a model read what you
+ * wrote and I approved that reading" are different answers to why someone is
+ * on the list, and the log has to tell them apart.
+ *
+ * Rows are checked against the live `protected` table first, since a plan's
+ * bands date from when it was made. That read failing throws, so nothing is
+ * written.
  */
 async function writeRows(agent, plan, rows, { uri, bot, via }) {
   let added = 0;
   let failed = 0;
-  const { fresh, listed } = await splitListed(uri, rows);
+  const veto = await protectedAmong(rows.map((r) => r.did));
+  const allowed = rows.filter((r) => !veto.has(r.did));
+  const vetoed = rows.length - allowed.length;
+  const { fresh, listed } = await splitListed(uri, allowed);
   if (listed.length) {
     await upsert(
       'decision',
@@ -396,9 +385,9 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       })),
     ).catch(() => {});
   }
-  rows = fresh;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const batch = rows.slice(i, i + BATCH);
+  const already = listed.length;
+  for (let i = 0; i < fresh.length; i += BATCH) {
+    const batch = fresh.slice(i, i + BATCH);
     try {
       const res = await agent.com.atproto.repo.applyWrites({
         repo: bot,
@@ -441,11 +430,12 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       const message = String(err?.message || err);
       // A rate limit means stop, not retry. The remaining budget is gone and
       // approving again in an hour is the correct backoff.
-      if (/rate ?limit/i.test(message))
-        return { added, failed, rateLimited: true, already: listed.length };
+      if (/rate ?limit/i.test(message)) {
+        return { added, failed, rateLimited: true, already, vetoed };
+      }
     }
   }
-  return { added, failed, rateLimited: false, already: listed.length };
+  return { added, failed, rateLimited: false, already, vetoed };
 }
 
 /**
@@ -463,16 +453,13 @@ export async function applyPlanToTriage(
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
-  if (!uri.startsWith(`at://${bot}/`)) {
-    return { ok: false, message: 'That list is not owned by this account.' };
-  }
+  if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
     select: 'did,band,triage,acted_at,already_listed',
     eq: { plan_id: plan.id, triage: label },
     order: 'did.asc',
   });
-  // The veto, at the write, as everywhere else.
   // skipBands is how a watch holds CONNECTED and NOTABLE back for a 👍 even
   // when it was asked to add the hostile ones on its own.
   const pending = rows.filter(
@@ -487,12 +474,13 @@ export async function applyPlanToTriage(
   }
 
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, already } = await writeRows(agent, plan, slice, {
-    uri,
-    bot,
-    via: viaFor(`triage:${label}`, by),
-  });
-  const remaining = pending.length - added - already - failed;
+  const { added, failed, already, vetoed } = await writeRows(
+    agent,
+    plan,
+    slice,
+    { uri, bot, via: viaFor(`triage:${label}`, by) },
+  );
+  const remaining = pending.length - added - already - failed - vetoed;
   return {
     ok: true,
     added,
@@ -500,8 +488,9 @@ export async function applyPlanToTriage(
     already,
     remaining,
     message:
-      `Added ${added} that a model read as ${label}.` +
+      `Added ${added} that a model read as ${label}${failed ? `, ${failed} failed` : ''}.` +
       alreadyNote(already) +
+      vetoNote(vetoed) +
       (remaining
         ? ` ${remaining} left, send "approve ${shortCode(plan.id)} ${label}" again.`
         : ''),
@@ -531,7 +520,7 @@ export async function countDecisions(
     if (r.acted_at || r.band === 'PROTECTED' || r.already_listed) return false;
     if (bands?.length && !bands.includes(r.band)) return false;
     if (label && r.triage !== label) return false;
-    return engagedAs(r, kinds, plan);
+    return engagedAs(r, kinds);
   }).length;
 }
 
@@ -560,8 +549,6 @@ export async function cancelPlan(plan) {
   );
 }
 
-export { shortCode };
-
 /** Handles for a page of DIDs, 25 at a time, best effort. */
 export async function handlesFor(dids) {
   const out = new Map();
@@ -571,7 +558,7 @@ export async function handlesFor(dids) {
       .map((d) => `actors=${encodeURIComponent(d)}`)
       .join('&');
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${APPVIEW}/xrpc/app.bsky.actor.getProfiles?${q}`,
       );
       if (!res.ok) continue;
@@ -628,10 +615,9 @@ export async function reviewPlan(plan, { bands = null, limit = 15 } = {}) {
 /**
  * Act on named accounts inside a plan: the personal path.
  *
- * Recorded as approved_via 'individual' rather than 'band'. Both write the same
- * listitem; only one of them means the owner looked at the account. The log has
- * to be able to say which, because that is the difference between "you were in a
- * category I approved" and "I read your profile and decided".
+ * Recorded as approved_via 'individual' rather than 'band'. Both write the
+ * same listitem; only one means the owner looked at the account, and the log
+ * has to say which.
  */
 export async function applyPlanToActors(
   agent,
@@ -641,9 +627,7 @@ export async function applyPlanToActors(
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
-  if (!uri.startsWith(`at://${bot}/`)) {
-    return { ok: false, message: 'That list is not owned by this account.' };
-  }
+  if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
     select: 'did,band,acted_at,already_listed',
@@ -652,7 +636,8 @@ export async function applyPlanToActors(
   });
   const byDid = new Map(rows.map((r) => [r.did, r]));
 
-  const resolved = [];
+  // Keyed by DID, so one account named twice is written once.
+  const resolved = new Map();
   const unknown = [];
   for (const a of actors) {
     let did;
@@ -664,79 +649,28 @@ export async function applyPlanToActors(
     }
     const row = byDid.get(did);
     if (!row) unknown.push(a);
-    else resolved.push({ ...row, actor: a });
+    else resolved.set(did, row);
   }
 
-  // The veto again, at the write. Approving someone by name does not outrank it.
-  const vetoed = resolved.filter((r) => r.band === 'PROTECTED');
-  const { fresh: todo, listed } = await splitListed(
-    uri,
-    resolved.filter((r) => r.band !== 'PROTECTED' && !r.acted_at),
+  // Approving someone by name does not outrank the veto.
+  const named = [...resolved.values()];
+  const banned = named.filter((r) => r.band === 'PROTECTED').length;
+  const { added, failed, already, vetoed } = await writeRows(
+    agent,
+    plan,
+    named.filter((r) => r.band !== 'PROTECTED' && !r.acted_at),
+    { uri, bot, via: viaFor('individual', by) },
   );
-  if (listed.length) {
-    await upsert(
-      'decision',
-      listed.map((r) => ({
-        plan_id: plan.id,
-        did: r.did,
-        band: r.band,
-        already_listed: true,
-      })),
-    ).catch(() => {});
-  }
 
-  let added = 0;
-  for (let i = 0; i < todo.length; i += BATCH) {
-    const batch = todo.slice(i, i + BATCH);
-    const res = await agent.com.atproto.repo.applyWrites({
-      repo: bot,
-      writes: batch.map((r) => ({
-        $type: 'com.atproto.repo.applyWrites#create',
-        collection: 'app.bsky.graph.listitem',
-        value: {
-          $type: 'app.bsky.graph.listitem',
-          subject: r.did,
-          list: uri,
-          createdAt: new Date().toISOString(),
-        },
-      })),
-    });
-    const created = res?.data?.results || [];
-    batch.forEach((r, n) =>
-      noteListed(
-        uri,
-        r.did,
-        String(created[n]?.uri || '')
-          .split('/')
-          .pop(),
-      ),
-    );
-    const now = new Date().toISOString();
-    await upsert(
-      'decision',
-      batch.map((r) => ({
-        plan_id: plan.id,
-        did: r.did,
-        band: r.band,
-        action: 'list_add',
-        acted_at: now,
-        approved_via: viaFor('individual', by),
-      })),
-    );
-    added += batch.length;
-  }
-
-  const parts = [`Added ${added} by name.${alreadyNote(listed.length)}`];
-  if (vetoed.length) {
-    parts.push(`${vetoed.length} refused: PROTECTED.`);
-  }
-  if (unknown.length) {
-    parts.push(`Not in this plan: ${unknown.join(', ')}.`);
-  }
+  const parts = [
+    `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${alreadyNote(already)}`,
+  ];
+  if (banned + vetoed) parts.push(`${banned + vetoed} refused: PROTECTED.`);
+  if (unknown.length) parts.push(`Not in this plan: ${unknown.join(', ')}.`);
   return {
     ok: true,
     added,
-    already: listed.length,
+    already,
     message: parts.join(' '),
   };
 }
@@ -766,11 +700,8 @@ export function estimateWrites(n, { kind = 'create' } = {}) {
 }
 
 /**
- * The most recent plan that actually put someone on the list.
- *
- * Filtered and ordered by the database: the newest live add is one row, not a
- * read of every decision ever written (scan participants and all) sorted in
- * memory.
+ * The most recent plan that put someone on the list and still has them there.
+ * One row from the database: the newest live add.
  */
 export async function lastActedPlan() {
   const rows = await select('decision', {
@@ -790,8 +721,8 @@ export async function lastActedPlan() {
 
 /**
  * Up to this many accounts, an undo asks Constellation where each one's
- * listitems are instead of walking the bot's whole repo. "Undo that" after a
- * single block was a hundred sequential pages to find one record.
+ * listitems are instead of walking the bot's whole repo, which costs a page per
+ * hundred listitems to find even one record.
  */
 const LOOKUP_UNDER = 50;
 
@@ -880,21 +811,19 @@ async function deleteListitems(agent, bot, rkeys) {
 /**
  * Take a plan's additions back off the list.
  *
- * The decision rows STAY, stamped undone rather than deleted. A log that erases
- * what it undid cannot answer "was I ever on this list", which is a question
- * somebody may reasonably ask after the fact, and an append-only record that
- * quietly rewrites itself is not a record.
+ * The decision rows stay, stamped undone rather than deleted, so the log can
+ * still answer "was I ever on this list". An append-only record that rewrites
+ * itself is not a record.
  *
- * The listitem rkey is not stored anywhere, so it is looked up: one
- * Constellation request per account for a handful, one walk of the repo for
- * more. Deletes are 1 point rather than 3, so the cap can be higher than an
- * approval's, but it is still capped and still resumable.
+ * The listitem rkey is not stored, so it is looked up: one Constellation
+ * request per account for a handful, one walk of the repo for more. Deletes
+ * are 1 point rather than 3, so the cap is higher than an approval's, but it
+ * is still capped and still resumable.
  *
- * AN ACCOUNT ALREADY OFF THE LIST IS CLOSED, NOT RETRIED. Someone taken off by
- * a path that left their decision open (a typed unblock did, for a while) kept
- * this plan "live" forever: every undo found no listitem, removed nothing, and
- * said "1 left, send undo again". When the walk has seen the whole repo, an
- * account it did not find is off the list, and the record says so.
+ * An account already off the list is closed, not retried. When the walk has
+ * seen the whole repo, an account it did not find is off the list (taken off
+ * outside the bot, say), and the record says so. Left open, the plan would
+ * stay live and every undo would answer "1 left, send undo again".
  */
 export async function undoPlan(
   agent,
@@ -903,9 +832,7 @@ export async function undoPlan(
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
-  if (!uri.startsWith(`at://${bot}/`)) {
-    return { ok: false, message: 'That list is not owned by this account.' };
-  }
+  if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
     select: 'did,band,acted_at,action,undone_at',
@@ -935,9 +862,9 @@ export async function undoPlan(
     }
   }
 
-  // Batched by ACCOUNT, so the copies of one account (two plans added them)
-  // come off together and its row is written once: the same key twice in one
-  // upsert is an error Postgres refuses the whole batch over.
+  // Batched by account, so every copy of one account (two plans added them)
+  // comes off in the same applyWrites, and its rows are closed only once all
+  // of them are gone.
   const batches = [];
   for (const [did, rkeys] of [...byDid].slice(0, max)) {
     const last = batches[batches.length - 1];
@@ -982,11 +909,8 @@ export async function undoPlan(
 }
 
 /**
- * What has been done lately, or to one account.
- *
- * The newest `limit` acted rows straight from the database, their plans in one
- * request, and the total as a count. It used to read every decision row ever
- * written, scan participants and all, to show eight.
+ * What has been done lately, or to one account: the newest `limit` acted rows,
+ * their plans in one read, and the total as a count.
  */
 export async function historyFor(did = null, { limit = 8 } = {}) {
   const eq = did ? { did } : {};

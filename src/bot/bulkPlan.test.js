@@ -1,5 +1,5 @@
-// Undo, "undo last" and history, against an in-memory decision log, a stubbed
-// Constellation lookup and a fake repo.
+// Approve, undo, "undo last" and history, against an in-memory decision log,
+// a stubbed Constellation lookup and a fake repo.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -7,7 +7,7 @@ const LIST = 'at://did:plc:bot/app.bsky.graph.list/3list';
 const PLAN_A = '1c2d3e4f-0000-4000-8000-000000000001';
 const PLAN_B = '9e8d7c6b-0000-4000-8000-000000000002';
 
-const db = { plan: [], decision: [], writes: [], reads: [] };
+const db = { plan: [], decision: [], protected: [], writes: [], reads: [] };
 
 /** Enough of db.js's filter grammar for what bulkPlan.js sends. */
 function matches(row, { eq = {}, where = {} } = {}) {
@@ -55,15 +55,15 @@ vi.mock('./db.js', () => ({
       query(table, { eq, where: not_null ? { [not_null]: 'not.is.null' } : {} })
         .length,
   ),
-  update: vi.fn(async () => {}),
+  update: vi.fn(async (table, match, patch) => {
+    for (const row of query(table, match)) Object.assign(row, patch);
+  }),
   upsert: vi.fn(async (table, rows) => {
     db.writes.push({ table, rows });
     const keys = rows.map((r) => `${r.plan_id}|${r.did}`);
-    // Postgres refuses an upsert that names the same row twice.
+    // One upsert should never name the same row twice.
     if (new Set(keys).size !== keys.length) {
-      throw new Error(
-        'ON CONFLICT DO UPDATE command cannot affect row a second time',
-      );
+      throw new Error('upsert names the same row twice');
     }
     for (const row of rows) {
       const list = (db[table] ||= []);
@@ -86,10 +86,25 @@ const graph = {
   graphFacts: vi.fn(async () => null),
 };
 vi.mock('./graphFacts.js', () => graph);
-vi.mock('./listWrite.js', () => ({ listUri: () => LIST }));
+const veto = { unreadable: false };
+vi.mock('./listWrite.js', () => ({
+  listUri: () => LIST,
+  protectedAmong: async (dids) => {
+    if (veto.unreadable) throw new Error('could not read the protected set');
+    return new Set(
+      db.protected.map((r) => r.did).filter((did) => dids.includes(did)),
+    );
+  },
+}));
 
-const { undoPlan, lastActedPlan, findPlan, historyFor } =
-  await import('./bulkPlan.js');
+const {
+  applyPlan,
+  applyPlanToActors,
+  undoPlan,
+  lastActedPlan,
+  findPlan,
+  historyFor,
+} = await import('./bulkPlan.js');
 
 /** The bot's repo: rkey -> subject. */
 let repo;
@@ -108,10 +123,21 @@ function bot() {
             },
           })),
           applyWrites: vi.fn(async ({ writes }) => {
-            for (const w of writes) {
+            const deletes = writes.filter((w) => w.$type.endsWith('#delete'));
+            for (const w of deletes) {
               if (!repo.has(w.rkey)) throw new Error('Could not find record');
             }
-            for (const w of writes) repo.delete(w.rkey);
+            for (const w of deletes) repo.delete(w.rkey);
+            const results = writes
+              .filter((w) => w.$type.endsWith('#create'))
+              .map((w) => {
+                const rkey = `rk-new-${repo.size + 1}`;
+                repo.set(rkey, w.value.subject);
+                return {
+                  uri: `at://did:plc:bot/app.bsky.graph.listitem/${rkey}`,
+                };
+              });
+            return { data: { results } };
           }),
           deleteRecord: vi.fn(async ({ rkey }) => {
             if (!repo.has(rkey)) throw new Error('Could not locate record');
@@ -132,6 +158,17 @@ const added = (plan_id, did, acted_at, extra = {}) => ({
   undone_at: null,
   ...extra,
 });
+/** A scanned account in a plan, not yet acted on. */
+const scanned = (plan_id, did, band) => ({
+  plan_id,
+  did,
+  band,
+  action: null,
+  acted_at: null,
+  undone_at: null,
+  engaged: ['like'],
+  already_listed: false,
+});
 const row = (plan_id, did) =>
   db.decision.find((r) => r.plan_id === plan_id && r.did === did);
 
@@ -141,8 +178,10 @@ beforeEach(() => {
     { id: PLAN_B, created_at: '2026-10-01T11:00:00Z', note: 'block @b.test' },
   ];
   db.decision = [];
+  db.protected = [];
   db.writes = [];
   db.reads = [];
+  veto.unreadable = false;
   constellation.clear();
   repo = new Map();
   for (const fn of Object.values(graph)) fn.mockClear();
@@ -166,6 +205,72 @@ describe('finding a plan', () => {
   });
 });
 
+describe('approve', () => {
+  it('checks the protected set at the write, not only the band in the plan', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:f', 'UNKNOWN'),
+    ];
+    // Followed after the plan was made.
+    db.protected = [{ did: 'did:plc:f', reason: 'you follow them' }];
+
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+
+    expect(out).toMatchObject({ added: 1, remaining: 0 });
+    expect(out.message).toMatch(/1 refused: PROTECTED/);
+    expect([...repo.values()]).toEqual(['did:plc:a']);
+    expect(row(PLAN_A, 'did:plc:f').acted_at).toBe(null);
+  });
+
+  it('writes nothing when the protected set cannot be read', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:a', 'UNKNOWN')];
+    veto.unreadable = true;
+    await expect(applyPlan(bot(), db.plan[0], ['UNKNOWN'])).rejects.toThrow(
+      /protected set/,
+    );
+    expect(repo.size).toBe(0);
+  });
+
+  it('keeps every band approved in the plan record, rate limit or not', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:n', 'NOTABLE'),
+    ];
+    await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+
+    const limited = bot();
+    limited.com.atproto.repo.applyWrites.mockRejectedValue(
+      new Error('Rate Limit Exceeded'),
+    );
+    const out = await applyPlan(limited, await findPlan('1c2d3e4f'), [
+      'NOTABLE',
+    ]);
+
+    expect(out).toMatchObject({ added: 0, remaining: 1 });
+    expect(db.plan[0].approved_at).toBeTruthy();
+    expect(db.plan[0].approved_bands).toEqual(['UNKNOWN', 'NOTABLE']);
+  });
+
+  it('writes an account named twice once, and refuses PROTECTED by name', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:p', 'PROTECTED'),
+    ];
+    const out = await applyPlanToActors(bot(), db.plan[0], [
+      'did:plc:a',
+      '@did:plc:a',
+      'did:plc:p',
+      'did:plc:nobody',
+    ]);
+    expect(out.added).toBe(1);
+    expect(repo.size).toBe(1);
+    expect(out.message).toBe(
+      'Added 1 by name. 1 refused: PROTECTED. Not in this plan: did:plc:nobody.',
+    );
+    expect(row(PLAN_A, 'did:plc:a').approved_via).toBe('individual');
+  });
+});
+
 describe('undo', () => {
   it('takes one block back off with one lookup, not a walk of the repo', async () => {
     db.decision = [added(PLAN_B, 'did:plc:b', '2026-10-01T11:00:00Z')];
@@ -186,7 +291,7 @@ describe('undo', () => {
   });
 
   it('closes an account that already came off another way, instead of asking again forever', async () => {
-    // Blocked, then unblocked by a path that left the decision open.
+    // Taken off the list outside the bot, so the decision is still open.
     db.decision = [added(PLAN_B, 'did:plc:b', '2026-10-01T11:00:00Z')];
     const agent = bot();
 

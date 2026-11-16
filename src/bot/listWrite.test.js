@@ -1,13 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const protectedRows = new Map();
+const veto = { unreadable: false };
 const decisions = [];
 vi.mock('./db.js', () => ({
-  select: vi.fn(async (table, { eq }) =>
-    table === 'protected' && protectedRows.has(eq.did)
-      ? [{ reason: protectedRows.get(eq.did) }]
-      : [],
-  ),
+  select: vi.fn(async (table, { eq = {}, where = {} }) => {
+    if (table !== 'protected') return [];
+    if (veto.unreadable) throw new Error('no such table: protected');
+    if (eq.did) {
+      return protectedRows.has(eq.did)
+        ? [{ reason: protectedRows.get(eq.did) }]
+        : [];
+    }
+    return [...protectedRows.keys()]
+      .filter((did) => where.did.includes(`"${did}"`))
+      .map((did) => ({ did }));
+  }),
   selectAll: vi.fn(async (table, { eq = {}, where = {} }) =>
     table === 'decision'
       ? decisions.filter(
@@ -44,7 +52,7 @@ vi.mock('../lib/target.js', () => ({
   ),
 }));
 
-const { applyCommand } = await import('./listWrite.js');
+const { applyCommand, protectedAmong } = await import('./listWrite.js');
 
 process.env.MOD_LIST_URI = 'at://did:plc:bot/app.bsky.graph.list/3list';
 
@@ -69,6 +77,7 @@ function agent() {
 
 beforeEach(() => {
   protectedRows.clear();
+  veto.unreadable = false;
   decisions.length = 0;
   graph.rkeysForWrite.mockReset();
   graph.noteListed.mockReset();
@@ -106,7 +115,7 @@ describe('one block', () => {
     expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
   });
 
-  it('keeps the PROTECTED veto', async () => {
+  it('refuses a PROTECTED account', async () => {
     graph.rkeysForWrite.mockResolvedValue([]);
     protectedRows.set('did:plc:friendtest', 'you follow them');
     const a = agent();
@@ -114,10 +123,43 @@ describe('one block', () => {
     expect(out).toMatchObject({ ok: false, vetoed: 'you follow them' });
     expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
   });
+
+  it('refuses when the protected set cannot be read', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    veto.unreadable = true;
+    const a = agent();
+    await expect(applyCommand(a, 'list_add', 'x.test')).rejects.toThrow(
+      /protected set/,
+    );
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
+  it('refuses an action it does not know rather than removing', async () => {
+    graph.rkeysForWrite.mockResolvedValue(['r1']);
+    const a = agent();
+    await expect(applyCommand(a, 'list_block', 'x.test')).rejects.toThrow();
+    expect(a.com.atproto.repo.deleteRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe('the protected set for a bulk write', () => {
+  it('names which of a batch are protected now', async () => {
+    protectedRows.set('did:plc:friend', 'you follow them');
+    expect(
+      await protectedAmong(['did:plc:a', 'did:plc:friend', 'did:plc:a']),
+    ).toEqual(new Set(['did:plc:friend']));
+  });
+
+  it('throws when the table cannot be read', async () => {
+    veto.unreadable = true;
+    await expect(protectedAmong(['did:plc:a'])).rejects.toThrow(
+      /protected set/,
+    );
+  });
 });
 
 describe('one unblock', () => {
-  it('deletes every copy, so an account two plans added really comes off', async () => {
+  it('deletes every copy of an account two plans added', async () => {
     graph.rkeysForWrite.mockResolvedValue(['r1', 'r2']);
     const a = agent();
     const out = await applyCommand(a, 'list_remove', 'x.test');
@@ -147,7 +189,7 @@ describe('one unblock', () => {
     expect(decisions.some((r) => r.action === 'list_remove')).toBe(true);
   });
 
-  it('treats an already-deleted copy as done, and an unknown list as no', async () => {
+  it('treats an already-deleted copy as done, and changes nothing when membership is unknown', async () => {
     graph.rkeysForWrite.mockResolvedValue(['r1']);
     const a = agent();
     a.com.atproto.repo.deleteRecord.mockRejectedValue(
@@ -159,5 +201,14 @@ describe('one unblock', () => {
     const out = await applyCommand(agent(), 'list_remove', 'x.test');
     expect(out.ok).toBe(false);
     expect(out.message).toMatch(/could not check/);
+  });
+
+  it('does not need the protected set to take someone off', async () => {
+    graph.rkeysForWrite.mockResolvedValue(['r1']);
+    veto.unreadable = true;
+    const a = agent();
+    const out = await applyCommand(a, 'list_remove', 'x.test');
+    expect(out).toMatchObject({ ok: true, changed: true });
+    expect(a.com.atproto.repo.deleteRecord).toHaveBeenCalledTimes(1);
   });
 });

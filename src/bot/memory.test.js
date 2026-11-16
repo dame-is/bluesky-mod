@@ -46,6 +46,17 @@ describe('notes from the chat', () => {
     expect((await listNotes()).map((n) => n.text)).toEqual(['skip likers']);
   });
 
+  it('forgets the note that matches word for word over others that contain it', async () => {
+    await remember('skip likers');
+    await remember('skip likers and reposters');
+    expect((await forget({ text: 'Skip  likers' })).message).toBe(
+      'Forgotten: "skip likers"',
+    );
+    expect((await listNotes()).map((n) => n.text)).toEqual([
+      'skip likers and reposters',
+    ]);
+  });
+
   it('holds a bounded number', async () => {
     for (let i = 0; i < MAX_NOTES; i += 1) await remember(`note ${i}`);
     expect((await remember('one more')).ok).toBe(false);

@@ -1,17 +1,18 @@
-// The only write the moderator account makes to the graph on the owner's say-so.
+// Adding one account to the list, or taking one off, on the owner's say-so.
 //
-// Reached from `parseCommand`, never from the tool loop. See src/lib/command.js
-// for why that distinction is the whole design. Nothing here is callable by the
-// model.
+// Classic mode reaches this only from a parsed command (src/lib/command.js),
+// so the target is the owner's literal text and the model has no path here.
+// Agent mode reaches it through its write tools, after the write check
+// (tiers.js).
 //
-// THE PROTECTED VETO IS ENFORCED HERE, not only in the scorer. The `protected`
-// table is the hard set: accounts the owner follows, mutuals, curation-list
-// members. The documented rule is that no automated path may ever act on them,
-// and a typed command travelling down an automated path is still an automated
-// path. An early audit found some of them already sitting on the block list,
-// which is the argument for checking at the write rather than trusting that
-// nothing upstream will ever get it wrong. The owner can still do it by hand in
-// a client; what is refused is this system doing it quietly.
+// The PROTECTED veto is enforced here, at the write, and not only in the
+// scorer, so a mistake upstream cannot get past it. The `protected` table
+// holds the owner's follows, members of their curation lists and anyone added
+// by hand, and no automated path may add them. A typed command still runs
+// through this system, so it is refused too. The owner can still do it by
+// hand in a client.
+
+import crypto from 'node:crypto';
 
 import { resolveActor } from '../lib/target.js';
 import { select, upsert } from './db.js';
@@ -20,8 +21,7 @@ import { closeAdds } from './closeAdds.js';
 
 /**
  * Which list a command acts on: MOD_LIST_URI, a list the moderator account
- * owns. No default, on purpose: a default that outlives the list it names
- * fails as a confusing 400 from the AppView rather than as a missing setting.
+ * owns. There is no default; config.js refuses to start without it.
  */
 export function listUri() {
   return process.env.MOD_LIST_URI || '';
@@ -32,7 +32,12 @@ function ownerOf(uri) {
   return m ? m[1] : null;
 }
 
-/** Is this DID in the hard veto set, and why? */
+// A veto table that cannot be read is a veto that cannot be honoured, so the
+// write is refused. Guessing wrong here blocks someone the owner follows.
+const VETO_UNREADABLE =
+  'could not read the protected set, so the write is refused rather than risked';
+
+/** Is this DID in the veto set, and why? */
 async function protectedReason(did) {
   try {
     const rows = await select('protected', {
@@ -41,13 +46,37 @@ async function protectedReason(did) {
     });
     return rows?.[0]?.reason ?? null;
   } catch {
-    // A veto table we cannot read is a veto we cannot honour. Refuse rather
-    // than fall through to the write: the failure mode of guessing wrong here
-    // is blocking someone the owner follows.
-    throw new Error(
-      'could not read the protected set, so the write is refused rather than risked',
-    );
+    throw new Error(VETO_UNREADABLE);
   }
+}
+
+/**
+ * Which of these DIDs are in the veto set now.
+ *
+ * For bulk writes, whose bands were scored when the plan was made: someone
+ * the owner followed since then is PROTECTED now, whatever the plan says.
+ * Throws if the table cannot be read.
+ *
+ * @param {string[]} dids
+ * @returns {Promise<Set<string>>}
+ */
+export async function protectedAmong(dids) {
+  const wanted = [...new Set(dids.filter(Boolean))];
+  const out = new Set();
+  for (let i = 0; i < wanted.length; i += 50) {
+    const chunk = wanted.slice(i, i + 50);
+    let rows;
+    try {
+      rows = await select('protected', {
+        select: 'did',
+        where: { did: `in.(${chunk.map((d) => `"${d}"`).join(',')})` },
+      });
+    } catch {
+      throw new Error(VETO_UNREADABLE);
+    }
+    for (const r of rows || []) out.add(r.did);
+  }
+  return out;
 }
 
 /**
@@ -59,6 +88,7 @@ async function protectedReason(did) {
  * @param {object} [opts]
  * @param {string} [opts.raw]   the owner's literal message, for the decision log
  * @param {string} [opts.band]  the band at the time, if it was scored
+ * @param {Function} [opts.lookUp]  scores `actor`, when `band` is not given
  * @param {string} [opts.via]   how it was asked for. 'command' is the owner's
  *   typed verb; 'agent' is agent mode acting on what they wrote in words. Both
  *   are their say-so, and the log still has to tell them apart: one is their
@@ -75,19 +105,20 @@ export async function applyCommand(
   actor,
   { raw = '', band = null, lookUp = null, via = 'command' } = {},
 ) {
+  // Anything else would fall through to the removal below.
+  if (action !== 'list_add' && action !== 'list_remove') {
+    throw new Error(`applyCommand: unknown action ${action}`);
+  }
   const uri = listUri();
   const bot = agent.session?.did;
-  const owner = ownerOf(uri);
 
-  if (owner !== bot) {
-    // The honest error. This is the state the system is in when MOD_LIST_URI
-    // names a list another account owns, and a permission failure from the PDS
-    // would say nothing useful.
+  // config.js checks this at start. Checked again here because a permission
+  // failure from the PDS would say nothing useful.
+  if (ownerOf(uri) !== bot) {
     return {
       ok: false,
       message:
-        `That list is in ${owner === null ? 'an unreadable repo' : "the owner's own repo"}, and I can only write to lists this account owns. ` +
-        'The list has to move to this account first, or remove them from your client.',
+        'MOD_LIST_URI is not a list this account owns, so I cannot write to it.',
     };
   }
 
@@ -101,37 +132,36 @@ export async function applyCommand(
     };
   }
 
-  // Score it before writing, so the log records what the gate saw rather than
-  // UNSCORED. The whole claim of this system is that a decision is replayable,
-  // and a row that says only "The owner typed this" cannot be replayed against
-  // anything. Best effort: a scoring failure must not stop the owner acting.
+  // Scored before the write, so the log records what the gate saw rather than
+  // UNSCORED, and the decision can be replayed. Best effort: a scoring failure
+  // must not stop the owner acting.
   //
-  // IN PARALLEL with the veto and the membership check. A block used to do them
-  // one after another, and the membership check alone walked every listitem in
-  // the repo (seconds, for a big list) on every block. It is one
-  // Constellation request now; see rkeysForWrite in graphFacts.js.
+  // In parallel with the veto and the membership check. The membership check
+  // is one Constellation request (rkeysForWrite in graphFacts.js), and walks
+  // the repo only when Constellation cannot answer.
   const [account, reason, rkeys] = await Promise.all([
     !band && lookUp
       ? Promise.resolve(lookUp(actor)).catch(() => null)
       : Promise.resolve(null),
-    protectedReason(did),
+    action === 'list_add' ? protectedReason(did) : null,
     rkeysForWrite(uri, did),
   ]);
   const scored = band || account?.band || null;
 
-  if (reason && action === 'list_add') {
-    return {
-      ok: false,
-      did,
-      vetoed: reason,
-      account,
-      message:
-        `${actor} is PROTECTED (${reason}). You follow them, or they are on one of your curation lists. ` +
-        'No automated path acts on those, including this one. Do it in your client if you mean it.',
-    };
-  }
-
   if (action === 'list_add') {
+    if (reason) {
+      return {
+        ok: false,
+        did,
+        vetoed: reason,
+        account,
+        message:
+          `${actor} is PROTECTED (${reason}). You follow them, or they are on one of your curation lists. ` +
+          'No automated path acts on those, including this one. Do it in your client if you mean it.',
+      };
+    }
+    // `rkeys` is null when membership could not be read. That still writes: a
+    // duplicate listitem is a cheaper mistake than a block that did not happen.
     if (rkeys?.length) {
       return {
         ok: true,
@@ -187,8 +217,7 @@ export async function applyCommand(
       message: `${actor} was not on the list.`,
     };
   }
-  // EVERY copy. An account two plans both added has two listitems, and
-  // deleting only the first left them on the list while this said "Removed".
+  // Every copy: an account two plans both added has two listitems.
   for (const rkey of rkeys) {
     try {
       await agent.com.atproto.repo.deleteRecord({
@@ -204,10 +233,9 @@ export async function applyCommand(
     }
   }
   noteUnlisted(uri, did);
-  // Close what put them on, as the queue's Remove does. Left open, "undo last"
-  // keeps choosing the plan that added them and reports them as still to take
-  // off, however many times it is asked. Best effort, like the log below: the
-  // listitems are already gone, and that is the part the owner asked for.
+  // Close the decisions that put them on, or "undo last" keeps choosing the
+  // plan that added them. Best effort, like the log below: the listitems are
+  // already gone, and that is what the owner asked for.
   await closeAdds(did, raw || 'unblocked').catch(() => {});
   await log(did, 'list_remove', raw, scored, via);
   return {
@@ -220,17 +248,15 @@ export async function applyCommand(
 }
 
 /**
- * Record it where "why am I on your list" is already answered.
+ * Record the write where "why am I on your list" is answered.
  *
- * A command is a plan of one, approved by the owner at the moment they typed
- * it, so it goes in `plan` + `decision` like every other action rather than
- * into a log of its own. `note` keeps the owner's LITERAL words: when someone
- * asks why they were listed, "the owner typed this sentence on this date" is
- * the whole answer, and it is the one kind of entry in that table that needs
- * no reconstruction.
+ * A command is a plan of one, approved at the moment it was typed, so it goes
+ * in `plan` + `decision` like every other action. `note` keeps the owner's
+ * literal words: "the owner typed this sentence on this date" is the whole
+ * answer, with nothing to reconstruct.
  *
- * Best effort. A write that happened and was not logged is bad; refusing to
- * write because the log is down is worse, and the repo itself is the record.
+ * Best effort. A write that is not logged is bad; refusing to write because
+ * the log is down is worse, and the repo itself is the record.
  */
 async function log(did, action, raw, band, via = 'command') {
   try {

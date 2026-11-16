@@ -1,21 +1,20 @@
 // Notes the owner asked the bot to remember, from the chat.
 //
 // The standing instructions in the config file (see agentConfig.js) are
-// read-only to the bot, on purpose: a leaked bot password must not be able to
-// rewrite the rules it runs under. These notes are the layer the chat can
-// write, and only from the owner's LITERAL words ("remember: never block
-// people who only liked"), parsed by parseMemoryCommand. The model never
-// writes one. A note is an instruction read on every turn, and a post the
-// agent read could otherwise talk it into saving one.
+// read-only to the bot, so a leaked bot password cannot rewrite the rules it
+// runs under. These notes are the layer the chat can write, and only from a
+// writer's literal words ("remember: never block people who only liked"),
+// parsed by parseMemoryCommand. The model never writes one: a note is an
+// instruction read on every turn, and a post the agent read could otherwise
+// talk it into saving one.
 //
-// Removed notes are stamped rather than deleted, like everything else in the
-// database.
+// A forgotten note is stamped `removed_at`, not deleted.
 
 import { select, upsert, update } from './db.js';
 
 /** Enough to be standing guidance, not enough to be a second system prompt. */
 export const MAX_NOTES = 30;
-export const MAX_NOTE_CHARS = 500;
+const MAX_NOTE_CHARS = 500;
 
 /** The live notes, oldest first, so their numbers stay put as notes are added. */
 export async function listNotes() {
@@ -57,15 +56,19 @@ export async function forget({ index = null, text = null } = {}) {
   let note = null;
   if (index != null) note = notes[index - 1] ?? null;
   else if (text) {
-    const needle = text.toLowerCase();
-    const hits = notes.filter((n) => n.text.toLowerCase().includes(needle));
-    if (hits.length > 1) {
+    const needle = text.replace(/\s+/g, ' ').trim().toLowerCase();
+    const hits = needle
+      ? notes.filter((n) => n.text.toLowerCase().includes(needle))
+      : [];
+    // A note that matches word for word wins over others that contain it.
+    const exact = hits.find((n) => n.text.toLowerCase() === needle);
+    if (!exact && hits.length > 1) {
       return {
         ok: false,
         message: `That matches ${hits.length} notes. "forget <number>" picks one; "what do you remember" numbers them.`,
       };
     }
-    note = hits[0] ?? null;
+    note = exact ?? hits[0] ?? null;
   }
   if (!note) return { ok: false, message: "I don't have a note like that." };
   await update(
