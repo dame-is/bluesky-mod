@@ -1,16 +1,15 @@
 // The account report, rendered rather than written.
 //
-// A lookup is a form with the same nine fields every time. Handing that to a
-// model costs a call, a couple of thousand tokens and a different shape on
-// every answer, and buys prose where the owner wanted a table. So this is a
-// template with variables, filled from what score.js already computed, and no
-// model runs.
+// A lookup is a form with the same fields every time, so it is a template
+// filled from what score.js already computed. A model would cost a call and
+// give a different shape on every answer, and buy prose where a table is
+// wanted.
 //
-// The template is editable in the config file. The VALUES are not, and one of
-// them is dangerous: `displayName` is written by the account being looked at. A
-// display name carrying a newline could forge a line of the report, and a
-// forged "Band: PROTECTED" reads exactly like a field this code produced. Every
-// substituted value is flattened to one line and capped before it is used.
+// The template is editable in the config file; the values are not, and one of
+// them is written by the account being looked at. A display name carrying a
+// newline could forge a line such as "Band: PROTECTED" that reads exactly like
+// a field this code produced. So every substituted value is flattened to one
+// line and capped before it is used.
 
 /** What a lookup looks like unless the owner changes it. */
 export const DEFAULT_REPORT_TEMPLATE = [
@@ -26,29 +25,34 @@ export const DEFAULT_REPORT_TEMPLATE = [
   'Lists: {lists}',
 ].join('\n');
 
+/** What an empty field shows. */
+const EMPTY = '-';
+
 /**
  * One line, bounded.
  *
- * Newlines are the attack: a field that can contain one can add a row to the
- * report that looks like this code wrote it. \p{C} covers control and format
- * characters together, which also catches the bidi overrides that can reorder
- * a line without adding anything visible to it. The cap is so a 300-character
- * display name cannot push the real fields out of a chat bubble.
+ * A newline in a field can add a row that looks like this code wrote it.
+ * \p{C} covers control and format characters together, which also catches the
+ * bidi overrides that reorder a line without adding anything visible. The cap
+ * keeps a 300-character display name from pushing the real fields out of a
+ * chat bubble, and counts code points so a cut never lands inside a surrogate
+ * pair.
  */
 export function sanitiseField(value, { max = 64 } = {}) {
-  if (value === null || value === undefined || value === '') return '—';
+  if (value === null || value === undefined || value === '') return EMPTY;
   const flat = String(value)
     .replace(/\p{C}/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!flat) return '—';
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  if (!flat) return EMPTY;
+  const chars = Array.from(flat);
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : flat;
 }
 
 /** How this account stands to the owner, in words rather than three booleans. */
 export function relationshipOf(a) {
-  // First, because it settles the rest: someone who blocks you follows nobody
-  // you can see, and cannot reply to you or quote you while the block stands.
+  // First, because it settles the rest: someone who blocks you cannot reply to
+  // or quote you while the block stands.
   if (a.blocksYou) return 'They block you';
   if (a.mutual) return 'Mutual';
   if (a.youFollow) return 'You follow them';
@@ -65,9 +69,9 @@ export function listsOf(a) {
 }
 
 /** Every variable a template may use. */
-export function variablesFor(account) {
+function variablesFor(account) {
   const num = (n) =>
-    typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : '—';
+    typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : EMPTY;
   return {
     handle: account.handle || account.did,
     did: account.did,
@@ -83,7 +87,7 @@ export function variablesFor(account) {
     postsPerDay:
       typeof account.postsPerDay === 'number'
         ? account.postsPerDay.toFixed(0)
-        : '—',
+        : EMPTY,
     relationship: relationshipOf(account),
     lists: listsOf(account),
     protectedReason: account.protectedReason || '',
@@ -91,40 +95,33 @@ export function variablesFor(account) {
 }
 
 /**
- * Fill the template.
+ * Fill `template` from `vars`.
  *
  * An unknown {placeholder} is left alone rather than blanked, so a typo in the
- * config file shows up in the output instead of silently deleting a line.
+ * config file shows up in the output instead of silently deleting a line. A
+ * blank template falls back to the default, since an empty report helps
+ * nobody.
  */
-export function renderReport(
-  account,
-  { template = DEFAULT_REPORT_TEMPLATE } = {},
-) {
-  const vars = variablesFor(account);
-  return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
-    key in vars ? sanitiseField(vars[key]) : whole,
+function fill(template, fallback, vars, max) {
+  return String(template || fallback).replace(/\{(\w+)\}/g, (whole, key) =>
+    Object.hasOwn(vars, key) ? sanitiseField(vars[key], { max }) : whole,
   );
 }
 
+/** Fill the account report template. */
+export function renderReport(account, { template } = {}) {
+  return fill(template, DEFAULT_REPORT_TEMPLATE, variablesFor(account), 64);
+}
+
 /**
- * What the owner can do about this account, as parseable commands.
+ * What this bot can do, said out loud by code rather than by a model. A model
+ * asked what it can do reads the same prompt whether or not a tool is wired
+ * up behind it, and answers confidently either way.
  *
- * PROTECTED gets no add option. The write would refuse it anyway, and a button
- * that exists to be rejected is worse than no button.
- */
-/**
- * What this thing can do, said out loud.
- *
- * It did not exist for the first several months and the capabilities were
- * discoverable only by having built them, which is a fine state for a tool
- * nobody else uses and a silly one for a tool you talk to. Deterministic: a
- * model asked what it can do will answer confidently and be wrong, because it
- * reads the same prompt whether or not a tool is wired up behind it.
- *
- * WRITES ARE LEFT OUT FOR A READ-ONLY SENDER rather than listed and refused,
- * the same rule the menus already follow. A menu of buttons that reject you
- * teaches you to stop reading the menu. For the same reason, the commands
- * that need a model are left out when no model is set up.
+ * Writes are left out for a read-only sender rather than listed and refused,
+ * the same rule the menus follow: a menu of buttons that reject you teaches
+ * you to stop reading the menu. For the same reason, commands that need a
+ * model are left out when none is set up.
  */
 export function helpText({ canWrite = true, hasModel = true } = {}) {
   const network = [
@@ -168,8 +165,23 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
   return [...reads, ...(canWrite ? writes : []), ...tail].join('\n');
 }
 
+/**
+ * How a menu command names an account. A missing handle, or one that does not
+ * verify ("handle.invalid"), cannot be resolved, so those use the DID, which
+ * the command parser takes bare and not after an @.
+ */
+function actorRef(a) {
+  return a.handle && a.handle !== 'handle.invalid' ? `@${a.handle}` : a.did;
+}
+
+/**
+ * What the owner can do about this account, as parseable commands.
+ *
+ * PROTECTED gets no add option. The write would refuse it anyway, and a button
+ * that exists to be rejected is worse than no button.
+ */
 export function actionsFor(account) {
-  const at = `@${account.handle || account.did}`;
+  const at = actorRef(account);
   const out = [];
   if (!account.protectedReason) {
     out.push({ label: `Add ${at} to the list`, command: `list add ${at}` });
@@ -178,10 +190,10 @@ export function actionsFor(account) {
     label: `Remove ${at} from the list`,
     command: `list remove ${at}`,
   });
-  // The way to LEARN something before acting. The band answers "who would
-  // notice if I blocked them" and says nothing at all about conduct, which is
-  // the question a person is usually actually asking. Offering the read beside
-  // the act is what keeps the band from being read as a verdict by default.
+  // A way to learn something before acting. The band answers "who would notice
+  // if I blocked them" and says nothing about conduct, which is usually the
+  // question being asked. Offering the read beside the act keeps the band from
+  // being taken as a verdict.
   out.push({
     label: `Read ${at}'s recent posts first`,
     command: `read ${at}`,
@@ -209,7 +221,7 @@ export const DEFAULT_PLAN_TEMPLATE = [
 ].join('\n');
 
 /** Every variable a post-scan template may use. */
-export function planVariablesFor(plan) {
+function planVariablesFor(plan) {
   const byBand = plan.byBand || {};
   const needsLook = Object.entries(byBand)
     .filter(([b, n]) => b !== 'UNKNOWN' && n)
@@ -229,7 +241,7 @@ export function planVariablesFor(plan) {
     authorVouches: plan.author?.vouches ?? 0,
     authorFollowers: plan.author?.followers ?? null,
     participants: plan.total,
-    engagements: engagements || '—',
+    engagements: engagements || EMPTY,
     needsLook: needsLook || 'none',
     truncated: plan.truncated ? 'yes, the harvest hit a page cap' : 'no',
     cost: plan.cost || '',
@@ -237,15 +249,9 @@ export function planVariablesFor(plan) {
   };
 }
 
-/** Fill the post-scan template. Unknown placeholders survive, as above. */
-export function renderPlanReport(
-  plan,
-  { template = DEFAULT_PLAN_TEMPLATE } = {},
-) {
-  const vars = planVariablesFor(plan);
-  return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
-    key in vars ? sanitiseField(vars[key], { max: 120 }) : whole,
-  );
+/** Fill the post-scan template. */
+export function renderPlanReport(plan, { template } = {}) {
+  return fill(template, DEFAULT_PLAN_TEMPLATE, planVariablesFor(plan), 120);
 }
 
 /**
@@ -259,13 +265,11 @@ export function planActions(plan) {
   const byBand = plan.byBand || {};
   const out = [];
 
-  // THE AUTHOR LEADS. A post with no likes and no replies scored every band at
-  // zero and offered only "Do nothing", which is a true report about the graph
-  // around the post and a useless one about the post: the account in front of
-  // the owner is the one who WROTE it. PROTECTED gets no add option here for the
-  // same reason it gets none in actionsFor.
+  // The author leads. When nobody engaged with a post every band is zero, and
+  // the account in front of the owner is still the one who wrote it.
+  // PROTECTED gets no add option here, as in actionsFor.
   const author = plan.author;
-  const at = author ? `@${author.handle || author.did}` : null;
+  const at = author ? actorRef(author) : null;
   if (at && !author.protectedReason) {
     out.push({
       label: `Add the author ${at} to the list`,
@@ -279,10 +283,10 @@ export function planActions(plan) {
     });
   }
 
-  // Sorting by band tells you who would notice. On a post with hundreds of
-  // quotes that is mostly UNKNOWN, with no way to tell the person who wrote an
-  // insult from the person arguing about a policy. So when there are words to
-  // read, offer to read them BEFORE offering to add everyone.
+  // Bands say who would notice. On a post with hundreds of quotes that is
+  // mostly UNKNOWN, with no way to tell an insult from an argument about a
+  // policy. So when there are words to read, offer to read them before
+  // offering to add everyone.
   if (plan.withText) {
     out.push({
       label: `Sort the ${plan.withText} who wrote something by tone`,

@@ -1,47 +1,51 @@
 // Build the reference data every scoring decision reads.
 //
 // One number does the work: for any account, how many of the people the owner
-// follows also follow them. Computing it per-candidate at decision time would
-// mean an API call per account and a different answer every time the graph
-// moved. Computing it ONCE per snapshot turns it into a dictionary lookup, and
-// (the part that matters more) freezes it, so a decision made on Tuesday can
-// be replayed against the graph as it stood on Tuesday.
+// follows also follow them. Computing it once per snapshot turns it into a
+// lookup instead of an API call per account, and freezes it, so a decision can
+// be replayed against the graph as it stood that day.
 //
-// The work is one follow list per account the owner follows: a couple of
-// hundred follows is roughly 2,000 API calls. That is too long to hold the
-// bot's one job queue, so it spends a time budget, stops cleanly, and resumes
-// on the next step (see src/snapshot.js). Edges are staged raw and aggregated
-// in a single SQL statement at the end, so an interrupted run leaves a partial
-// edge set (harmless) rather than a half-counted vouch table that looks
-// finished and is wrong.
+// It takes one follow list per account the owner follows, which is too much
+// work to hold the bot's one job queue. So a run spends a time budget, stops
+// cleanly, and resumes on the next step (see src/snapshot.js). Edges are staged
+// raw and aggregated in one SQL statement at the end, so an interrupted run
+// leaves a partial edge set rather than a vouch table that looks finished and
+// is wrong.
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
+import { fetchWithTimeout } from './atproto.js';
 
 /** `getFollows` pages at 100. */
 const PAGE = 100;
 
 /**
- * Follow-list pages to read per circle member.
- *
- * At 100 per page this reads the first 1,500 accounts someone follows. A member
- * who follows more than that contributes a truncated set, which understates the
- * vouch count for accounts deep in their list. That is the right way to be
- * wrong: understating a vouch sends someone to review, overstating one waves
- * them through, and only one of those mistakes is recoverable.
+ * Follow-list pages to read per circle member: the first 1,500 accounts they
+ * follow. A member who follows more contributes a truncated set, which
+ * understates vouches for accounts deep in their list. An understated vouch
+ * can drop an account to UNKNOWN, the band approved without a named look, so
+ * this cap is a known gap in coverage, kept to bound the cost of a snapshot.
  */
 const MAX_PAGES = 15;
+
+/**
+ * `listRecords` pages to read from the owner's own repo before giving up.
+ *
+ * These reads decide who is PROTECTED, and the snapshot replaces the protected
+ * set with what they return. So a read that cannot finish throws instead of
+ * returning part of the answer, and the old set stays in place.
+ */
+const MAX_RECORD_PAGES = 1000;
 
 /** How many follow lists to fetch at once. */
 const CONCURRENCY = 8;
 
 /**
- * Fetch JSON, distinguishing a failure that will never succeed from one that
+ * Fetch JSON, separating a failure that will never succeed from one that
  * might.
  *
- * The distinction is load-bearing. An account you follow that has been
- * deactivated or taken down answers 400 from getFollows and always will;
- * retrying it forever is how a snapshot livelocks with everything else done.
- * A 429 or a 5xx is worth coming back for.
+ * An account that is deactivated or taken down answers 400 from getFollows and
+ * always will, and retrying it forever would hold the snapshot open. A 429 or
+ * a 5xx is worth coming back for.
  *
  * @returns {{ body: object|null, permanent: boolean }}
  */
@@ -59,7 +63,7 @@ async function getJson(url, fetchImpl, signal, tries = 3) {
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
     }
-    await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
   }
   return { body: null, permanent: false };
 }
@@ -67,22 +71,26 @@ async function getJson(url, fetchImpl, signal, tries = 3) {
 /**
  * Every account `did` follows, up to MAX_PAGES.
  *
- * Reads the AppView rather than the PDS: `getFollows` needs no auth, needs no
- * PLC lookup to find the host, and is cached. The AppView's viewer-filtering
- * problem that rules it out for harvesting does not apply here, because these
- * calls are unauthenticated and so have no viewer to filter for.
+ * Reads the AppView rather than the PDS: `getFollows` needs no auth and no PLC
+ * lookup to find the host. The AppView filters by viewer, which rules it out
+ * for harvesting, but these calls are unauthenticated and so have no viewer.
  */
 export async function followsOf(
   did,
-  { fetchImpl = fetch, signal, appview = APPVIEW, deadline = Infinity } = {},
+  {
+    fetchImpl = fetchWithTimeout,
+    signal,
+    appview = APPVIEW,
+    deadline = Infinity,
+  } = {},
 ) {
   const out = [];
   let cursor;
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    // Checked per PAGE, not per member. A member following 1,500 accounts is
-    // fifteen sequential requests with retries behind each one, so a budget
-    // enforced only between members can overrun by tens of seconds, and every
-    // DM queued behind the step waits that long too.
+    // Checked per page, not per member. A long follow list is fifteen
+    // sequential requests with retries behind each, so a budget enforced only
+    // between members could overrun by tens of seconds, and every DM queued
+    // behind the step would wait that long too.
     if (Date.now() >= deadline)
       return { dids: out, complete: false, aborted: true, permanent: false };
     const url =
@@ -98,43 +106,60 @@ export async function followsOf(
   return { dids: out, complete: false, aborted: false, permanent: false };
 }
 
+/** Every record in one collection of a repo, or a throw. */
+async function listAllRecords({ pds, did, collection, fetchImpl, signal }) {
+  const out = [];
+  let cursor;
+  for (let page = 0; page < MAX_RECORD_PAGES; page += 1) {
+    const url =
+      `${pds}/xrpc/com.atproto.repo.listRecords?repo=${encodeURIComponent(did)}` +
+      `&collection=${collection}&limit=100` +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+    const { body } = await getJson(url, fetchImpl, signal);
+    if (!body) throw new Error(`could not read ${collection} from ${pds}`);
+    out.push(...(body.records || []));
+    cursor = body.cursor;
+    if (!cursor) return out;
+  }
+  throw new Error(
+    `more than ${MAX_RECORD_PAGES * 100} ${collection} records; refusing a partial read`,
+  );
+}
+
 /**
  * Read the accounts the owner follows, straight from the PDS.
  *
- * The PDS rather than the AppView here because this is the authoritative list
- * and it is small: a follow record that exists but has not been indexed yet
- * should still count, since the owner made it.
+ * The PDS rather than the AppView because this is the authoritative list: a
+ * follow record that exists but has not been indexed yet still counts, since
+ * the owner made it.
  */
 export async function readCircle({
   pds,
   did = OWNER_DID,
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   signal,
 } = {}) {
-  const out = [];
-  let cursor;
-  for (let page = 0; page < 40; page += 1) {
-    const url =
-      `${pds}/xrpc/com.atproto.repo.listRecords?repo=${encodeURIComponent(did)}` +
-      `&collection=app.bsky.graph.follow&limit=100` +
-      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const { body } = await getJson(url, fetchImpl, signal);
-    if (!body) break;
-    for (const r of body.records || []) {
-      if (r?.value?.subject) out.push(r.value.subject);
-    }
-    cursor = body.cursor;
-    if (!cursor) break;
-  }
-  return [...new Set(out)];
+  const records = await listAllRecords({
+    pds,
+    did,
+    collection: 'app.bsky.graph.follow',
+    fetchImpl,
+    signal,
+  });
+  return [
+    ...new Set(records.map((r) => r?.value?.subject).filter(Boolean)),
+  ];
 }
 
 /**
  * Index the follow lists of circle members that have not been done yet.
  *
- * Pure orchestration: the caller supplies `pending` (members still to do) and
- * two sinks, so this runs identically against the database and against a Map
- * in a test. Stops when the time budget is spent and reports what is left.
+ * The caller supplies `pending` (members still to do) and two sinks, so this
+ * runs the same against the database and against a Map in a test. Stops when
+ * the time budget is spent and reports what is left.
+ *
+ * `partial` lists members whose follow list was cut short, by the page cap or
+ * by a page that kept failing. Their edges are kept and they are marked done.
  *
  * @param {object} opts
  * @param {string[]} opts.pending           circle members with no follow list yet
@@ -148,7 +173,7 @@ export async function indexCircleFollows({
   writeEdges,
   markDone,
   budgetMs = 45_000,
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   signal,
   onProgress,
 }) {
@@ -176,19 +201,16 @@ export async function indexCircleFollows({
         deadline,
       });
       if (aborted) {
-        // Ran out of budget mid-member. Write nothing and mark nothing: a
-        // partial follow list recorded as complete would understate this
-        // member's vouches for the life of the snapshot, and understating a
-        // vouch is the mistake that sends someone to review who did not need
-        // it. Leaving the row pending costs one retry.
+        // Out of budget mid-member. Write and mark nothing: a follow list cut
+        // short by the clock would understate this member's vouches for the
+        // life of the snapshot, and leaving the row pending costs one retry.
         stopped = true;
         return;
       }
       if (!complete && dids.length === 0) {
-        // Could not read them at all. A permanent failure is reported so the
-        // caller can stop asking: an account that is deactivated or taken down
-        // answers 400 forever, and leaving it pending blocks the snapshot for
-        // good. A transient one is simply left for the next step.
+        // Could not read them at all. Reporting whether the failure is
+        // permanent lets the caller stop asking about an account that will
+        // answer 400 forever; a transient one is left for the next step.
         unreadable.push({ member, permanent });
         continue;
       }
@@ -212,43 +234,27 @@ export async function indexCircleFollows({
 /**
  * Everyone on a curation list the owner made.
  *
- * These are the protected set alongside the follows, and they belong there for
- * a reason worth stating: putting someone on a curation list is a deliberate
- * act of curation. An account the owner went out of their way to collect
- * should never be swept up by a tool reacting to one post, and many people
- * curate far more accounts than they follow, so the follow graph alone would
- * miss them.
+ * These join the follows in the protected set. Putting someone on a curation
+ * list is a deliberate choice, many people curate far more accounts than they
+ * follow, and an account the owner chose to collect should never be swept up
+ * by a tool reacting to one post.
  *
- * Moderation lists are deliberately excluded, since a modlist is the opposite
- * claim. So is any list named in `exclude`: a list filled automatically (say,
- * "everyone who replied to me this month") is a curation list in form only,
- * because nobody chose its members.
+ * Moderation lists are excluded, since a modlist makes the opposite claim. So
+ * is any list named in `exclude`: a list filled automatically ("everyone who
+ * replied to me this month") is a curation list in form only, because nobody
+ * chose its members.
  */
 export async function readCurationMembers({
   pds,
   did = OWNER_DID,
   exclude = [],
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   signal,
 } = {}) {
-  const pages = async (collection) => {
-    const out = [];
-    let cursor;
-    for (let i = 0; i < 200; i += 1) {
-      const url =
-        `${pds}/xrpc/com.atproto.repo.listRecords?repo=${encodeURIComponent(did)}` +
-        `&collection=${collection}&limit=100` +
-        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-      const { body } = await getJson(url, fetchImpl, signal);
-      if (!body) break;
-      out.push(...(body.records || []));
-      cursor = body.cursor;
-      if (!cursor) break;
-    }
-    return out;
-  };
+  const read = (collection) =>
+    listAllRecords({ pds, did, collection, fetchImpl, signal });
 
-  const lists = await pages('app.bsky.graph.list');
+  const lists = await read('app.bsky.graph.list');
   const generated = new Set(exclude);
   const curation = new Set(
     lists
@@ -260,7 +266,7 @@ export async function readCurationMembers({
     lists.map((r) => [r.uri, r.value?.name || 'untitled']),
   );
 
-  const items = await pages('app.bsky.graph.listitem');
+  const items = await read('app.bsky.graph.listitem');
   const out = new Map();
   for (const r of items) {
     const listUri = r.value?.list;
@@ -286,7 +292,6 @@ export function referenceFrom({
   vouchRows = [],
   circleDids = [],
   protectedRows = [],
-  listedDids = [],
   // Set-likes the caller keeps current (graphFacts.js), used as they are
   // rather than copied, so the bot's own writes show up without a reload.
   listed = null,
@@ -296,50 +301,12 @@ export function referenceFrom({
     vouches: new Map(vouchRows.map((r) => [r.did, r.vouches])),
     circle: new Set(circleDids),
     protectedSet: new Map(protectedRows.map((r) => [r.did, r.reason])),
-    // Everyone any circle member follows is, by definition, one hop out. The
-    // vouch table already enumerates exactly that set, so distance 2 comes free
-    // rather than needing its own crawl.
+    // Everyone a circle member follows is one hop out, and the vouch table
+    // already lists exactly that set, so distance 2 needs no crawl of its own.
     neighbourhood: new Set(vouchRows.map((r) => r.did)),
-    alreadyListed: listed ?? new Set(listedDids),
-    // Accounts that already block the owner. Read from Constellation; a block
-    // is a public record in the blocker's own repo.
+    alreadyListed: listed ?? new Set(),
+    // Accounts that already block the owner. A block is a public record in
+    // the blocker's own repo, read through Constellation.
     blockers: blockers ?? new Set(),
   };
-}
-
-/**
- * What a precompute run should do next.
- *
- * Extracted and made pure because the inline version of this decision produced
- * three separate bugs: a budget that let workers overrun their deadline, a
- * progress count that reported the in-memory queue instead of the database,
- * and an `idle` branch that fired on a snapshot which had been collected but
- * never aggregated, answering "ready · 0 scored": a finished-looking reply for
- * a snapshot nothing can be scored against.
- *
- * The rule that ties it together: COLLECTED IS NOT FINALISED. A snapshot with
- * every member read and no vouch rows is halfway, and halfway must never look
- * done.
- *
- * @param {object} state
- * @param {number} state.pending   circle members with no follow list yet
- * @param {number} state.vouches   vouch rows for this snapshot (0 = not aggregated)
- * @param {number} state.ageDays   age of the snapshot
- * @param {number} [state.maxAgeDays]
- * @param {boolean} [state.exists] is there a snapshot at all
- * @param {boolean} [state.restart] forced rebuild
- * @returns {'start'|'collect'|'finalise'|'idle'}
- */
-export function nextAction({
-  pending,
-  vouches,
-  ageDays,
-  maxAgeDays = 7,
-  exists = true,
-  restart = false,
-}) {
-  if (restart || !exists) return 'start';
-  if (pending > 0) return 'collect';
-  if (vouches === 0) return 'finalise';
-  return ageDays >= maxAgeDays ? 'start' : 'idle';
 }

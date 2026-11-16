@@ -1,25 +1,20 @@
 // Everyone who touched a post, and how.
 //
-// Constellation is the source rather than the AppView's getLikes/getRepostedBy,
-// for one reason that decides the whole design: the AppView answers as a VIEWER.
-// It filters what it returns by the blocks and mutes already in place, so the
-// moment you use it to decide who to block it is hiding the people you already
-// acted on and quietly changing its answer as you work. Constellation indexes
-// the firehose and answers the same way for everyone, which is the only useful
-// behaviour for an audit.
+// Constellation is the source rather than the AppView's getLikes and
+// getRepostedBy, because the AppView answers as a viewer. It filters out
+// accounts behind the blocks and mutes already in place, so using it to
+// decide who to block hides the people already acted on and changes its
+// answer as you work. Constellation indexes the firehose and answers the same
+// for everyone.
 //
-// Sources are DISCOVERED, not declared. A counts call returns every
+// Sources are discovered, not declared. A counts call returns every
 // (collection, path) pair pointing at the record, so a like is found the same
-// way a bookmark from an app nobody here has heard of is found. Hardcoding
-// `app.bsky.feed.like:subject.uri` would have meant a tool that goes subtly
-// blind every time the network grows a new verb, and the whole point of
-// harvesting from the Atmosphere rather than from Bluesky is that the network
-// does that constantly.
+// way as engagement from a lexicon this code has never heard of. A fixed list
+// would go blind each time the network adds a verb.
 //
-// What this module does NOT do is judge anyone. It returns who did what. The
-// trust and distance scoring, the bands, and the protected-set veto live in
-// `score.js` and run over this output. Keeping them apart is what lets the
-// harvest be cached and re-scored later as the circle moves.
+// Nothing here judges anyone. It returns who did what; bands, trust and the
+// protected-set veto live in `score.js` and run over this output, so a harvest
+// can be re-scored later as the circle moves.
 
 import {
   getBacklinkSources,
@@ -34,25 +29,24 @@ const PAGE = 100;
 /**
  * How many pages to pull from a single source before giving up on it.
  *
- * A viral post can carry tens of thousands of likes, and pulling all of them to
- * decide who to act on is both slow and pointless: the tail of a big post is
- * strangers, and the scoring will land every one of them in UNKNOWN. The cap is
- * per-source so a post with 20k likes still yields every reply and quote, which
- * are the engagements that actually carry intent. `truncated` on the result says
- * when this bit, and the caller is expected to surface it rather than swallow it.
+ * The tail of a viral post's likes is strangers who all score UNKNOWN, so
+ * reading every one is slow and tells you little. The cap is per source, so a
+ * post with 20k likes still yields every reply and quote, the engagements that
+ * carry intent. `truncated` on the result says when it applied, and callers
+ * surface it.
  */
 const MAX_PAGES = 60;
 
 /**
  * Map a Constellation source onto an engagement kind.
  *
- * Bluesky's own verbs get real names; everything else keeps its NSID so an
- * unrecognised lexicon shows up as itself in the breakdown instead of being
- * bucketed into a lie. `reply.root` and `reply.parent` are deliberately
- * distinct: a direct reply is a person talking TO you and a root-only match is
- * someone further down a thread who may never have addressed you at all.
+ * Bluesky's own verbs get names; anything else keeps its NSID, so an
+ * unrecognised lexicon shows up as itself in the breakdown. `reply` (parent)
+ * is someone answering the post itself. `threadReply` (root) is anyone in the
+ * thread the post starts, including people who never addressed its author, so
+ * a direct reply to a thread's first post counts under both.
  */
-export function engagementKind({ collection, path }) {
+function engagementKind({ collection, path }) {
   const p = path.startsWith('.') ? path.slice(1) : path;
   if (collection === 'app.bsky.feed.like' && p === 'subject.uri') return 'like';
   if (collection === 'app.bsky.feed.repost' && p === 'subject.uri') {
@@ -68,14 +62,13 @@ export function engagementKind({ collection, path }) {
 }
 
 /**
- * Engagement kinds in the order a person reads them: loudest first.
+ * Engagement kinds loudest first, for display order and `primaryKind`.
  *
- * Used for display ordering and for `primaryKind` below. A quote carries more
- * intent than a reply, a reply more than a repost, a repost more than a like.
- * This is a claim about how much deliberate effort each takes, not about how
- * hostile any of them is.
+ * A quote takes more deliberate effort than a reply, a reply more than a
+ * repost, a repost more than a like. This says nothing about how hostile any
+ * of them is.
  */
-export const KIND_ORDER = [
+const KIND_ORDER = [
   'quote',
   'reply',
   'threadReply',
@@ -85,7 +78,7 @@ export const KIND_ORDER = [
 ];
 
 /** The loudest thing this account did, for one-line summaries. */
-export function primaryKind(engagements) {
+function primaryKind(engagements) {
   for (const kind of KIND_ORDER) {
     if (engagements[kind]) return kind;
   }
@@ -94,17 +87,13 @@ export function primaryKind(engagements) {
 }
 
 /**
- * Page one source completely (up to MAX_PAGES) and hand back its rows.
+ * Page one source (up to MAX_PAGES) and hand back its rows.
  *
- * Returns `{ rows, truncated }`. A source that fails outright comes back empty
- * with `failed: true` rather than throwing, because one dead lexicon should not
- * cost you the likes.
- *
- * A source that fails PART WAY is truncated, not complete. It used to come
- * back as complete: one transient error on page 3 of 12 handed over a third
- * of the likers with nothing to say so, and every "not everyone" warning
- * downstream stayed quiet. A partial read that looks like a whole one is the
- * worst way this can go wrong, so a failed page is asked for once more first.
+ * A source that fails outright comes back empty with `failed: true` rather
+ * than throwing, because one dead lexicon should not cost you the likes. One
+ * that fails part way comes back `truncated`, never complete: a partial read
+ * that passes for a whole one would silence every "not everyone" warning
+ * downstream. A failed page is asked for once more before that.
  */
 async function drainSource(uri, source, { signal, maxPages = MAX_PAGES } = {}) {
   const rows = [];
@@ -129,9 +118,9 @@ async function drainSource(uri, source, { signal, maxPages = MAX_PAGES } = {}) {
  * @param {object} [opts]
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.maxPages] per-source page cap
- * @param {string[]} [opts.only] engagement kinds to page (e.g. quote, reply,
- *   threadReply); the rest are still counted in `sources` but not drained. A
- *   watch reads the words, and the likes on a busy post are most of its pages.
+ * @param {string[]} [opts.only] engagement kinds to read (e.g. quote, reply,
+ *   threadReply); the rest are skipped. A watch reads the words, and the likes
+ *   on a busy post are most of its pages.
  * @param {(s: {done: number, total: number, source: string}) => void} [opts.onProgress]
  * @returns {Promise<{
  *   uri: string,
@@ -148,7 +137,7 @@ async function drainSource(uri, source, { signal, maxPages = MAX_PAGES } = {}) {
  */
 export async function harvestPost(uri, opts = {}) {
   const { signal, maxPages, onProgress, only = null } = opts;
-  const raw = await getBacklinkSources(uri);
+  const raw = await getBacklinkSources(uri, { signal });
   const flat = flattenSources(raw);
   if (!flat) {
     throw new Error(
@@ -156,8 +145,7 @@ export async function harvestPost(uri, opts = {}) {
     );
   }
 
-  // Sources with nothing in them still get reported (a zero is informative:
-  // "nobody quoted this" is an answer) but are not paged.
+  // Only sources with something in them are paged.
   const live = flat.filter(
     (s) => s.count > 0 && (!only || only.includes(engagementKind(s))),
   );
@@ -223,16 +211,4 @@ export async function harvestPost(uri, opts = {}) {
     totals: { participants: participants.length, engagements, records },
     truncated: sources.some((s) => s.truncated),
   };
-}
-
-/**
- * Collapse a harvest to the DIDs alone, for feeding the scorer.
- *
- * `excludeSelf` drops the post's own author, who otherwise shows up on every
- * harvest of their own thread as a pile of self-replies.
- */
-export function participantDids(harvest, { excludeSelf = null } = {}) {
-  return harvest.participants
-    .map((p) => p.did)
-    .filter((did) => did !== excludeSelf);
 }

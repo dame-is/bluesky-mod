@@ -1,25 +1,17 @@
-// Turn whatever you pasted into an at:// URI.
+// Turn a pasted post link or at:// URI into an at:// URI.
 //
-// The moderation tool's front door takes a link from wherever you were when
-// you decided to look: the Bluesky app, one of the forks, a waypoint, an
-// aturi.to page, or an at:// URI copied out of a record viewer. All of them
-// name the same post; only the last one names it in the form every downstream
-// call needs.
+// Every Bluesky client serves the same `/profile/<actor>/post/<rkey>` path,
+// because they all read the same AppView. So this matches on the path and
+// ignores the host, rather than keeping a list of domains that rejects any
+// client newer than the list.
 //
-// The client forks matter more than they look. bsky.app, deer.social, zeppelin,
-// and the rest all serve the SAME `/profile/<actor>/post/<rkey>` shape, because
-// they are all reading the same AppView. So this matches on the PATH and
-// ignores the host entirely rather than keeping a list of domains that goes
-// stale every time someone ships a new client. A host allowlist would reject a
-// fork that shipped this morning; a path match will not.
-//
-// Handle-form links (`/profile/alice.example.com/post/abc`) carry a handle, not
-// a DID, and a handle is a rented name: whoever holds it today is who the link
-// resolves to. That is fine for a link you just copied and wrong for anything
-// stored, so resolution happens HERE, once, at the edge, and everything
-// downstream carries the DID.
+// A handle-form link carries a handle, and a handle is a rented name: whoever
+// holds it today is who the link resolves to. That is fine for a link you
+// just copied and wrong for anything stored, so resolution happens here, once,
+// and everything downstream carries the DID.
 
 import { APPVIEW } from '../constants.js';
+import { fetchWithTimeout } from './atproto.js';
 
 /** `/profile/<actor>/post/<rkey>`, on any host, with or without trailing junk. */
 const WEB_POST = /\/profile\/([^/?#]+)\/post\/([^/?#]+)/;
@@ -30,28 +22,48 @@ const AT_URI = /^at:\/\/(did:[^/]+)\/([^/]+)\/([^/?#]+)/;
 /** `did:plc:...` / `did:web:...`. Anything else is a handle. */
 const DID = /^did:[a-z]+:/;
 
+/**
+ * The full DID syntax. A DID decoded out of a link, or handed back by the
+ * AppView, is checked against it, so a `%2F` cannot smuggle a path into the
+ * at:// URI built from it.
+ */
+const DID_SYNTAX = /^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$/;
+
 export class TargetError extends Error {}
 
 /**
  * Resolve a handle to a DID through the AppView.
  *
- * Throws rather than returning null: a handle that will not resolve is a dead
- * link, and the caller pasted it deliberately, so silence would be the wrong
- * answer.
+ * Throws rather than returning null: the caller named this handle on purpose,
+ * so one that will not resolve is an error to report, not a silence.
  */
-export async function resolveHandle(handle, { fetchImpl = fetch } = {}) {
-  const url = `${APPVIEW}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`;
+export async function resolveHandle(
+  handle,
+  { fetchImpl = fetchWithTimeout, signal, appview = APPVIEW } = {},
+) {
+  const url = `${appview}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`;
   let res;
   try {
-    res = await fetchImpl(url, { headers: { Accept: 'application/json' } });
+    res = await fetchImpl(url, {
+      headers: { Accept: 'application/json' },
+      signal,
+    });
   } catch (cause) {
     throw new TargetError(`could not reach the AppView to resolve ${handle}`, {
       cause,
     });
   }
-  if (!res.ok) throw new TargetError(`no account found for handle ${handle}`);
-  const body = await res.json();
-  if (!body?.did) throw new TargetError(`no DID in the response for ${handle}`);
+  if (!res.ok) {
+    throw new TargetError(
+      res.status === 400 || res.status === 404
+        ? `no account found for handle ${handle}`
+        : `the AppView could not resolve ${handle} (HTTP ${res.status})`,
+    );
+  }
+  const body = await res.json().catch(() => null);
+  if (!DID_SYNTAX.test(body?.did ?? '')) {
+    throw new TargetError(`no DID in the response for ${handle}`);
+  }
   return body.did;
 }
 
@@ -60,14 +72,11 @@ export async function resolveHandle(handle, { fetchImpl = fetch } = {}) {
  *
  * Accepts:
  *   at://did:plc:xxx/app.bsky.feed.post/3abc
- *   https://bsky.app/profile/alice.example.com/post/3abc      (and every fork)
- *   https://deer.social/profile/did:plc:xxx/post/3abc
- *
- * A waypoint href is NOT handled here: it can name several records at once,
- * and this resolves exactly one.
+ *   https://bsky.app/profile/alice.example.com/post/3abc   (any client host)
+ *   https://bsky.app/profile/did:plc:xxx/post/3abc
  *
  * @param {string} input
- * @param {{ fetchImpl?: typeof fetch }} [opts]
+ * @param {{ fetchImpl?: typeof fetch, signal?: AbortSignal }} [opts]
  */
 export async function resolveTarget(input, opts = {}) {
   const raw = String(input ?? '').trim();
@@ -81,10 +90,17 @@ export async function resolveTarget(input, opts = {}) {
 
   const web = raw.match(WEB_POST);
   if (web) {
-    const [, actor, rkey] = web;
-    const did = DID.test(actor)
-      ? actor
-      : await resolveHandle(decodeURIComponent(actor), opts);
+    const [, encoded, rkey] = web;
+    let actor;
+    try {
+      actor = decodeURIComponent(encoded);
+    } catch {
+      actor = null;
+    }
+    if (actor === null || (DID.test(actor) && !DID_SYNTAX.test(actor))) {
+      throw new TargetError(`not a usable account in that link: ${encoded}`);
+    }
+    const did = DID.test(actor) ? actor : await resolveHandle(actor, opts);
     const collection = 'app.bsky.feed.post';
     return { uri: `at://${did}/${collection}/${rkey}`, did, collection, rkey };
   }
@@ -97,9 +113,9 @@ export async function resolveTarget(input, opts = {}) {
 /**
  * True when `input` looks like something `resolveTarget` can take.
  *
- * Cheap and synchronous, for deciding whether a DM or a form field is a target
- * at all before spending a handle resolution on it. A `true` here is not a
- * promise that the record exists.
+ * Cheap and synchronous, for deciding whether a message names a target at all
+ * before spending a handle resolution on it. A `true` here is not a promise
+ * that the record exists.
  */
 export function looksLikeTarget(input) {
   const raw = String(input ?? '').trim();
@@ -109,16 +125,19 @@ export function looksLikeTarget(input) {
 /**
  * Pull every candidate target out of a free-text message.
  *
- * The DM interface gets prose with a link somewhere in it ("what's the deal with
- * this one <url>"), so the message is scanned rather than parsed. Returns the
- * matched substrings in the order they appear, deduplicated, for the caller to
- * resolve.
+ * A DM is prose with a link somewhere in it ("what's the deal with this one
+ * <url>"), so the message is scanned rather than parsed. Returns the matched
+ * substrings in the order they appear, deduplicated, for the caller to
+ * resolve. Brackets, quotes and sentence punctuation around a link are
+ * dropped.
  */
 export function extractTargets(text) {
   const found = [];
   const seen = new Set();
   for (const token of String(text ?? '').split(/\s+/)) {
-    const cleaned = token.replace(/[),.]+$/, '');
+    const cleaned = token
+      .replace(/^[(<["'\u201c\u2018]+/, '')
+      .replace(/[)>\]"'\u201d\u2019,.!?;]+$/, '');
     if (!looksLikeTarget(cleaned) || seen.has(cleaned)) continue;
     seen.add(cleaned);
     found.push(cleaned);
@@ -129,10 +148,10 @@ export function extractTargets(text) {
 /**
  * An actor reference (handle or DID) as a DID.
  *
- * Scoring is keyed by DID throughout: `score()` looks profiles up by the exact
- * string it was handed, so a handle passed straight in comes back as an
- * unresolved account rather than an error. Anything taking user input resolves
- * here first.
+ * Scoring is keyed by DID: `score()` looks profiles up by the exact string it
+ * is handed, so a handle passed straight in comes back as an unresolved
+ * account rather than an error. Anything taking user input resolves here
+ * first.
  */
 export async function resolveActor(actor, opts = {}) {
   const raw = String(actor ?? '')

@@ -1,32 +1,21 @@
 // Trust and distance for one account, relative to you.
 //
-// This answers "what am I about to do, and who will notice", NOT "does this
-// person deserve it". Nothing here reads a post, infers intent, or judges
-// behaviour. It measures social proximity, and proximity is a proxy for blast
-// radius, not for harm. Someone close to you can be awful and someone distant
-// can be harmless; the score is silent on both.
+// This answers "what am I about to do, and who will notice", not "does this
+// person deserve it". Nothing here reads a post or judges behaviour. It
+// measures social proximity, which is a proxy for blast radius, not for harm.
 //
-// The reason it is built this way is a measurement, not a preference. In the
-// original deployment, scoring an existing block list of several thousand
-// accounts against the accounts the owner followed showed that the features
-// which separate them best (default handle, lexicon diversity, verification,
-// follower count) mostly measure how much someone resembles the owner's own
-// circle. Against the population this tool actually runs on (strangers who
-// engaged with one post) those features fire on almost everyone, because
-// almost every ordinary Bluesky account looks like the block list by those
-// measures. So they are recorded and displayed, and they are deliberately NOT
-// summed into a threat number, because a threat number built from them would
-// mostly detect being new to Bluesky.
+// Signals such as a default handle, lexicon diversity and verification are
+// left out. They separate a block list from your follows mostly by measuring
+// resemblance to your own circle, and against strangers who engaged with one
+// post they fire on almost everyone.
 //
-// One number did hold up, and the bands are built on it: how many of the people
-// you follow also follow this account. In that deployment, 97% of the accounts
-// in a big bulk sweep had zero, and 44% of the accounts blocked by hand had at
-// least one. That asymmetry is the useful signal, and it is useful in one
-// direction only: a vouch is good evidence to LEAVE SOMEONE ALONE, and the
-// absence of one is no evidence at all, because most harmless strangers have
-// none either.
+// The bands rest on one number: how many of the people you follow also follow
+// this account. Read it in one direction only. A vouch is good evidence to
+// leave someone alone; no vouch is no evidence at all, because most harmless
+// strangers have none either.
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
+import { fetchWithTimeout } from './atproto.js';
 
 /** `getRelationships` takes at most 30 `others` per call. */
 const REL_BATCH = 30;
@@ -43,13 +32,8 @@ export const BANDS = [
 ];
 
 /**
- * Default thresholds: where the measured cohorts actually split.
- *
- * Against the original bulk sweep these put 1.0% in CONNECTED, 2.2% in
- * PERIPHERAL and 1.5% in NOTABLE: 4.7% needing a named look, 95.3% passing
- * through. Against the accounts picked by hand, 54% need a look. That asymmetry
- * is the point: the gate should be nearly frictionless on strangers and hard to
- * get past for people near you.
+ * Default thresholds. The gate should be nearly frictionless on strangers and
+ * hard to get past for people near you.
  */
 export const DEFAULT_THRESHOLDS = {
   connectedVouches: 3,
@@ -65,12 +49,14 @@ function clamp(n, lo, hi) {
 }
 
 /**
- * A 0–99 sorting key. Higher means more embedded in your world.
+ * A 0 to 99 sorting key. Higher means more embedded in your world.
  *
- * This exists to ORDER a review list, not to gate an action. The band does the
- * gating. Weights are deliberately blunt; a formula tuned to three decimal
- * places would imply a precision the underlying data does not support.
- * PROTECTED accounts are given 100 so they always sort to the top.
+ * It orders a review list; the band does the gating. The weights are blunt on
+ * purpose, since finer ones would claim a precision the data does not have.
+ * PROTECTED accounts get 100 so they always sort to the top.
+ *
+ * A missing, unparseable or future createdAt counts as no tenure rather than
+ * a negative one.
  */
 export function trustScore({
   vouches = 0,
@@ -81,7 +67,7 @@ export function trustScore({
 }) {
   const vouchTerm = 55 * Math.min(1, Math.log1p(vouches) / Math.log1p(12));
   const reachTerm = 25 * Math.min(1, Math.log10(1 + followers) / 5);
-  const tenureTerm = 10 * Math.min(1, ageDays / 365);
+  const tenureTerm = 10 * clamp((Number(ageDays) || 0) / 365, 0, 1);
   const tieTerm = mutual ? 10 : followsYou ? 5 : 0;
   return clamp(Math.round(vouchTerm + reachTerm + tenureTerm + tieTerm), 0, 99);
 }
@@ -89,10 +75,9 @@ export function trustScore({
 /**
  * Assign a band. Vetoes win over everything.
  *
- * `protectedReason` being set is the whole of PROTECTED. Membership is decided
- * by the caller's protected set (your follows, curation lists, manual entries)
- * rather than recomputed here, so there is exactly one place to look when asking
- * why someone was spared.
+ * `protectedReason` being set is the whole of PROTECTED. The caller's protected
+ * set (your follows, curation lists, manual entries) decides it, so there is
+ * one place to look when asking why someone was spared.
  */
 export function assignBand(f, thresholds = DEFAULT_THRESHOLDS) {
   if (f.protectedReason) return 'PROTECTED';
@@ -122,12 +107,11 @@ export function assignBand(f, thresholds = DEFAULT_THRESHOLDS) {
  * 0  you follow them
  * 1  at least one account you follow follows them
  * 2  they are somewhere in the one-hop neighbourhood's own reach
- * 3  no connection found within what we precomputed
+ * 3  no connection found within what was precomputed
  *
- * Note the ceiling: 3 means "not found", not "three hops away". Establishing a
- * real distance of 3+ would mean walking the follow graph of every account in
- * the neighbourhood, tens of thousands of them, which is not worth what it
- * would cost to learn something the bands do not use.
+ * 3 means "not found", not "three hops away". A real distance of 3 or more
+ * would mean walking the follow graph of every account in the neighbourhood,
+ * which costs far more than a number the bands do not use is worth.
  */
 export function distanceFrom({ inCircle, vouches, inNeighbourhood }) {
   if (inCircle) return 0;
@@ -151,10 +135,8 @@ async function getJson(url, fetchImpl, signal) {
 /**
  * Build a scorer over a set of precomputed reference data.
  *
- * Everything the scorer needs about YOU is injected rather than fetched, for
- * two reasons: it makes the whole thing testable without a network, and it
- * means the same code runs against a JSON snapshot in a test and against the
- * database without knowing the difference.
+ * Everything the scorer needs about you is injected rather than fetched, so it
+ * runs the same against test fixtures and against the database.
  *
  * @param {object} ref
  * @param {Map<string, number>} ref.vouches       did -> how many of your circle follow them
@@ -162,11 +144,12 @@ async function getJson(url, fetchImpl, signal) {
  * @param {Map<string, string>} ref.protectedSet  did -> reason ("you follow them", "list:Friends")
  * @param {Set<string>} [ref.neighbourhood]       the one-hop reach, for distance 2
  * @param {Set<string>} [ref.alreadyListed]       already on the mod list
+ * @param {Set<string>} [ref.blockers]            accounts that block you
  * @param {object} [ref.thresholds]
  */
 export function createScorer(
   ref,
-  { fetchImpl = fetch, appview = APPVIEW } = {},
+  { fetchImpl = fetchWithTimeout, appview = APPVIEW } = {},
 ) {
   const {
     vouches = new Map(),
@@ -198,9 +181,8 @@ export function createScorer(
   /**
    * Mutual-follow state between you and each account, in batches of 30.
    *
-   * Unauthenticated on purpose: `getRelationships` needs no auth, so the
-   * scorer never has to hold a session to answer the question that matters most
-   * for a veto.
+   * `getRelationships` needs no auth, so the scorer never holds a session to
+   * answer the question that matters most for a veto.
    */
   async function relationships(dids, signal) {
     const out = new Map();
@@ -241,15 +223,15 @@ export function createScorer(
         const p = profs.get(did);
         const rel = rels.get(did) || { youFollow: false, followsYou: false };
         const v = vouches.get(did) || 0;
-        const ageDays = p?.createdAt
-          ? Math.round((Date.now() - Date.parse(p.createdAt)) / 86400000)
+        const created = Date.parse(p?.createdAt ?? '');
+        const ageDays = Number.isFinite(created)
+          ? Math.round((Date.now() - created) / 86400000)
           : null;
         const followers = p?.followersCount ?? 0;
         const mutual = rel.youFollow && rel.followsYou;
 
-        // A protected reason can come from the injected set or be implied by
-        // the live relationship. You cannot have automated tooling act on
-        // someone you follow, whether or not the snapshot has caught up.
+        // A follow the snapshot has not caught up with still protects, so the
+        // live relationship counts as well as the injected set.
         const protectedReason =
           protectedSet.get(did) ||
           (rel.youFollow ? 'you follow them' : null) ||
@@ -284,9 +266,8 @@ export function createScorer(
             inNeighbourhood: neighbourhood.has(did),
           }),
           alreadyListed: alreadyListed.has(did),
-          // They have blocked the owner, so they cannot reply to or quote the
-          // owner while it stands. The list still matters to everyone
-          // subscribed to it.
+          // They cannot reply to or quote the owner while the block stands. The
+          // list still matters to everyone subscribed to it.
           blocksYou: blockers.has(did),
           ...features,
         });
@@ -297,13 +278,12 @@ export function createScorer(
 }
 
 /**
- * Join a harvest to scores and summarise it: the shape the brief and the DM
- * reply render from.
+ * Join a harvest to scores and summarise it, in the shape replies render from.
  *
- * `requiresReview` is everything that is not UNKNOWN. That is the list a person
- * is expected to actually read, and keeping it small is the design constraint on
- * every threshold above: if it is routinely longer than a screen, the thresholds
- * are wrong, because a review nobody reads is not a review.
+ * `requiresReview` is everything that is not UNKNOWN: the list a person is
+ * expected to read. Keeping it short is the constraint on every threshold
+ * above. If it is routinely longer than a screen the thresholds are wrong,
+ * because a review nobody reads is not a review.
  */
 export function summarise(harvest, scores, { excludeSelf = null } = {}) {
   const rows = harvest.participants
@@ -326,8 +306,8 @@ export function summarise(harvest, scores, { excludeSelf = null } = {}) {
       participants: rows.length,
       byBand,
       reviewReach: requiresReview.reduce((n, r) => n + (r.followers || 0), 0),
-      // What the graph already says: nothing to add for the first, and the
-      // second already cannot reach the owner.
+      // An account already listed needs no add, and one that blocks the
+      // owner already cannot reach them.
       alreadyListed: rows.filter((r) => r.alreadyListed).length,
       blocksYou: rows.filter((r) => r.blocksYou).length,
     },

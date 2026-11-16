@@ -1,12 +1,11 @@
-// Tiny client for the Constellation backlinks service
-// (https://constellation.microcosm.blue). All calls swallow network / 4xx /
-// 5xx errors and return `null` so callers can report "unknown" without
-// wrapping every call site in try/catch.
+// A small client for the Constellation backlinks index
+// (https://constellation.microcosm.blue). Every call returns `null` on a
+// network or HTTP error, so callers can report "unknown" without wrapping each
+// call in try/catch.
 
 import { fetchWithTimeout } from './atproto.js';
 import { CONSTELLATION_URL } from '../constants.js';
 
-const CONSTELLATION_BASE = CONSTELLATION_URL;
 const RETRY_DELAYS_MS = [1000, 2500, 5000, 10_000];
 // The longest a Retry-After is taken at its word. A DM answer waits on these
 // calls, and an instance that asks for ten minutes has effectively said no; a
@@ -25,10 +24,9 @@ async function fetchJsonOrNull(url, init) {
       });
       if (res.ok) return await res.json();
 
-      // The public Constellation instance is intentionally best-effort and
-      // rate-limited. Slow down when it asks rather than translating a 429
-      // into "backlinks unavailable" and throwing away an otherwise healthy
-      // harvest.
+      // The public instance is best-effort and rate-limited. Slow down when it
+      // asks, rather than turning a 429 into "backlinks unavailable" and
+      // throwing away an otherwise healthy harvest.
       const retryable = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
       if (!retryable || attempt === RETRY_DELAYS_MS.length) return null;
       await wait(retryDelayMs(res, attempt), init?.signal);
@@ -77,36 +75,20 @@ function wait(ms, signal) {
 /**
  * All sources (collection + record path) that point at `target`, with
  * per-source counts and distinct linking DIDs. `target` can be an AT URI
- * (record) OR a bare DID (identity backlinks like follows / blocks).
+ * (record) or a bare DID (identity backlinks such as follows and blocks).
  *
- * Shape (from the deprecated-but-still-supported `/links/all`):
- *   { links: { "app.bsky.feed.like": { "subject.uri": { count, distinct_dids } } } }
+ * Shape of `/links/all`:
+ *   { links: { "app.bsky.feed.like": { ".subject.uri": { records, distinct_dids } } } }
  */
-export async function getBacklinkSources(target) {
+export async function getBacklinkSources(target, { signal } = {}) {
   if (!target) return null;
-  const url = `${CONSTELLATION_BASE}/links/all?target=${encodeURIComponent(target)}`;
-  return fetchJsonOrNull(url);
+  const url = `${CONSTELLATION_URL}/links/all?target=${encodeURIComponent(target)}`;
+  return fetchJsonOrNull(url, signal ? { signal } : undefined);
 }
 
 /**
- * Inbound link count for a single (target, source-collection, source-path)
- * tuple. `source` is in `<collection>:<path>` form, e.g.
- * `app.bsky.feed.like:subject.uri`.
- */
-export async function getBacklinkCount(target, source) {
-  if (!target || !source) return null;
-  const params = new URLSearchParams({ subject: target, source });
-  const url = `${CONSTELLATION_BASE}/xrpc/blue.microcosm.links.getBacklinksCount?${params}`;
-  return fetchJsonOrNull(url);
-}
-
-/**
- * Paginated backlinks for a (target, source) tuple. Returns the raw
- * response or `null`.
- *
- * The rows come back under `records` on the XRPC route and under
- * `linking_records` on the older `/links` one. Read them with
- * `backlinkRows()` rather than picking a field and hoping.
+ * Paginated backlinks for a (target, source) pair. Returns the raw response,
+ * with its rows under `records`, or `null`.
  */
 export async function getBacklinks(target, source, { limit = 25, cursor, dids, signal } = {}) {
   if (!target || !source) return null;
@@ -119,7 +101,7 @@ export async function getBacklinks(target, source, { limit = 25, cursor, dids, s
   // Only links made by these accounts: "which of these fifty block the owner"
   // in one request, rather than paging through everyone who does.
   for (const did of dids || []) params.append('did', did);
-  const url = `${CONSTELLATION_BASE}/xrpc/blue.microcosm.links.getBacklinks?${params}`;
+  const url = `${CONSTELLATION_URL}/xrpc/blue.microcosm.links.getBacklinks?${params}`;
   return fetchJsonOrNull(url, signal ? { signal } : undefined);
 }
 
@@ -148,39 +130,31 @@ export async function getManyToMany(
   // list", answered without paging past every other list they are on.
   if (otherSubject) params.set('otherSubject', otherSubject);
   if (cursor) params.set('cursor', cursor);
-  const url = `${CONSTELLATION_BASE}/xrpc/blue.microcosm.links.getManyToMany?${params}`;
+  const url = `${CONSTELLATION_URL}/xrpc/blue.microcosm.links.getManyToMany?${params}`;
   return fetchJsonOrNull(url, signal ? { signal } : undefined);
 }
 
-/**
- * The `{ did, collection, rkey }` rows out of a `getBacklinks` response.
- *
- * `blue.microcosm.links.getBacklinks` names them `records`; the older `/links`
- * route names them `linking_records`. Reading only the latter is a silent
- * failure: the call returns 200, the array is undefined, and the caller
- * concludes the record has no backlinks at all.
- */
+/** The `{ did, collection, rkey }` rows out of a `getBacklinks` response. */
 export function backlinkRows(page) {
-  return page?.records || page?.linking_records || [];
+  return page?.records || [];
 }
 
 /**
- * Flatten `getBacklinkSources` into a sorted array
+ * Flatten `getBacklinkSources` into
  *   [{ collection, path, source, count, distinctDids }, ...]
- * sorted by count desc. Returns `null` if the underlying call failed.
+ * sorted by count, highest first. Returns `null` if the call failed.
  */
 export function flattenSources(raw) {
   if (!raw) return null;
-  const links = raw.links || raw; // tolerate both shapes
   const out = [];
-  for (const [collection, paths] of Object.entries(links || {})) {
+  for (const [collection, paths] of Object.entries(raw.links || {})) {
     if (!paths || typeof paths !== 'object') continue;
     for (const [path, info] of Object.entries(paths)) {
-      const count = info?.records ?? info?.count ?? 0;
-      const distinctDids = info?.distinct_dids ?? info?.distinctDids ?? null;
-      // `/links/all` returns the path with a leading dot (e.g. ".subject"),
-      // but `getBacklinks` rejects that: its `source` param uses the
-      // unprefixed form (e.g. "app.bsky.graph.follow:subject"). Strip it.
+      const count = info?.records ?? 0;
+      const distinctDids = info?.distinct_dids ?? null;
+      // `/links/all` gives the path with a leading dot (".subject"), but the
+      // `source` parameter of `getBacklinks` takes it without
+      // ("app.bsky.graph.follow:subject").
       const sourcePath = path.startsWith('.') ? path.slice(1) : path;
       out.push({
         collection,

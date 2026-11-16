@@ -62,7 +62,6 @@ describe('the roster', () => {
     const solo = makeRoster({ owner: OWNER });
     expect(solo.answers(GUEST)).toBe(false);
     expect(solo.all).toEqual([OWNER]);
-    expect(solo.hasGuests).toBe(false);
   });
 });
 

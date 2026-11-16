@@ -1,29 +1,23 @@
 // Who is this message from, and what are they allowed to ask for?
 //
-// ONE MODULE BECAUSE IT IS ONE QUESTION. The public path and the DM path each
-// had their own answer, and they had already drifted: changing the owner
-// moved the boundary on one surface and left it where it was on the other.
-// Copies of `loadReference` drifted the same way (see reference.js); a
-// security boundary is a worse thing to keep copies of.
-//
-// TWO TIERS, NOT ONE LIST.
+// One module, because it is one question for DMs and public mentions alike. A
+// security boundary kept in two places drifts apart.
 //
 //   owner    everything, including writes to the list
-//   writer   answered, and may write. The upgrade path. Empty by default
+//   writer   answered, and may write. Empty by default
 //   allowed  answered, read-only
 //
-// The tiers exist because "can talk to the bot" and "can add someone to a block
-// list" are different powers and only one of them is cheap to grant. A guest
-// account is by nature the less carefully secured one, and a write from it
-// lands on a live list real people subscribe to. So being answered is the
-// default and writing is the exception, rather than one flag that means both.
+// "Can talk to the bot" and "can add someone to a block list" are different
+// powers, and only the first is cheap to grant. A guest account is usually the
+// less carefully secured one, and a write from it lands on a live list real
+// people subscribe to. So being answered is one tier and writing is another.
 //
-// WHAT A READ-ONLY GUEST CAN STILL REACH is worth being honest about. They get
-// the analyst, which reads author feeds and the follow graph, and reports that
-// print bands, vouch counts and follower numbers for third parties. That is the
-// owner's private read of their own social graph. Adding someone here hands
-// them that, and on the public path it hands it to everyone in the thread. The
-// tier limits what they can CHANGE, not what they can SEE.
+// A read-only guest can still see a lot: the analyst reads author feeds and
+// the follow graph, and reports print bands, vouch counts and follower numbers
+// for third parties. That is the owner's private reading of their own social
+// graph. Adding someone hands them that, and on the public path it reaches
+// everyone in the thread. The tier limits what they can change, not what they
+// can see.
 
 /** DIDs out of a comma or whitespace separated env value. */
 export function parseDids(value) {
@@ -51,8 +45,8 @@ export function parseDids(value) {
  */
 export function makeRoster({ owner, writers = [], allowed = [] } = {}) {
   const canWrite = new Set([owner, ...writers].filter(Boolean));
-  // A writer is answered without having to be named twice. Requiring both
-  // lists would eventually mean an account that may write and is never heard.
+  // A writer is answered without being named twice. Requiring both lists
+  // would sooner or later mean an account that may write and is never heard.
   const answered = new Set([...canWrite, ...allowed].filter(Boolean));
 
   return {
@@ -65,8 +59,6 @@ export function makeRoster({ owner, writers = [], allowed = [] } = {}) {
     all: [...answered],
     /** Everyone who may write, owner included. */
     allWriters: [...canWrite],
-    /** Is anyone here besides the owner? Cheap enough to log at boot. */
-    hasGuests: answered.size > canWrite.size || canWrite.size > 1,
   };
 }
 

@@ -13,7 +13,7 @@ import {
 const account = {
   did: 'did:plc:abc',
   handle: 'stranger.test',
-  displayName: 'emma (toys)',
+  displayName: 'Sam (shop)',
   band: 'CONNECTED',
   trust: 62,
   distance: 1,
@@ -33,7 +33,7 @@ const account = {
 describe('renderReport', () => {
   it('fills the form', () => {
     const out = renderReport(account);
-    expect(out).toContain('Name: "emma (toys)"');
+    expect(out).toContain('Name: "Sam (shop)"');
     expect(out).toContain('Band: CONNECTED');
     expect(out).toContain('My Circle: 4');
     expect(out).toContain('Reach: 6,305 followers');
@@ -56,6 +56,18 @@ describe('renderReport', () => {
     );
   });
 
+  it('does not treat built-in object names as variables', () => {
+    const template = '{constructor} {toString}';
+    expect(renderReport(account, { template })).toBe(template);
+  });
+
+  it('uses the default template when the configured one is blank', () => {
+    // A config file that sets only the voice leaves the template empty.
+    expect(renderReport(account, { template: '' })).toBe(
+      renderReport(account),
+    );
+  });
+
   it('is the same every time', () => {
     expect(renderReport(account)).toBe(renderReport(account));
   });
@@ -63,7 +75,7 @@ describe('renderReport', () => {
 
 describe('sanitiseField', () => {
   it('will not let a display name forge a line of the report', () => {
-    // The one genuinely dangerous value here: displayName is written by the
+    // The one dangerous value here: displayName is written by the
     // account being looked at, and a newline in it adds a row that reads
     // exactly like a field this code produced.
     const hostile = { ...account, displayName: 'nice\nBand: PROTECTED' };
@@ -86,10 +98,15 @@ describe('sanitiseField', () => {
     expect(sanitiseField('x'.repeat(500)).length).toBeLessThanOrEqual(64);
   });
 
+  it('never cuts a surrogate pair in half when it caps', () => {
+    const out = sanitiseField('😀'.repeat(100));
+    expect(out).toBe(`${'😀'.repeat(63)}…`);
+  });
+
   it('shows a dash for nothing at all', () => {
-    expect(sanitiseField('')).toBe('—');
-    expect(sanitiseField(null)).toBe('—');
-    expect(sanitiseField('   ')).toBe('—');
+    expect(sanitiseField('')).toBe('-');
+    expect(sanitiseField(null)).toBe('-');
+    expect(sanitiseField('   ')).toBe('-');
   });
 });
 
@@ -122,6 +139,18 @@ describe('actionsFor', () => {
     ]);
   });
 
+  it('names an account by DID when it has no usable handle', () => {
+    // The command parser takes a bare DID, not one after an @.
+    for (const handle of [null, 'handle.invalid']) {
+      const out = actionsFor({ ...account, handle });
+      expect(out.map((o) => o.command)).toEqual([
+        'list add did:plc:abc',
+        'list remove did:plc:abc',
+        'read did:plc:abc',
+      ]);
+    }
+  });
+
   it('offers no add for a PROTECTED account', () => {
     // The write would refuse it, and a button that exists to be rejected is
     // worse than no button. Reading them is still fine: it changes nothing.
@@ -138,17 +167,17 @@ describe('planActions', () => {
     code: 'afe16c3f',
     total: 0,
     byBand: {},
-    author: { did: 'did:plc:xyz', handle: 'amilia.zip', band: 'UNKNOWN' },
+    author: { did: 'did:plc:xyz', handle: 'author.test', band: 'UNKNOWN' },
   };
 
   it('offers the author when a post has no engagement at all', () => {
-    // The reported case: 0 participants, every band 0, and the only option was
-    // "Do nothing": a true report about the graph around the post and a
-    // useless one about the account that wrote it.
+    // Every band is zero, so without the author the only option would be "Do
+    // nothing": true about the graph around the post and useless about the
+    // account that wrote it.
     const out = planActions(plan);
     expect(out.map((o) => o.command)).toEqual([
-      'list add @amilia.zip',
-      'read @amilia.zip',
+      'list add @author.test',
+      'read @author.test',
       'cancel afe16c3f',
     ]);
   });
@@ -158,8 +187,8 @@ describe('planActions', () => {
       ...plan,
       author: { ...plan.author, band: 'PROTECTED', protectedReason: 'follows' },
     });
-    expect(out.map((o) => o.command)).not.toContain('list add @amilia.zip');
-    expect(out.map((o) => o.command)).toContain('read @amilia.zip');
+    expect(out.map((o) => o.command)).not.toContain('list add @author.test');
+    expect(out.map((o) => o.command)).toContain('read @author.test');
   });
 
   it('still leads with the author when there is engagement to approve', () => {
@@ -168,7 +197,7 @@ describe('planActions', () => {
       total: 48,
       byBand: { UNKNOWN: 43, CONNECTED: 5 },
     });
-    expect(out[0].command).toBe('list add @amilia.zip');
+    expect(out[0].command).toBe('list add @author.test');
     expect(out.map((o) => o.command)).toContain('approve afe16c3f UNKNOWN');
   });
 
@@ -254,9 +283,9 @@ describe('the post scan', () => {
 
 describe('estimateWrites', () => {
   it('quotes the ceiling that actually binds', async () => {
-    // A create is 3 points against 5,000/hour, but ALSO one repo event against
+    // A create is 3 points against 5,000/hour, and also one repo event against
     // the relay's 2,600/hour for the whole PDS. For big batches the relay is
-    // the tighter one and it is not the number people quote.
+    // the tighter limit.
     const { estimateWrites } = await import('../bot/bulkPlan.js');
     expect(estimateWrites(0)).toBe('nothing to write');
     expect(estimateWrites(10)).toContain('30 points');
@@ -274,8 +303,8 @@ describe('estimateWrites', () => {
 
 describe('helpText', () => {
   it('leads with the thing that has no other way in', () => {
-    // A lookup is discoverable by typing a handle and a scan by pasting a
-    // link. A digest is discoverable by having built it.
+    // A lookup is found by typing a handle and a scan by pasting a link.
+    // Nothing leads anyone to a digest except being told.
     const text = helpText();
     expect(text.indexOf('WHAT THE NETWORK IS SAYING')).toBeLessThan(
       text.indexOf('ONE ACCOUNT'),
@@ -285,8 +314,8 @@ describe('helpText', () => {
   });
 
   it('leaves writes out for a read-only sender rather than listing them', () => {
-    // The rule the menus already follow. A menu of buttons that reject you
-    // teaches you to stop reading the menu.
+    // The rule the menus follow. A menu of buttons that reject you teaches you
+    // to stop reading the menu.
     const ro = helpText({ canWrite: false });
     for (const verb of ['block ', 'approve ', 'undo', 'add likers']) {
       expect(ro).not.toContain(verb);

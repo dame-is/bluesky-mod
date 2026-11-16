@@ -84,6 +84,30 @@ describe('resolveTarget', () => {
   it('rejects empty input', async () => {
     await expect(resolveTarget('   ')).rejects.toBeInstanceOf(TargetError);
   });
+
+  it('reads a percent-encoded DID as a DID', async () => {
+    const fetchImpl = vi.fn();
+    const encoded = encodeURIComponent(DID);
+    const out = await resolveTarget(
+      `https://bsky.app/profile/${encoded}/post/${RKEY}`,
+      { fetchImpl },
+    );
+    expect(out.did).toBe(DID);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('throws a TargetError, not a URIError, on broken percent-encoding', async () => {
+    await expect(
+      resolveTarget(`https://bsky.app/profile/%E0%A4%A/post/${RKEY}`),
+    ).rejects.toBeInstanceOf(TargetError);
+  });
+
+  it('refuses an encoded DID that would put a path in the URI', async () => {
+    const smuggled = encodeURIComponent(`${DID}/app.bsky.graph.listitem/x`);
+    await expect(
+      resolveTarget(`https://bsky.app/profile/${smuggled}/post/${RKEY}`),
+    ).rejects.toBeInstanceOf(TargetError);
+  });
 });
 
 describe('looksLikeTarget', () => {
@@ -111,6 +135,13 @@ describe('extractTargets', () => {
     const a = `at://${DID}/app.bsky.feed.post/aaa`;
     const b = `at://${DID}/app.bsky.feed.post/bbb`;
     expect(extractTargets(`${a} then ${b} then ${a}`)).toEqual([a, b]);
+  });
+
+  it('drops brackets and sentence punctuation around a link', () => {
+    const uri = `at://${DID}/app.bsky.feed.post/${RKEY}`;
+    expect(extractTargets(`(${uri})`)).toEqual([uri]);
+    expect(extractTargets(`is this one ok? "${uri}"?`)).toEqual([uri]);
+    expect(extractTargets(`look at ${uri}!`)).toEqual([uri]);
   });
 
   it('returns an empty list for a message with no links', () => {

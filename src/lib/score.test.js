@@ -18,11 +18,9 @@ describe('assignBand', () => {
     expect(band).toBe('PROTECTED');
   });
 
-  it('catches the failure this gate was built for', () => {
-    // Modelled on a real account the old tool swept into a bulk block: deep in
-    // the circle, large audience, never looked at because the batch was
-    // thousands of accounts long. Figures rounded: this is a regression test,
-    // not a record of who it happened to.
+  it('puts a well-vouched account with a large audience in CONNECTED', () => {
+    // The account a bulk sweep must not add unseen: deep in your circle, with
+    // plenty of people who would notice.
     expect(assignBand({ vouches: 24, followers: 50000 })).toBe('CONNECTED');
   });
 
@@ -42,7 +40,7 @@ describe('assignBand', () => {
   });
 
   it('leaves an ordinary stranger in UNKNOWN', () => {
-    // The median sweep member: ~3yr old, 372 followers, 1 post/day, no vouches.
+    // About three years old, a few hundred followers, a post a day, no vouches.
     expect(
       assignBand({ vouches: 0, followers: 372, postsPerDay: 1, ageDays: 1017 }),
     ).toBe('UNKNOWN');
@@ -71,6 +69,14 @@ describe('trustScore', () => {
     });
     expect(max).toBeLessThanOrEqual(99);
     expect(trustScore({})).toBeGreaterThanOrEqual(0);
+  });
+
+  it('counts no tenure for a missing, unparseable or future createdAt', () => {
+    const base = { vouches: 2, followers: 1000 };
+    const none = trustScore({ ...base, ageDays: null });
+    expect(trustScore({ ...base, ageDays: NaN })).toBe(none);
+    expect(trustScore({ ...base, ageDays: -5000 })).toBe(none);
+    expect(none).toBe(trustScore({ ...base, ageDays: 0 }));
   });
 
   it('gives a mutual more weight than a one-way follower', () => {

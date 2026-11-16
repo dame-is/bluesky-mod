@@ -3,39 +3,24 @@
 
 import { PLC_DIRECTORY } from '../constants.js';
 
-// A single request must never wedge a loop that waits on it. Attach a 15s
-// abort so a hung fetch rejects instead of hanging forever.
-//
-// A caller's own signal is kept, but it is not a substitute: it fires when the
-// caller gives up, and nothing gives up on a server that has simply stopped
-// answering. So the two are combined (`AbortSignal.any`).
+// A single request must never wedge a loop that waits on it, so every request
+// carries a 15s abort. A caller's own signal is kept as well, but it only
+// fires when the caller gives up, and nothing gives up on a server that has
+// stopped answering. So the two are combined.
 const REQUEST_TIMEOUT_MS = 15_000;
 function withTimeout(init, ms = REQUEST_TIMEOUT_MS) {
   const base = init || {};
-  if (
-    typeof AbortSignal === 'undefined' ||
-    typeof AbortSignal.timeout !== 'function'
-  ) {
-    return base;
-  }
   const timeout = AbortSignal.timeout(ms);
   if (!base.signal) return { ...base, signal: timeout };
-  if (typeof AbortSignal.any !== 'function') return base;
   const signal = AbortSignal.any([base.signal, timeout]);
-  // The combined signal holds its sources weakly, and Node 20 lets a pending
-  // `AbortSignal.timeout` be collected when nothing else refers to it: after
-  // a GC the timeout never fired, and the request hung as if it had none.
-  // Hanging it off the signal the request keeps keeps it alive as long as
-  // the request is.
+  // The combined signal holds its sources weakly, so a timeout signal nothing
+  // else refers to can be collected before it fires, leaving the request with
+  // no ceiling. Hanging it off the signal the request keeps keeps it alive.
   signal.timeoutSignal = timeout;
   return { ...base, signal };
 }
 
-/**
- * `fetch` with the same 15s ceiling every request in this module carries, for
- * clients that talk to other services (Constellation) and so can't go through
- * `fetchJson`.
- */
+/** `fetch` with the same 15s ceiling every request in this module carries. */
 export function fetchWithTimeout(url, init, ms) {
   return fetch(url, withTimeout(init, ms));
 }
@@ -56,26 +41,30 @@ async function fetchJson(url, init) {
  * Resolve a DID's PDS endpoint from its DID document: the PLC directory for
  * `did:plc:*`, the host's `/.well-known/did.json` for `did:web:*`.
  * Returns a URL string with no trailing slash.
+ *
+ * Only the `#atproto_pds` entry counts. A document can list other services,
+ * such as a labeler, and the first entry is not necessarily the PDS. A
+ * did:web document may write the id in full (`did:web:host#atproto_pds`).
  */
 export async function resolvePds(did) {
   const doc = await getDidDocument(did);
-  const services = doc?.service || [];
-  // Atproto PDS service id can be `#atproto_pds`.
-  const pds =
-    services.find((s) => s.id === '#atproto_pds')?.serviceEndpoint ||
-    services[0]?.serviceEndpoint;
-  if (!pds) throw new Error(`No PDS endpoint for ${did}`);
+  const services = Array.isArray(doc?.service) ? doc.service : [];
+  const pds = services.find(
+    (s) => typeof s?.id === 'string' && s.id.endsWith('#atproto_pds'),
+  )?.serviceEndpoint;
+  if (typeof pds !== 'string' || !pds) {
+    throw new Error(`No PDS endpoint for ${did}`);
+  }
   return pds.replace(/\/$/, '');
 }
 
-// ---------------------------------------------------------------------------
 // DID documents, cached in memory.
 //
-// Cached as the PROMISE, not the answer, so a burst of lookups for the same
-// DID in one tick shares one request. A lookup that fails is dropped, so the
-// next caller asks again rather than inheriting the failure. Ten minutes,
-// because what callers read off a DID document (the PDS) moves only on an
-// account migration.
+// The promise is cached rather than the answer, so a burst of lookups for the
+// same DID shares one request. A failed lookup is dropped, so the next caller
+// asks again rather than inheriting the failure. Ten minutes, because what
+// callers read off a DID document (the PDS) changes only when the account
+// moves to another host.
 const DID_DOC_TTL = 10 * 60_000;
 const _didDocCache = new Map(); // did -> { promise, ts }
 
@@ -116,11 +105,7 @@ export function didWebDocumentUrl(did) {
   return `https://${host}/.well-known/did.json`;
 }
 
-/**
- * The DID document for a `did:plc` or a `did:web`, through the same cache.
- *
- * A `did:web` is read from its own host.
- */
+/** The DID document for a `did:plc` or a `did:web`, through the same cache. */
 export async function getDidDocument(did) {
   if (!did) throw new Error('getDidDocument: missing did');
   if (!String(did).startsWith('did:web:')) return getPlcDocument(did);
@@ -128,4 +113,3 @@ export async function getDidDocument(did) {
   if (!url) throw new Error(`Unsupported did:web identifier ${did}`);
   return cachedRead(_didDocCache, did, DID_DOC_TTL, () => fetchJson(url));
 }
-

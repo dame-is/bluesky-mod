@@ -3,7 +3,7 @@ import {
   followsOf,
   indexCircleFollows,
   referenceFrom,
-  nextAction,
+  readCircle,
   readCurationMembers,
 } from './precompute.js';
 
@@ -38,9 +38,8 @@ describe('followsOf', () => {
   });
 
   it('aborts mid-member once the deadline passes', async () => {
-    // The bug this guards: the budget used to be checked only BETWEEN members,
-    // so eight workers could each start a 1,500-follow member just under the
-    // limit and run tens of seconds past it.
+    // The budget is checked per page, so eight workers that each start a long
+    // follow list just under the limit cannot run tens of seconds past it.
     vi.useFakeTimers();
     try {
       const fetchImpl = fakeFetch(
@@ -70,11 +69,9 @@ describe('followsOf', () => {
 });
 
 describe('permanently unreadable members', () => {
-  // The first real snapshot livelocked here. A few of the accounts the owner
-  // followed were deactivated or taken down; getFollows answers 400 for them
-  // and always will. finalise_snapshot correctly refuses to aggregate while
-  // any member is unindexed, so all but those few done meant nothing would
-  // ever finish.
+  // getFollows answers 400 for a deactivated or taken-down account, and always
+  // will. finalise_snapshot waits for every member, so one such account left
+  // pending would hold the snapshot open for good.
   const status = (code) =>
     vi.fn(async () => ({ ok: false, status: code, json: async () => ({}) }));
 
@@ -85,10 +82,9 @@ describe('permanently unreadable members', () => {
   });
 
   it('does not mark a rate limit as permanent', async () => {
-    // Slower than it looks: a retryable status burns the full backoff ladder
-    // (500 + 1000 + 1500ms) before giving up, which is the point: the caller
-    // should come back for this one. A permanent 400 returns on the first
-    // response with no backoff at all, which is why that test is instant.
+    // Slower than it looks: a retryable status waits out the backoff between
+    // tries (500 + 1000ms) before giving up, so the caller comes back for it.
+    // A permanent 400 returns on the first response with no backoff at all.
     const out = await followsOf('did:plc:busy', { fetchImpl: status(429) });
     expect(out.permanent).toBe(false);
   }, 10_000);
@@ -131,9 +127,9 @@ describe('indexCircleFollows', () => {
   });
 
   it('discards a member it could not finish, rather than recording a partial', async () => {
-    // Marking a truncated follow list as done would understate that member's
-    // vouches for the life of the snapshot, and understating a vouch sends
-    // someone to review who did not need it. Leaving it pending costs a retry.
+    // Marking a follow list cut short by the clock as done would understate
+    // that member's vouches for the life of the snapshot. Leaving it pending
+    // costs a retry.
     vi.useFakeTimers();
     try {
       const written = [];
@@ -187,40 +183,6 @@ describe('referenceFrom', () => {
     });
     expect(ref.neighbourhood.has('did:plc:a')).toBe(true);
     expect(ref.circle.has('did:plc:c')).toBe(true);
-  });
-});
-
-describe('nextAction', () => {
-  const at = (o) => nextAction({ pending: 0, vouches: 1, ageDays: 0, ...o });
-
-  it('collects while any member is unread', () => {
-    expect(at({ pending: 5, vouches: 0 })).toBe('collect');
-    expect(at({ pending: 1, vouches: 50000 })).toBe('collect');
-  });
-
-  it('finalises a snapshot that is collected but not aggregated', () => {
-    // The bug: this state answered `idle` with "0 scored", which reads as
-    // finished. Every member was read, no vouch rows existed, and nothing
-    // would ever write them.
-    expect(at({ pending: 0, vouches: 0 })).toBe('finalise');
-  });
-
-  it('is idle only once aggregated AND fresh', () => {
-    expect(at({ pending: 0, vouches: 50000, ageDays: 1 })).toBe('idle');
-  });
-
-  it('rebuilds when a finalised snapshot ages out', () => {
-    expect(at({ pending: 0, vouches: 50000, ageDays: 8 })).toBe('start');
-  });
-
-  it('does not rebuild an unaggregated snapshot just because it is old', () => {
-    // Finishing the one in hand beats throwing away a full set of staged edges.
-    expect(at({ pending: 0, vouches: 0, ageDays: 30 })).toBe('finalise');
-  });
-
-  it('starts when asked, or when there is nothing yet', () => {
-    expect(at({ restart: true, vouches: 50000 })).toBe('start');
-    expect(at({ exists: false })).toBe('start');
   });
 });
 
@@ -281,5 +243,62 @@ describe('readCurationMembers', () => {
       'did:plc:friend',
       'did:plc:picked',
     ]);
+  });
+});
+
+describe('reading the protected set', () => {
+  // The snapshot replaces the protected set with what these return, so a
+  // partial read would quietly take protection away from real follows.
+  const pagesThenFail = () => {
+    let n = 0;
+    return vi.fn(async () => {
+      n += 1;
+      if (n === 1) {
+        return {
+          ok: true,
+          json: async () => ({
+            records: [{ value: { subject: 'did:plc:friend' } }],
+            cursor: 'more',
+          }),
+        };
+      }
+      return { ok: false, status: 400, json: async () => ({}) };
+    });
+  };
+
+  it('reads the follows across pages', async () => {
+    let n = 0;
+    const fetchImpl = vi.fn(async () => {
+      n += 1;
+      return {
+        ok: true,
+        json: async () =>
+          n === 1
+            ? { records: [{ value: { subject: 'did:plc:a' } }], cursor: 'c' }
+            : { records: [{ value: { subject: 'did:plc:b' } }] },
+      };
+    });
+    const out = await readCircle({ pds: 'https://pds', did: 'me', fetchImpl });
+    expect(out).toEqual(['did:plc:a', 'did:plc:b']);
+  });
+
+  it('throws on a failed page rather than returning part of the circle', async () => {
+    await expect(
+      readCircle({
+        pds: 'https://pds',
+        did: 'me',
+        fetchImpl: pagesThenFail(),
+      }),
+    ).rejects.toThrow(/app.bsky.graph.follow/);
+  });
+
+  it('throws on a failed page of curation lists too', async () => {
+    await expect(
+      readCurationMembers({
+        pds: 'https://pds',
+        did: 'me',
+        fetchImpl: pagesThenFail(),
+      }),
+    ).rejects.toThrow(/app.bsky.graph.list/);
   });
 });
