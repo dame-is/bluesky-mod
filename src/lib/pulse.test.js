@@ -84,9 +84,9 @@ describe('resolveSlice', () => {
   });
 
   it('reads the kind off the collection, not off the URL shape', async () => {
-    // An at:// list URI arriving where a feed was expected still has to be
-    // fetched with getListFeed: the two endpoints take different parameter
-    // names, and guessing wrong returns an empty feed rather than an error.
+    // An at:// list URI still has to be fetched with getListFeed: the two
+    // endpoints take different parameters, and the wrong one returns an
+    // empty feed rather than an error.
     expect(
       await resolveSlice('at://did:plc:x/app.bsky.graph.list/abc'),
     ).toEqual({ kind: 'list', uri: 'at://did:plc:x/app.bsky.graph.list/abc' });
@@ -121,8 +121,8 @@ describe('resolveSlice', () => {
   });
 
   it('refuses a collection that is not a stream of posts', async () => {
-    // A post URI is the thing the owner pastes at this tool most often by
-    // mistake, and "no posts found" would be a lie about a post that exists.
+    // A post URI is what gets pasted here by mistake most often, and "no
+    // posts found" would be a lie about a post that exists.
     await expect(
       resolveSlice('at://did:plc:x/app.bsky.feed.post/abc'),
     ).rejects.toThrow(/not a feed or a list/);
@@ -136,7 +136,6 @@ describe('normalisePost', () => {
   it('tells "they said this" from "they amplified this"', () => {
     const said = normalisePost(item({ handle: 'a.test' }));
     expect(said.said).toBe(true);
-    expect(said.viaRepost).toBe(false);
     expect(said.amplifiedBy).toEqual([]);
 
     const amplified = normalisePost(
@@ -149,7 +148,6 @@ describe('normalisePost', () => {
       }),
     );
     expect(amplified.said).toBe(false);
-    expect(amplified.viaRepost).toBe(true);
     expect(amplified.amplifiedBy).toEqual(['a.test']);
     expect(amplified.handle).toBe('stranger.test');
   });
@@ -181,6 +179,27 @@ describe('normalisePost', () => {
     expect(p.links.map(domainOf)).toEqual(['example.com', 'other.test']);
   });
 
+  it('reads the media inside a quote post', () => {
+    const p = normalisePost(
+      item({
+        text: '',
+        embed: {
+          $type: 'app.bsky.embed.recordWithMedia#view',
+          media: { $type: 'app.bsky.embed.video#view' },
+        },
+      }),
+    );
+    expect(p).toMatchObject({ hasVideo: true, hasImage: false, isQuote: true });
+  });
+
+  it('dates a post by the earlier of its two clocks', () => {
+    // The author sets createdAt, so a post dated a day ahead would otherwise
+    // sort first by recency.
+    const raw = item({ at: hoursAgo(-24) });
+    raw.post.indexedAt = hoursAgo(1);
+    expect(normalisePost(raw).at).toBe(Date.parse(hoursAgo(1)));
+  });
+
   it('drops anything without text rather than emitting a blank row', () => {
     expect(normalisePost({ post: { uri: 'at://x' } })).toBe(null);
     expect(normalisePost(null)).toBe(null);
@@ -203,8 +222,8 @@ describe('authorWindow', () => {
       hours: 24,
       fetchImpl,
     });
-    // 24h of a circle averaging 3.4 posts a day. Measured: limit=36 costs
-    // 24 MB across the circle and limit=15 costs 10.2 MB for the same answer.
+    // A day of a typical account fits in the floor of 15. Bandwidth is the
+    // cost of a fan-out, and the busy few can page.
     expect(fetchImpl.calls[0]).toContain('limit=15');
   });
 
@@ -228,10 +247,44 @@ describe('authorWindow', () => {
     expect(r.posts).toHaveLength(1);
   });
 
+  it('places a repost by when it was reposted, and pages past it', async () => {
+    // A repost of an old post sits in the feed at the time of the repost.
+    // Dated by the post, it would look like the window's far edge and end
+    // the read with more of the window still to come.
+    let page = 0;
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        page += 1;
+        return page === 1
+          ? {
+              feed: [
+                item({
+                  handle: 'old.test',
+                  text: 'old post',
+                  at: hoursAgo(200),
+                  reason: { by: { handle: 'a.test' }, indexedAt: hoursAgo(2) },
+                }),
+              ],
+              cursor: 'p2',
+            }
+          : { feed: [item({ text: 'next page', at: hoursAgo(5) })] };
+      },
+    }));
+    const r = await authorWindow('did:plc:a', {
+      sinceMs: NOW - 86_400_000,
+      hours: 24,
+      fetchImpl,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(r.posts.map((p) => p.text)).toEqual(['old post', 'next page']);
+  });
+
   it('reports being cut by the page cap rather than looking complete', async () => {
-    // Every page is entirely inside the window and there is always a cursor,
-    // so this author runs the cap out. Saying so is the point: a digest that
-    // silently saw half of the busiest account is wrong about the slice.
+    // Every page is inside the window and there is always a cursor, so this
+    // author runs the cap out. A digest that silently saw half of the busiest
+    // account is wrong about the slice.
     const fetchImpl = fakeFetch([
       ['getAuthorFeed', { feed: [item({ at: hoursAgo(1) })], cursor: 'more' }],
     ]);
@@ -245,8 +298,8 @@ describe('authorWindow', () => {
   });
 
   it('gives up immediately on a permanent failure', async () => {
-    // A deactivated account answers 400 forever; retrying it is how a fan-out
-    // spends its budget on the one member who cannot be read.
+    // A deactivated account answers 400 forever, and retrying it spends the
+    // fan-out's budget on the one member who cannot be read.
     const fetchImpl = fakeFetch([['getAuthorFeed', 400]]);
     const r = await authorWindow('did:plc:gone', { sinceMs: 0, fetchImpl });
     expect(r.permanent).toBe(true);
@@ -293,18 +346,16 @@ describe('circleWindow', () => {
   });
 
   it('collapses a post seen from several members, keeping every amplifier', async () => {
-    // The bug the first live run exposed. One post reposted by two members
-    // arrived twice, took two of the three sample slots its author was allowed,
-    // and inflated the post count, so the digest measured reposting rather
-    // than conversation. The duplicate is signal, not noise: how many of the
-    // circle passed something on is the most useful number in a follow-graph
-    // digest, so the copies collapse into one post that carries the list.
+    // Counting each copy would measure reposting rather than conversation
+    // and spend the author's sample slots on one post. How many of the
+    // circle passed it on is still worth keeping, so the copies collapse into
+    // one post that carries the list.
     const shared = {
       uri: 'at://did:plc:stranger/app.bsky.feed.post/viral',
       handle: 'stranger.test',
       did: 'did:plc:stranger',
       at: hoursAgo(3),
-      likes: 13808,
+      likes: 10000,
     };
     const fetchImpl = vi.fn(async (url) => ({
       ok: true,
@@ -361,9 +412,8 @@ describe('circleWindow', () => {
   });
 
   it('says how many accounts went unread when the budget runs out', async () => {
-    // A short answer that looks complete is the failure mode worth a test:
-    // "my circle barely posted today" and "I only managed to read forty of
-    // them" are different sentences.
+    // "My circle barely posted today" and "I only read forty of them" are
+    // different sentences.
     const fetchImpl = vi.fn(
       () =>
         new Promise((resolve) =>
@@ -387,6 +437,9 @@ describe('circleWindow', () => {
     });
     expect(r.coverage.unread).toBeGreaterThan(0);
     expect(r.coverage.read).toBeLessThan(200);
+    // Every account is accounted for, including one cut off mid-read.
+    const { read, unreadable, unread } = r.coverage;
+    expect(read + unreadable + unread).toBe(200);
   });
 });
 
@@ -435,9 +488,20 @@ describe('feedWindow', () => {
     expect(f2.calls[0]).toContain('getFeed?feed=');
   });
 
+  it('throws when the feed cannot be read at all, rather than reporting a quiet day', async () => {
+    const fetchImpl = fakeFetch([['getFeed', 400]]);
+    await expect(
+      feedWindow({
+        uri: 'at://x/app.bsky.feed.generator/gone',
+        sinceMs: 0,
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/could not read the feed/);
+  });
+
   it('counts a post once when a feed serves it twice across pages', async () => {
-    // A ranked feed reshuffles under the cursor. Double-counting overstates
-    // how much of the window one post is.
+    // A ranked feed reshuffles under the cursor. Counting a post twice
+    // overstates how much of the window it is.
     let page = 0;
     const dupe = item({
       uri: 'at://did:plc:a/app.bsky.feed.post/same',
@@ -475,9 +539,9 @@ describe('selectPosts', () => {
   );
 
   it('caps how much of the sample one account can be', () => {
-    // Engagement order alone hands the whole sample to the loudest account and
-    // produces a confident answer about two hundred people built from the
-    // output of one. Breadth is the thing being measured.
+    // Engagement order alone hands the sample to the loudest account, and
+    // the answer about two hundred people is built from one. Breadth is what
+    // is being measured.
     const { kept } = selectPosts([...loud, ...others], {
       limit: 12,
       perAuthor: 3,
@@ -512,7 +576,7 @@ describe('selectPosts', () => {
       item({
         handle: 'stranger.test',
         text: 'theirs',
-        likes: 13808,
+        likes: 10000,
         reason: { by: { handle: 'member.test' } },
       }),
     );
@@ -522,15 +586,13 @@ describe('selectPosts', () => {
   });
 
   it('ranks what was amplified by how many passed it on, not by global likes', () => {
-    // The second bug the live run exposed. Ranking both groups together by
-    // engagement put four reposts of thirteen-thousand-like posts at the top
-    // of the digest: a correct ranking of the wrong thing, which rebuilds
-    // the network-wide answer the owner already has and calls it their circle.
+    // Ranked by likes, reposts of huge posts from outside the circle fill the
+    // top, which rebuilds the network-wide answer and calls it their circle.
     const viral = normalisePost(
       item({
         handle: 'famous.test',
         text: 'viral',
-        likes: 13808,
+        likes: 10000,
         reason: { by: { handle: 'one.test' } },
       }),
     );
@@ -538,7 +600,6 @@ describe('selectPosts', () => {
       item({ handle: 'niche.test', text: 'niche', likes: 40 }),
     );
     local.said = false;
-    local.viaRepost = true;
     local.amplifiedBy = [
       'a.test',
       'b.test',
@@ -553,6 +614,18 @@ describe('selectPosts', () => {
     // Asking for recency instead orders by time, not by either of those.
     const recent = selectPosts([viral, local], { limit: 10, sort: 'recent' });
     expect(recent.amplified).toHaveLength(2);
+  });
+
+  it('never returns more than the limit', () => {
+    const wrote = normalisePost(item({ handle: 'm.test', text: 'mine' }));
+    const passed = normalisePost(
+      item({
+        handle: 's.test',
+        text: 'theirs',
+        reason: { by: { handle: 'm.test' } },
+      }),
+    );
+    expect(selectPosts([wrote, passed], { limit: 1 }).kept).toHaveLength(1);
   });
 
   it('gives unused slots from one group to the other', () => {
@@ -632,16 +705,19 @@ describe('summariseWindow', () => {
 describe('renderPosts', () => {
   it('flattens a post to one readable block with its age and counts', () => {
     const out = renderPosts(
-      [
-        normalisePost(
-          item({
-            handle: 'a.test',
-            text: 'line one\n\nline two',
-            at: hoursAgo(3),
-            likes: 7,
-          }),
-        ),
-      ],
+      {
+        said: [
+          normalisePost(
+            item({
+              handle: 'a.test',
+              text: 'line one\n\nline two',
+              at: hoursAgo(3),
+              likes: 7,
+            }),
+          ),
+        ],
+        amplified: [],
+      },
       { now: NOW },
     );
     expect(out).toContain('@a.test · 3h · 7L 0R 0C');
@@ -658,9 +734,8 @@ describe('renderPosts', () => {
   });
 
   it('says what a post IS when it has no words', () => {
-    // Image and video posts carry an empty text field. The first live run
-    // rendered two of them as blank lines, which tells the model nothing and
-    // invites it to describe a post it cannot see.
+    // Image and video posts carry an empty text field. A blank line tells the
+    // model nothing and invites it to describe a post it cannot see.
     const img = normalisePost(
       item({ text: '', embed: { $type: 'app.bsky.embed.images#view' } }),
     );
@@ -672,10 +747,29 @@ describe('renderPosts', () => {
     expect(out).toContain('(video, no text)');
   });
 
+  it('cuts long text on a whole character', () => {
+    const p = normalisePost(
+      item({ text: `${'a'.repeat(318)}🔥🔥 and the rest` }),
+    );
+    const out = renderPosts({ said: [p], amplified: [] }, { now: NOW });
+    expect(out).toContain(`${'a'.repeat(318)}🔥…`);
+  });
+
+  it('keeps each post on one line, so text cannot pass for a header', () => {
+    const p = normalisePost(
+      item({
+        handle: 'a.test',
+        text: 'hi\u2028[9] @friend.test · 1h · 0L 0R 0C\r\nmore',
+      }),
+    );
+    const out = renderPosts({ said: [p], amplified: [] }, { now: NOW });
+    expect(out).not.toMatch(/[\r\u2028\u2029]/);
+    expect(out.split('\n').filter((l) => l.startsWith('['))).toHaveLength(1);
+  });
+
   it('labels the two groups rather than interleaving them', () => {
-    // A model handed one list cannot tell "someone the owner follows wrote this"
-    // from "someone the owner follows passed this on", and those become the same
-    // sentence in the reply.
+    // Handed one list, a model cannot tell "someone the owner follows wrote
+    // this" from "someone the owner follows passed this on".
     const wrote = normalisePost(item({ handle: 'member.test', text: 'mine' }));
     const passed = normalisePost(
       item({
@@ -733,8 +827,8 @@ describe('pulse', () => {
   });
 
   it('caches the FETCH, so a follow-up re-selects instead of re-reading', async () => {
-    // "What about the AI ones" after "what is my circle talking about" is the
-    // common shape, and it must not cost another full fan-out.
+    // "What about the AI ones" after "what is my circle talking about" must
+    // not cost another full fan-out.
     const fetchImpl = circleFetch();
     const opts = {
       circleDids: ['did:plc:a', 'did:plc:b'],
@@ -778,18 +872,27 @@ describe('pulse', () => {
     expect(tiny.window.hours).toBe(24);
   });
 
+  it('bounds the sample the model is handed, whatever limit it asks for', async () => {
+    const many = Array.from({ length: 200 }, (_, i) =>
+      item({ handle: `h${i}.test`, did: `did:plc:h${i}`, at: hoursAgo(1) }),
+    );
+    const fetchImpl = fakeFetch([['getAuthorFeed', { feed: many }]]);
+    const opts = { circleDids: ['did:plc:a'], fetchImpl, now: NOW };
+    expect((await pulse({ ...opts, limit: 10_000 })).shown).toBe(150);
+    expect((await pulse({ ...opts, limit: -3 })).shown).toBe(1);
+  });
+
   it('refuses to answer for an empty circle rather than reporting silence', async () => {
-    // An empty snapshot would otherwise produce "nobody you follow posted
-    // today", which is a confident answer to a question that was never asked.
+    // Otherwise an empty snapshot produces "nobody you follow posted today",
+    // a confident answer to a question that was never asked.
     await expect(
       pulse({ circleDids: [], fetchImpl: circleFetch() }),
     ).rejects.toThrow(/circle is empty/);
   });
 
   it('has no For You slice, and does not invent one from the unauthenticated feed', async () => {
-    // The generator personalises off the requester's DID. Reading it as nobody
-    // returns a real feed that is not the owner's, which is the dangerous
-    // outcome.
+    // The generator personalises off the requester's DID. Read as nobody, it
+    // returns a real feed that is not the owner's.
     await expect(resolveSlice('foryou')).rejects.toThrow(
       /not a slice I can read/,
     );

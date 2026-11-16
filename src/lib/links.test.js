@@ -24,9 +24,8 @@ describe('link facets', () => {
   });
 
   it('ignores links this codebase did not build', () => {
-    // The analyst quotes bios and post text. A general linkifier would
-    // eventually hand-render a stranger's URL as tappable inside a moderation
-    // report about them.
+    // The analyst quotes bios and post text. A general linkifier would end up
+    // rendering a stranger's URL as tappable in a report about them.
     expect(ownLinkFacets('see https://example.com/evil')).toEqual([]);
     expect(ownLinkFacets(`see ${uri}`)).toEqual([]);
     expect(
@@ -53,10 +52,13 @@ describe('the web URL for a post', () => {
   });
 
   it('refuses anything that is not a post', () => {
-    // A broken link in an audit log is worse than no link: it looks like the
-    // record is gone when the truth is we built the URL wrong.
+    // A broken link is worse than none: it looks like the post is gone when
+    // the URL was built wrong.
     expect(postWebUrl('at://did:plc:abc/app.bsky.graph.list/3xyz')).toBe(null);
     expect(postWebUrl('https://bsky.app/profile/x/post/y')).toBe(null);
+    expect(postWebUrl('at://did:plc:abc/app.bsky.feed.post/3x y')).toBe(null);
+    expect(postWebUrl('at://did:plc:abc/app.bsky.feed.post/..')).toBe(null);
+    expect(postWebUrl('at://did:plc:a?b/app.bsky.feed.post/3xyz')).toBe(null);
     expect(postWebUrl('')).toBe(null);
     expect(postWebUrl(null)).toBe(null);
   });
@@ -75,10 +77,18 @@ describe('post links in a digest', () => {
   });
 
   it('falls back to the DID rather than rendering a handle it cannot trust', () => {
-    // Constrained to the DNS shape a handle actually is: nothing that could
-    // carry a path separator or a query gets rendered into a URL this account
-    // then marks as tappable.
-    for (const bad of ['../../evil', 'a/b', 'no-dot', '', null, 'x?y.com']) {
+    // Only a DNS-shaped handle, so nothing with a path separator or a query
+    // reaches a tappable URL. The AppView reports a broken handle as
+    // handle.invalid, which would be a dead link.
+    for (const bad of [
+      '../../evil',
+      'a/b',
+      'no-dot',
+      '',
+      null,
+      'x?y.com',
+      'handle.invalid',
+    ]) {
       expect(postWebUrl(uri, { handle: bad })).toBe(
         'https://bsky.app/profile/did:plc:abc/post/3xyz',
       );
@@ -91,9 +101,9 @@ describe('the facet allowlist', () => {
   const theirs = 'https://bsky.app/profile/evil.test/post/3zzz';
 
   it('facets a post link only when the caller built it', () => {
-    // A bsky.app URL this codebase built is indistinguishable by shape from
-    // one the analyst copied out of a stranger's post, so the caller passes
-    // the exact set and nothing else matches.
+    // A bsky.app URL this code built looks the same as one the analyst
+    // copied out of a stranger's post, so the caller passes the exact set
+    // and nothing else matches.
     const text = `see ${ours} and ${theirs}`;
     const facets = ownLinkFacets(text, { allow: [ours] });
     expect(facets).toHaveLength(1);
@@ -101,8 +111,7 @@ describe('the facet allowlist', () => {
   });
 
   it('returns ranges in order and never overlapping', () => {
-    // Two passes over one string produce facets out of order, and a range that
-    // overlaps another is a record the server is entitled to reject.
+    // A record with overlapping ranges is one the server may reject.
     const other = 'https://bsky.app/profile/b.test/post/3bbb';
     const text = `${ours} then ${other} then ${ours}`;
     const facets = ownLinkFacets(text, { allow: [ours, other] });
@@ -112,6 +121,14 @@ describe('the facet allowlist', () => {
         facets[i - 1].index.byteEnd,
       );
     }
+  });
+
+  it('links the longer URL when one allowed URL is a prefix of another', () => {
+    const short = 'https://bsky.app/profile/a.test/post/3aa';
+    const long = `${short}b`;
+    const facets = ownLinkFacets(`see ${long}`, { allow: [short, long] });
+    expect(facets).toHaveLength(1);
+    expect(facets[0].features[0].uri).toBe(long);
   });
 
   it('counts offsets in utf-8 bytes, not js indices', () => {

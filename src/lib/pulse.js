@@ -1,33 +1,19 @@
-// What a SLICE of the network is talking about, over a window of time.
+// What a slice of the network has been talking about over a window of time.
 //
-// `get_trends` already answers this for the whole network, and the whole
-// network is the one slice the owner has the least use for. "What is Bluesky
-// talking about" is a question about a population they are barely in. "What
-// are the people I actually follow talking about since yesterday" is a
-// question about theirs, and nothing in this system could answer it.
+// `get_trends` answers this for the whole network, which the owner is barely
+// part of. This module answers it for a slice they chose: the accounts they
+// follow, a custom feed, or a list. It fetches, windows and selects. What the
+// posts mean is left to the analyst, and who anyone is stays in score.js,
+// where it can be replayed.
 //
-// So: a slice, a window, and the posts inside both. The model does the reading.
-// This module does the fetching, the windowing and the selection, and it is
-// deliberately the boring half: every judgement about what a slice MEANS is
-// left to the analyst, and every judgement about who anyone IS stays in
-// score.js where it can be replayed.
+// The circle is read by fanning out over public author feeds rather than
+// calling getTimeline, which answers as the viewer and so would need the
+// owner's session. The bot is not the owner, and author feeds are public.
 //
-// WHY FAN-OUT AND NOT A TIMELINE. `app.bsky.feed.getTimeline` would answer
-// "people I follow" in one call, and it answers it AS THE VIEWER: it needs the
-// owner's session, and the moderator account is not the owner. The circle is
-// typically a few hundred public follows, so reading their author feeds gets
-// the same answer from public data with no credential at all. That is the
-// same reasoning that put `followsOf` in precompute.js on the unauthenticated
-// AppView.
-//
-// WHAT IS NOT HERE, ON PURPOSE. A personalised For You feed. It is a real
-// atproto feed generator (`did:web:foryou.club`) and it personalises off the
-// requester's DID in a service JWT, so the only way to read the owner's version
-// is to hold the owner's identity. Unauthenticated `getFeed` against it answers
-// 200 with a generic feed, which is the dangerous outcome: a plausible answer
-// to a question nobody asked. Approximating it and calling it theirs would be
-// exactly the kind of claim the rest of this system exists to refuse, so there
-// is no `foryou` slice until there is an honest way to fetch one.
+// There is no For You slice. That generator personalises off the requester's
+// DID, and an unauthenticated getFeed answers 200 with a generic feed: a
+// plausible answer that is not the owner's. Until there is an honest way to
+// read theirs, the bot says it cannot.
 
 import { APPVIEW } from '../constants.js';
 import { resolveActor } from './target.js';
@@ -36,62 +22,43 @@ import { postWebUrl } from './links.js';
 export const DEFAULT_WINDOW_HOURS = 24;
 
 /**
- * The longest window that can be asked for.
- *
- * Not a rate-limit number. Past about a week the fan-out stops being a window
- * on a conversation and becomes an archive read: every author needs several
- * pages, the post count runs to five figures, and the selection below is
- * throwing away more than it keeps. A question that genuinely wants a month
- * wants a different tool.
+ * The longest window that can be asked for. Past about a week the fan-out is
+ * an archive read: authors need several pages each, the post count runs to
+ * five figures, and the selection throws away more than it keeps.
  */
 export const MAX_WINDOW_HOURS = 168;
 
-/** How many author feeds to read at once. Matches precompute's fan-out. */
+/** The most posts the model is handed. The `more` follow-up asks for 150. */
+const MAX_SAMPLE = 150;
+
+/** How many author feeds to read at once. */
 const CONCURRENCY = 8;
 
-/** Later pages, once we know an author is prolific enough to need one. */
+/** The feed endpoints' largest page. */
 const PAGE = 100;
 
-/** Author-feed pages to read before giving up and reporting the author cut. */
+/** Author-feed pages to read before reporting the author as cut. */
 const MAX_PAGES_PER_AUTHOR = 4;
 
-/** Pages of a feed or list before the same. Those are one shared stream. */
+/** Pages of a feed or list before stopping. Those are one shared stream. */
 const MAX_FEED_PAGES = 12;
 
 /**
- * Size the FIRST page to the window rather than always asking for 100.
+ * Size the first author-feed page to the window.
  *
- * Bandwidth is the real cost of this read, and an author feed is fat: about
- * 2.9 KB of JSON per post once embeds, labels and viewer state are in it.
- * MEASURED in the original deployment, against a circle of a couple of hundred
- * accounts over a 24h window:
- *
- *   limit=36  24.0 MB  10.6s  0 accounts needed a second page
- *   limit=25  16.8 MB   9.8s  1 account  needed a second page
- *   limit=15  10.2 MB   8.8s  8 accounts needed a second page
- *
- * That circle averaged 3.4 posts per account per day, so a page sized for the
- * average plus headroom is right and a page sized for the busiest account is
- * 14 MB of posts nobody reads. Fifteen, and the eight accounts that post more
- * than that pay for a second request (about 2.3 MB between them), which still
- * lands the whole refresh at half the cost of never paging at all.
- *
- * The 0.6-per-hour rate is that measured average, rounded up. It is a number
- * about ONE CIRCLE, not about Bluesky, and a slice of louder accounts will
- * page more often. That is the failure mode to want: paging is correct and
- * merely costs a request, where a first page too small to notice would just
- * quietly report less.
+ * An author feed carries a few KB of JSON per post, so bandwidth is what a
+ * fan-out costs. Most accounts post a few times a day, so a page of 15, or
+ * 0.6 per hour of window if that is more, covers them in one request and
+ * the busy few pay for a second. Erring small only costs a request.
  */
 function firstPageSize(hours) {
   return Math.min(PAGE, Math.max(15, Math.ceil(hours * 0.6)));
 }
 
 /**
- * Fetch JSON, distinguishing a failure that will never succeed from one that
- * might. Lifted from precompute.js for the same reason it exists there: a
- * deactivated account answers 400 from getAuthorFeed and always will, and
- * retrying it is how a fan-out spends its budget on the one member who cannot
- * be read.
+ * Fetch JSON, and tell a failure that will never succeed from one that might.
+ * A deactivated account answers 400 from getAuthorFeed forever, and retrying
+ * it spends the fan-out's budget on the one member who cannot be read.
  */
 async function getJson(url, fetchImpl, signal, tries = 3) {
   for (let i = 0; i < tries; i += 1) {
@@ -119,14 +86,12 @@ const BSKY_LIST =
 const AT_URI = /^at:\/\/([^/]+)\/([^/]+)\/([^/?#]+)/;
 
 /**
- * Turn whatever the owner pasted into a slice this module can fetch.
+ * Turn what the owner pasted into a slice: the word `circle`, an at:// URI,
+ * or a bsky.app feed or list link.
  *
- * Accepts the word `circle`, an `at://` URI, or a bsky.app link to a feed or a
- * list. The KIND is read off the collection rather than off the URL shape, so
- * an at:// URI pointing at a list is fetched with getListFeed even when it
- * arrived where a feed was expected. The two endpoints take different
- * parameter names and guessing wrong produces an empty result rather than an
- * error, which is the worst way to be wrong here.
+ * The kind comes from the collection, not the URL shape. getFeed and
+ * getListFeed take different parameters, and asking the wrong one returns an
+ * empty feed rather than an error.
  *
  * @returns {Promise<{kind: 'circle'|'feed'|'list', uri?: string}>}
  */
@@ -185,7 +150,7 @@ function linksIn(record, embed) {
   return [...new Set(out)];
 }
 
-/** The registrable-ish host of a URL, for counting what a slice is linking to. */
+/** The registrable-ish host of a URL, for counting what a slice links to. */
 export function domainOf(url) {
   try {
     return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
@@ -195,12 +160,33 @@ export function domainOf(url) {
 }
 
 /**
- * One feed item, flattened to the fields a digest actually reads.
+ * When a post was made: the earlier of `createdAt`, which the author sets,
+ * and `indexedAt`, which the AppView sets. The AppView sorts feeds the same
+ * way, and a post dated in the future cannot sort ahead of newer ones.
+ */
+function postTime(record, post) {
+  const times = [record?.createdAt, post?.indexedAt]
+    .map((t) => Date.parse(t))
+    .filter(Number.isFinite);
+  return times.length ? Math.min(...times) : 0;
+}
+
+/**
+ * When an item entered the feed. A repost sits in an author feed at the time
+ * of the repost, not of the post, so paging and the window go by that.
+ */
+function feedTime(item, p) {
+  const reposted = Date.parse(item?.reason?.indexedAt);
+  return Number.isFinite(reposted) ? reposted : p.at;
+}
+
+/**
+ * One feed item, flattened to the fields a digest reads.
  *
- * `reason` is what marks a repost, and it is read here rather than inferred
- * from the author DID: an author feed legitimately contains posts by other
- * people, and telling "they said this" from "they amplified this" is the whole
- * difference between two very different sentences in the answer.
+ * `reason` marks a repost. It is read here rather than inferred from the
+ * author DID, because an author feed holds other people's posts too, and
+ * "they said this" and "they amplified this" are different sentences in the
+ * answer.
  */
 export function normalisePost(item) {
   const post = item?.post;
@@ -208,32 +194,27 @@ export function normalisePost(item) {
   if (!post?.uri || typeof record?.text !== 'string') return null;
   const embed = post.embed || {};
   const type = String(embed.$type || '');
+  // A quote with media carries the media's type one level down.
+  const media = `${type} ${String(embed.media?.$type || '')}`;
   const reposter = item?.reason?.by;
   return {
     uri: post.uri,
     did: post.author?.did || '',
     handle: post.author?.handle || post.author?.did || '',
-    displayName: post.author?.displayName || '',
     text: record.text,
-    createdAt: record.createdAt || post.indexedAt || null,
-    at: Date.parse(record.createdAt || post.indexedAt || 0) || 0,
+    at: postTime(record, post),
     likes: post.likeCount ?? 0,
     reposts: post.repostCount ?? 0,
     replies: post.replyCount ?? 0,
     quotes: post.quoteCount ?? 0,
     isReply: Boolean(record.reply),
-    // Whether THIS COPY arrived as a repost, and who by. A post can reach the
-    // fan-out several times (once from its author and once from every member
-    // who reposted it), so these are properties of the copy, and `mergeCopy`
-    // below folds them into one post with a list of amplifiers.
-    viaRepost: Boolean(reposter),
-    repostedBy: reposter?.handle || reposter?.did || null,
+    // A post can arrive once from its author and once from each member who
+    // reposted it, so these two describe this copy. mergeCopy folds copies.
     amplifiedBy: reposter?.handle ? [reposter.handle] : [],
     said: !reposter,
-    hasImage: type.includes('images') || type.includes('recordWithMedia'),
-    hasVideo: type.includes('video'),
+    hasImage: media.includes('images'),
+    hasVideo: media.includes('video'),
     isQuote: type.includes('record'),
-    langs: record.langs || [],
     links: linksIn(record, embed),
   };
 }
@@ -244,23 +225,13 @@ export function engagementOf(p) {
 }
 
 /**
- * Fold a second sighting of the same post into the first.
+ * Fold a second copy of the same post into the first.
  *
- * THE FAN-OUT SEES POSTS MORE THAN ONCE, and the first run of this against the
- * real circle made that obvious: one post arrived from two members who had both
- * reposted it and took two of the three sample slots its author was allowed,
- * and the post count read 705 when the circle had written rather fewer than
- * that. Counting a post once per member who touched it measures reposting, not
- * conversation.
- *
- * The duplicate is not noise, though, so it is not simply dropped. How many of
- * the circle amplified something is the single most useful number in a digest
- * of a follow graph, much more useful than the like count, which is a fact
- * about Bluesky rather than about the owner's circle. So the copies collapse
- * into one post carrying the list of who amplified it.
- *
- * `said` wins over amplified on merge: if ANY copy came straight from its
- * author's feed, a member wrote it, whoever else passed it on.
+ * The fan-out sees a post once per member who touched it. Counting each copy
+ * measures reposting rather than conversation, but dropping them loses the
+ * most useful number in a follow-graph digest: how many of the circle passed
+ * it on. So copies collapse into one post that lists its amplifiers. If any
+ * copy came straight from its author's feed, a member wrote it.
  */
 export function mergeCopy(existing, incoming) {
   if (!existing) return incoming;
@@ -268,27 +239,24 @@ export function mergeCopy(existing, incoming) {
   for (const who of incoming.amplifiedBy) {
     if (!existing.amplifiedBy.includes(who)) existing.amplifiedBy.push(who);
   }
-  existing.viaRepost = existing.viaRepost && incoming.viaRepost;
   return existing;
 }
 
 /**
- * How many of the slice amplified a post. The local signal, as against the
- * like count, which is the network's.
+ * How many of the slice amplified a post. The like count is the network's
+ * signal; this is the slice's.
  */
 export function ampOf(p) {
   return p.amplifiedBy?.length || 0;
 }
 
 /**
- * Every post one account made inside the window.
+ * Every post one account made or reposted inside the window.
  *
- * Pages only while the page it just read is still inside the window, so a quiet
- * account costs one small request and a loud one costs as many as it earns.
- * `complete: false` means the author was cut by the page cap, which the caller
- * reports rather than swallows: a digest that silently saw half of the busiest
- * account in the circle is a digest that is wrong about what the circle is
- * talking about.
+ * Pages only while the last page was still inside it, so a quiet account
+ * costs one small request. `complete: false` means the page cap cut the
+ * author off, and the caller reports it: a digest that silently saw half of
+ * the busiest account is wrong about the slice.
  */
 export async function authorWindow(
   did,
@@ -323,13 +291,13 @@ export async function authorWindow(
     for (const item of body.feed || []) {
       const p = normalisePost(item);
       if (!p) continue;
-      oldest = Math.min(oldest, p.at);
-      if (p.at >= sinceMs) out.push(p);
+      const t = feedTime(item, p);
+      oldest = Math.min(oldest, t);
+      if (t >= sinceMs) out.push(p);
     }
 
     cursor = body.cursor;
-    // Out of posts, or already past the far edge of the window. Either way
-    // there is nothing older worth asking for.
+    // Out of posts, or past the far edge of the window.
     if (!cursor || oldest < sinceMs) {
       return { posts: out, complete: true, aborted: false, permanent: false };
     }
@@ -340,10 +308,10 @@ export async function authorWindow(
 /**
  * The circle's posts inside the window, read one author feed at a time.
  *
- * Unreadable members are counted, not thrown: an account the owner follows that
- * has since been deactivated answers 400 forever, and one of those must not
- * take the rest down with it. The count goes into `coverage` so the answer
- * can say how much of the circle it actually saw.
+ * An account the owner follows may have been deactivated and answer 400
+ * forever, so unreadable members are counted rather than thrown. Every
+ * member ends up read, unreadable or unread, and `coverage` says how many of
+ * each, so the answer can say how much of the circle it saw.
  */
 export async function circleWindow({
   dids,
@@ -355,9 +323,8 @@ export async function circleWindow({
   includeReplies = false,
   concurrency = CONCURRENCY,
   budgetMs = 60_000,
-  onProgress,
 }) {
-  const queue = [...new Set(dids || [])];
+  const queue = [...new Set((dids || []).filter(Boolean))];
   const total = queue.length;
   const byUri = new Map();
   const cut = [];
@@ -367,13 +334,12 @@ export async function circleWindow({
   let stopped = false;
 
   async function worker() {
-    while (!stopped) {
-      const did = queue.shift();
-      if (!did) return;
+    while (!stopped && queue.length) {
       if (Date.now() >= deadline) {
         stopped = true;
         return;
       }
+      const did = queue.shift();
       const r = await authorWindow(did, {
         sinceMs,
         hours,
@@ -384,6 +350,9 @@ export async function circleWindow({
         deadline,
       });
       if (r.aborted) {
+        // Out of time partway through. Back on the queue, so it counts as
+        // unread rather than as half-read.
+        queue.unshift(did);
         stopped = true;
         return;
       }
@@ -394,7 +363,6 @@ export async function circleWindow({
       if (!r.complete) cut.push(did);
       for (const p of r.posts) byUri.set(p.uri, mergeCopy(byUri.get(p.uri), p));
       read += 1;
-      onProgress?.({ read, remaining: queue.length });
     }
   }
 
@@ -408,9 +376,8 @@ export async function circleWindow({
       accounts: total,
       read,
       unreadable,
-      // Ran out of budget with members still queued. Reported because a
-      // digest built from 140 of 230 accounts is a different claim from one
-      // built from all of them, and only one of them is "what my circle said".
+      // Still queued when the budget ran out. A digest of 140 of 230
+      // accounts is a different claim from one of all of them.
       unread: queue.length,
       truncatedAuthors: cut.length,
     },
@@ -420,12 +387,13 @@ export async function circleWindow({
 /**
  * A custom feed or a list, read as one stream until it leaves the window.
  *
- * Unauthenticated on purpose, and that has a consequence worth stating: a feed
- * that personalises off the requester answers this call as NOBODY, not as the
- * owner. For a list feed and for a non-personalised generator that is the same
- * stream everyone else sees, which is what makes it honest to report. For a
- * personalised one it is not the owner's feed and this module must never
- * present it as though it were. See the note at the top about For You.
+ * Unauthenticated, so a feed that personalises off the requester answers as
+ * nobody. For a list or a non-personalised feed that is the stream everyone
+ * sees. For a personalised one it is not the owner's feed (see For You at
+ * the top).
+ *
+ * Throws when not even the first page can be read. An empty window from a
+ * feed that does not exist would read as a quiet day.
  */
 export async function feedWindow({
   uri,
@@ -449,18 +417,25 @@ export async function feedWindow({
       `${appview}/xrpc/${method}?${param}=${encodeURIComponent(uri)}&limit=${PAGE}` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
     const { body } = await getJson(url, fetchImpl, signal);
-    if (!body) break;
+    if (!body) {
+      if (page === 0) {
+        throw new Error(
+          `could not read the ${kind} ${uri}. It may not exist, or its server may be down.`,
+        );
+      }
+      break;
+    }
 
     let oldest = Infinity;
     for (const item of body.feed || []) {
       const p = normalisePost(item);
       if (!p) continue;
-      oldest = Math.min(oldest, p.at);
-      if (p.at < sinceMs) continue;
+      const t = feedTime(item, p);
+      oldest = Math.min(oldest, t);
+      if (t < sinceMs) continue;
       if (!includeReplies && p.isReply) continue;
-      // A feed can serve the same post twice across pages as its ranking
-      // shifts underneath the cursor. Counting it twice would overstate how
-      // much of the window one post is.
+      // A ranked feed can serve the same post on two pages as its ranking
+      // shifts under the cursor. Counting it twice overstates it.
       const first = seen.get(p.uri);
       if (first) {
         mergeCopy(first, p);
@@ -484,18 +459,12 @@ export async function feedWindow({
 }
 
 /**
- * Counts over the window, computed rather than asked of the model.
+ * Counts over the window, done in code. A model reading eighty posts gets a
+ * count roughly right, which is the wrong kind of right for a count.
  *
- * Everything here is arithmetic on public numbers. It is separate from the post
- * sample below because the model reading eighty posts should not also be the
- * thing that tells the owner how many there were. It would get it approximately
- * right, which is the worst kind of right for a count.
- *
- * SAID AND AMPLIFIED ARE COUNTED APART. A member writing something and a member
- * reposting a stranger are both things the slice did, and they are not the same
- * thing: the first is the circle talking and the second is the circle passing
- * on the network. Summing them produces one number that answers neither
- * question. `topAuthors` counts only what members wrote, because an author
+ * Said and amplified are counted apart: a member writing something and a
+ * member reposting a stranger are different acts, and one total answers
+ * neither question. `topAuthors` counts only what members wrote, because a
  * ranking built from reposts ranks strangers.
  */
 export function summariseWindow(
@@ -553,25 +522,17 @@ export function summariseWindow(
 }
 
 /**
- * Which posts the model actually reads.
+ * Which posts the model reads.
  *
- * THREE RULES, AND THE FIRST TWO ARE WHAT KEEP THIS FROM BEING TRENDING AGAIN.
+ * Said and amplified are selected separately. Ranked together, reposts of
+ * huge posts from outside the slice fill the top, which rebuilds the
+ * network-wide answer and calls it the owner's circle. Amplified posts rank
+ * first by how many of the slice passed them on, then by engagement: six
+ * members reposting something modest says more about the circle than one
+ * member reposting something huge.
  *
- * Said and amplified are selected SEPARATELY. Run against the real circle with
- * one ranking over both, the top of the digest was four reposts of posts with
- * thirteen thousand likes each, by people outside the circle. That is a
- * correct ranking of the wrong thing: a like count is a fact about Bluesky, and
- * ordering a follow-graph digest by it rebuilds the network-wide answer the owner
- * already has and calls it their circle.
- *
- * So amplified posts are ranked by HOW MANY OF THE SLICE amplified them, which
- * is the local signal, and only then by engagement. Six members reposting
- * something modest says more about what the circle is doing than one member
- * reposting something huge.
- *
- * Then a per-account cap, because engagement order alone hands the whole sample
- * to the two loudest accounts and produces a confident answer about two hundred
- * people built from the output of three. Breadth is the thing being measured.
+ * Each account is capped at `perAuthor` posts, because engagement order alone
+ * hands the sample to the loudest few. Breadth is what is being measured.
  */
 export function selectPosts(
   posts,
@@ -592,12 +553,12 @@ export function selectPosts(
     const taken = new Map();
     const kept = [];
     for (const p of list) {
+      if (kept.length >= cap) break;
       const key = p.handle || p.did;
       const n = taken.get(key) || 0;
       if (n >= perAuthor) continue;
       taken.set(key, n + 1);
       kept.push(p);
-      if (kept.length >= cap) break;
     }
     return kept;
   };
@@ -608,9 +569,8 @@ export function selectPosts(
     .filter((p) => !p.said)
     .sort(sort === 'recent' ? byRecency : byAmplification);
 
-  // The circle's own writing gets the larger share, and whichever group is
-  // short hands its unused slots to the other rather than leaving the sample
-  // smaller than it was asked to be.
+  // What the slice wrote gets the larger share, and a group that runs short
+  // hands its unused slots to the other.
   const saidCap = Math.ceil(limit * 0.65);
   const firstPass = take(saidPool, saidCap);
   const amplified = take(ampPool, limit - firstPass.length);
@@ -627,7 +587,7 @@ export function selectPosts(
   };
 }
 
-/** Relative age, so the model reads "3h ago" rather than doing date maths. */
+/** Relative age, so the model reads "3h" instead of doing date arithmetic. */
 function ago(at, now) {
   const mins = Math.max(0, Math.round((now - at) / 60_000));
   if (mins < 60) return `${mins}m`;
@@ -636,13 +596,9 @@ function ago(at, now) {
 }
 
 /**
- * What a post IS when it has no words.
- *
- * An image post, a video, a bare quote: `record.text` is an empty string and
- * the post is still a post. The first live run rendered two of those as blank
- * lines inside the sample, which tells the model nothing and invites it to
- * describe a post it cannot see. Naming the shape is honest and is the most
- * that can be said: nothing here reads images.
+ * What a post is when it has no words: an image, a video or a bare quote.
+ * A blank line tells the model nothing and invites it to describe a post it
+ * cannot see. Nothing here reads images, so the shape is all it gets.
  */
 function describeEmpty(p) {
   if (p.hasVideo) return '(video, no text)';
@@ -652,15 +608,13 @@ function describeEmpty(p) {
 }
 
 /**
- * One post as a header line plus its text, with a MARKER the answer can cite.
+ * One post as a header line and its text, numbered with a marker the answer
+ * can cite.
  *
- * The marker is how a digest points at a specific post without spending its
- * reply budget on a 60-character permalink per item. The model writes `[7]`,
- * and the caller swaps that for the real link, so the model chooses WHICH
- * post it is talking about and code decides what a marker resolves to. A
- * number that indexes a list the tool returned cannot name a post the digest
- * never saw, which is the property that lets the link be rendered tappable at
- * the other end.
+ * The model writes `[7]` and code swaps in the link, so the model picks which
+ * post and code decides where the link points. A marker can only index the
+ * list the tool returned, so it cannot name a post the digest never saw,
+ * which is what makes the link safe to render as tappable.
  */
 function renderOne(p, now, chars, n) {
   const amp = ampOf(p);
@@ -674,46 +628,37 @@ function renderOne(p, now, chars, n) {
           .join(', ')}${amp > 4 ? ', …' : ''})`
       : '') +
     (p.isReply ? ' · reply' : '');
-  const trimmed = p.text.trim();
-  const body = !trimmed
+  // Cut by code point, so the cut never leaves half a surrogate pair.
+  const text = Array.from(p.text.trim());
+  const body = !text.length
     ? describeEmpty(p)
-    : trimmed.length > chars
-      ? `${trimmed.slice(0, chars - 1)}…`
-      : trimmed;
+    : text.length > chars
+      ? `${text.slice(0, chars - 1).join('')}…`
+      : text.join('');
   const tail = p.links.length
     ? `\n  links: ${[...new Set(p.links.map(domainOf).filter(Boolean))].join(', ')}`
     : '';
-  return `${head}\n  ${body.replace(/\n+/g, ' ')}${tail}`;
+  // One line of text per post, so nobody's text can start a line that looks
+  // like another post's header.
+  const line = body.replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
+  return `${head}\n  ${line}${tail}`;
 }
 
 /**
- * The post sample as one block of text.
+ * The post sample as one block of text, for the caller to fence. Every
+ * character of it was written by other people.
  *
- * Returned as a plain string and fenced by the CALLER, because the fence is the
- * analyst's concept and lives in agent.js (the same split mcp.js uses). Every
- * character of this is written by other people.
- *
- * The two groups are LABELLED rather than interleaved. A model handed one list
- * cannot tell "someone the owner follows wrote this" from "someone the owner
- * follows passed this on", and those become the same sentence in the reply,
- * which is the specific way a digest of a follow graph turns into a digest of
- * Bluesky.
- *
- * Text is trimmed rather than summarised. A digest tool that pre-summarised
- * each post would be making the editorial call the model is there to make, one
- * post at a time, with no context about the other seventy-nine.
+ * The two groups are labelled rather than interleaved, so the model can tell
+ * "someone the owner follows wrote this" from "someone the owner follows
+ * passed this on". Text is trimmed, not summarised: summarising each post
+ * alone would make the model's editorial call without the rest in view.
  */
 export function renderPosts(
-  selection,
+  { said, amplified },
   { now = Date.now(), chars = 320, totals = null } = {},
 ) {
-  // Also accepts a plain array, which is what a single-group slice produces.
-  const { said, amplified } = Array.isArray(selection)
-    ? { said: selection, amplified: [] }
-    : selection;
-
-  // Numbered CONTINUOUSLY across both groups, in the same order as `kept`, so
-  // marker n is sample[n - 1] with no per-section arithmetic to get wrong.
+  // Numbered straight through both groups, in the order of `kept`, so
+  // marker n is sample[n - 1].
   let n = 0;
   const section = (title, list, total) => {
     if (!list.length) return '';
@@ -738,16 +683,12 @@ export function renderPosts(
 }
 
 /**
- * A tiny TTL cache over the FETCH, not over the answer.
+ * A short cache over the fetch, not the answer.
  *
- * Keyed on the slice and the window only, so changing `focus`, `sort` or
- * `limit` re-selects from posts already in hand instead of re-reading every
- * author feed. That is the common shape of a follow-up ("what about the AI
- * ones", "show me more") and it is the difference between a second question
- * costing nothing and costing another fan-out.
- *
- * Bounded at four entries because this runs in a long-lived process that also
- * holds the whole vouch snapshot in memory.
+ * Keyed on the slice and window only, so a follow-up that changes `focus`,
+ * `sort` or `limit` re-selects from posts in hand instead of reading every
+ * author feed again. Four entries, because the same process holds the vouch
+ * snapshot in memory.
  */
 const CACHE = new Map();
 const CACHE_TTL_MS = 10 * 60_000;
@@ -764,6 +705,8 @@ function cacheGet(key, now) {
 }
 
 function cacheSet(key, value, now) {
+  // Delete first, so a refreshed entry moves to the back of the eviction order.
+  CACHE.delete(key);
   CACHE.set(key, { at: now, ...value });
   while (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value);
 }
@@ -773,10 +716,11 @@ function cacheSet(key, value, now) {
  *
  * @param {object} opts
  * @param {string}   [opts.source]          `circle`, an at:// URI, or a bsky.app feed/list link
- * @param {number}   [opts.hours]           window, clamped to MAX_WINDOW_HOURS
+ * @param {number}   [opts.hours]           window, clamped to 1..MAX_WINDOW_HOURS
  * @param {string[]} [opts.circleDids]      required when the slice is the circle
  * @param {string}   [opts.focus]           only posts containing this text
  * @param {'engagement'|'recent'} [opts.sort]
+ * @param {number}   [opts.limit]           posts to sample, clamped to 1..MAX_SAMPLE
  */
 export async function pulse({
   source = 'circle',
@@ -799,6 +743,9 @@ export async function pulse({
     Math.max(1, Number(hours) || DEFAULT_WINDOW_HOURS),
   );
   const sinceMs = now - window * 3_600_000;
+  // The model chooses `limit`, and every sampled post goes back into its
+  // context, so it is bounded here.
+  const sample = Math.min(MAX_SAMPLE, Math.max(1, Math.floor(limit) || 60));
 
   const slice = await resolveSlice(source, { fetchImpl, signal, appview });
   if (slice.kind === 'circle' && !circleDids.length) {
@@ -843,7 +790,7 @@ export async function pulse({
 
   const totals = summariseWindow(fetched.posts);
   const selection = selectPosts(fetched.posts, {
-    limit,
+    limit: sample,
     perAuthor,
     sort,
     focus,
@@ -877,19 +824,12 @@ export async function pulse({
     amplified: selection.amplified.length,
     omitted: selection.omitted,
     posts: selection.kept,
-    // The marker table. Index n - 1 is what `[n]` in the answer refers to, in
-    // the same order the rendered block numbers them. `url` is built here from
-    // the at:// URI rather than taken from anything anyone wrote, which is what
-    // makes it safe to render as a tappable link later.
-    // The marker table. Index n - 1 is what `[n]` in the answer refers to, in
-    // the same order the rendered block numbers them.
-    //
-    // DELIBERATELY JUST THE LINK. Everything else about these posts is already
-    // in front of the model inside the fence, and a second unfenced copy of a
-    // handle would be the first place in this codebase where one is handed over
-    // as bare JSON. The URL is built here from the at:// URI and a
-    // shape-checked handle, so it carries who wrote it without carrying
-    // anything anyone wrote.
+    // The marker table: `[n]` in the answer is sample[n - 1], in the order
+    // renderPosts numbers them. Only the link is here. Everything else about
+    // these posts is already inside the fence, and an unfenced copy of a
+    // handle would hand it to the model as bare JSON. The URL is built from
+    // the at:// URI and a shape-checked handle, so it says whose post it is
+    // without carrying anything anyone wrote.
     sample: selection.kept.map((p, i) => ({
       n: i + 1,
       url: postWebUrl(p.uri, { handle: p.handle }),

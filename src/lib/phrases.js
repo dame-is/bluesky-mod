@@ -1,14 +1,13 @@
-// What the bot says when it is not the model talking.
+// What the bot says when the model is not talking.
 //
-// Acknowledgements, nudges and receipts are written here rather than generated,
-// because the whole point of an ack is that it arrives before the model does.
-// An LLM call to say "on it" would cost the five seconds the ack exists to fill.
+// Acknowledgements, nudges and receipts are written here rather than
+// generated, because an ack has to arrive before the model does. A model call
+// to say "on it" would cost the seconds the ack exists to fill.
 //
-// THE SAME SPLIT AS VOICE AND SURFACE. An OPENER is character and is editable
-// in the config file: "Acknowledged.", "On it boss.", whatever the owner wants
-// the thing to sound like. A CLAUSE is a statement of fact about what is
-// happening next, and stays here. An editable clause could say "Writing to the
-// list" while the thing is actually harvesting, which is a receipt that lies.
+// Openers are voice, and the owner can replace them in the config file.
+// Clauses state what happens next and stay in code: an editable clause could
+// say "Writing to the list" while the bot is harvesting, and that receipt
+// would lie.
 //
 // No em dashes in anything here. phrases.test.js checks.
 
@@ -23,7 +22,10 @@ export const DEFAULT_OPENERS = [
   'Yep.',
 ];
 
-/** What is about to happen. Not editable: a false receipt is worse than a dull one. */
+/**
+ * What is about to happen. Not editable: a false receipt is worse than a dull
+ * one.
+ */
 export const ACK_CLAUSE = {
   plan: [
     'Harvesting and scoring that post.',
@@ -64,12 +66,9 @@ export const ACK_CLAUSE = {
 };
 
 /**
- * Which commands are worth announcing.
- *
- * An ack exists to fill five to twenty seconds of silence. A lookup is rendered
- * now and arrives instantly, so announcing it means two messages for one
- * answer. The ack was right when everything went through a model and is noise
- * for the things that no longer do.
+ * Which commands are worth announcing. An ack fills five to twenty seconds of
+ * silence. A lookup needs no model and arrives at once, so announcing it
+ * would mean two messages for one answer.
  */
 export const SLOW = new Set([
   'plan',
@@ -77,14 +76,12 @@ export const SLOW = new Set([
   'undo',
   'review',
   'think',
-  // A read pulls a feed and then calls the model, so it is the slowest thing
-  // here by some distance, except a triage, which does that for hundreds of
-  // accounts at once.
+  // Reads a feed and then calls the model. A triage does that for hundreds
+  // of accounts at once.
   'read',
   'triage',
-  // A fan-out over a couple of hundred author feeds, and then a model call
-  // over everything it found. Measured at 7.6s before the model even starts,
-  // which is well past the point where silence reads as broken.
+  // A fan-out over a few hundred author feeds, then a model call over all of
+  // it.
   'pulse',
   'thread',
 ]);
@@ -101,11 +98,9 @@ export function pick(list, rng = Math.random) {
 }
 
 /**
- * Parse the editable openers.
- *
- * One per line, because asking someone to write JSON for a list of
- * sentences would be a worse trade than splitting on newlines.
- * Blank input falls back to the defaults rather than leaving the bot mute.
+ * Parse the editable openers: one per line, which is easier to write than a
+ * JSON list of sentences. Blank input falls back to the defaults rather than
+ * leaving the bot mute.
  */
 export function parseOpeners(text) {
   const lines = String(text || '')
@@ -116,9 +111,8 @@ export function parseOpeners(text) {
 }
 
 /**
- * What to say the moment a message is picked up, before the work starts.
- *
- * A harvest or a model call is five to twenty seconds of silence, which reads
+ * What to say the moment a message is picked up, before the work starts. A
+ * harvest or a model call is five to twenty seconds of silence, which reads
  * as broken rather than busy.
  *
  * @param {object|null} cmd  the parsed command, or null for a question
@@ -130,7 +124,9 @@ export function ackFor(
   cmd,
   { openers = DEFAULT_OPENERS, rng = Math.random } = {},
 ) {
-  const key = cmd?.action && ACK_CLAUSE[cmd.action] ? cmd.action : 'think';
+  const key = Object.hasOwn(ACK_CLAUSE, cmd?.action ?? '')
+    ? cmd.action
+    : 'think';
   return `${pick(openers, rng)} ${pick(ACK_CLAUSE[key], rng)}`.trim();
 }
 
@@ -145,8 +141,7 @@ export const NUDGE = {
     'Send me the post, either attached or as a link, and I will run it.',
   ],
   // Its own wording, because the `post` nudge promises a harvest and a score,
-  // and a thread read is neither. A receipt that describes the wrong operation
-  // is the thing this file exists to avoid.
+  // and a thread read is neither.
   thread: [
     'Name the post and I will read the thread on it. Paste the link, attach it, or pick a number from a digest.',
     'Give me the post link and I will read what the replies are saying.',
@@ -162,5 +157,6 @@ export const NUDGE = {
 };
 
 export function nudge(kind, rng = Math.random) {
-  return pick(NUDGE[kind] || NUDGE.actor, rng);
+  const list = Object.hasOwn(NUDGE, kind ?? '') ? NUDGE[kind] : NUDGE.actor;
+  return pick(list, rng);
 }

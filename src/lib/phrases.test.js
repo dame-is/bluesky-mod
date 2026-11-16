@@ -7,6 +7,7 @@ import {
   DEFAULT_OPENERS,
   ACK_CLAUSE,
   NUDGE,
+  worthAcking,
 } from './phrases.js';
 
 /** Deterministic rng so a variety test is not a flaky test. */
@@ -19,7 +20,7 @@ describe('nothing it says out loud contains an em dash', () => {
     ...Object.values(NUDGE).flat(),
   ];
   it.each(everything)('%s', (phrase) => {
-    expect(phrase).not.toMatch(/—/);
+    expect(phrase).not.toMatch(/\u2014/);
   });
 });
 
@@ -55,6 +56,9 @@ describe('ackFor', () => {
     expect(ackFor(null, { rng: always(0) })).toBe('Acknowledged. Thinking.');
     expect(ackFor({ action: 'nonsense' }, { rng: always(0) })).toMatch(
       /Thinking/,
+    );
+    expect(ackFor({ action: 'toString' }, { rng: always(0) })).toBe(
+      'Acknowledged. Thinking.',
     );
   });
 
@@ -96,6 +100,7 @@ describe('nudge', () => {
 
   it('falls back rather than returning nothing for an unknown kind', () => {
     expect(nudge('nope')).toBeTruthy();
+    expect(nudge('constructor')).toBeTruthy();
   });
 });
 
@@ -108,19 +113,16 @@ describe('pick', () => {
 });
 
 describe('worthAcking', () => {
-  it('announces work that takes time', async () => {
-    const { worthAcking } = await import('./phrases.js');
+  it('announces work that takes time', () => {
     for (const action of ['plan', 'approve', 'undo', 'review']) {
       expect(worthAcking({ action })).toBe(true);
     }
     expect(worthAcking(null)).toBe(true); // a model call
   });
 
-  it('stays quiet for replies that arrive instantly', async () => {
-    // A rendered reply needs no announcement. Acking it means two messages for
-    // one answer, which is what it did for a while after lookups stopped
-    // calling a model.
-    const { worthAcking } = await import('./phrases.js');
+  it('stays quiet for replies that arrive instantly', () => {
+    // A reply rendered without a model needs no announcement. Acking it
+    // would mean two messages for one answer.
     for (const action of ['list_add', 'list_remove', 'cancel', 'history']) {
       expect(worthAcking({ action })).toBe(false);
     }
