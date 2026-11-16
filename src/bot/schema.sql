@@ -1,0 +1,191 @@
+-- The bot's state, in one SQLite file.
+--
+-- Declared types matter to src/bot/db.js: JSON columns are parsed on the way
+-- out and BOOLEAN columns come back as true/false, so a row reads the same as
+-- it would from Postgres. Timestamps are ISO-8601 text in UTC, which sorts and
+-- compares correctly as text.
+--
+-- Every statement is idempotent, so this runs on every start.
+
+-- The follow-graph snapshot. One row per account the owner follows, per
+-- snapshot; `follows_indexed_at` is set once that account's follows are read.
+create table if not exists circle (
+  taken_at text not null,
+  did text not null,
+  follows_indexed_at text,
+  attempts integer not null default 0,
+  unreadable text,
+  primary key (taken_at, did)
+);
+
+-- Raw edges while a snapshot is being collected. Aggregated into `vouch` and
+-- then deleted by finalise_snapshot.
+create table if not exists circle_follow (
+  taken_at text not null,
+  member_did text not null,
+  target_did text not null,
+  primary key (taken_at, member_did, target_did)
+);
+create index if not exists circle_follow_target_idx on circle_follow (taken_at, target_did);
+
+-- For any account: how many of the owner's follows also follow them.
+create table if not exists vouch (
+  taken_at text not null,
+  did text not null,
+  vouches integer not null,
+  primary key (taken_at, did)
+);
+create index if not exists vouch_did_idx on vouch (did);
+
+-- Accounts no automated path may add: the owner's follows, members of the
+-- owner's curation lists, and anyone added by hand (source 'manual').
+create table if not exists protected (
+  did text primary key,
+  reason text not null,
+  source text,
+  added_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- A batch the bot proposed: who engaged with a post, scored. Nothing is added
+-- until a plan is approved, by band, by label or by name.
+create table if not exists plan (
+  id text primary key,
+  harvest_id text,
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  approved_at text,
+  approved_bands JSON,
+  thresholds JSON,
+  totals JSON,
+  note text
+);
+
+-- One account in one plan, and what was done about it. Append-only by
+-- convention: undo stamps `undone_at` rather than deleting the row.
+create table if not exists decision (
+  plan_id text not null references plan (id) on delete cascade,
+  did text not null,
+  band text not null,
+  trust integer,
+  distance integer,
+  vouches integer,
+  action text,
+  acted_at text,
+  undone_at text,
+  undo_reason text,
+  approved_via text,
+  triage text,
+  triage_quote text,
+  triage_at text,
+  triage_model text,
+  evidence_uri text,
+  engaged JSON,
+  already_listed BOOLEAN,
+  blocks_me BOOLEAN,
+  primary key (plan_id, did)
+);
+create index if not exists decision_did_idx on decision (did);
+create index if not exists decision_triage_idx on decision (plan_id, triage);
+
+-- A re-score of everyone on the list (the weekly drift run).
+create table if not exists audit (
+  id text primary key,
+  list_uri text not null,
+  started_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  finished_at text,
+  total integer,
+  scored integer not null default 0,
+  cursor text
+);
+
+create table if not exists audit_item (
+  audit_id text not null references audit (id) on delete cascade,
+  did text not null,
+  handle text,
+  band text not null,
+  trust integer,
+  vouches integer,
+  followers integer,
+  protected_reason text,
+  decision text,
+  decided_at text,
+  primary key (audit_id, did)
+);
+create index if not exists audit_item_band_idx on audit_item (audit_id, band);
+
+-- The drift DM, so a week's brief is sent once.
+create table if not exists brief (
+  id text primary key,
+  for_date text not null,
+  body text not null,
+  sent_at text
+);
+
+-- The moderator account's session, resumed rather than re-created.
+create table if not exists bot_session (
+  id integer primary key default 1 check (id = 1),
+  did text,
+  handle text,
+  session JSON not null,
+  refreshed_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Where the DM poll got to.
+create table if not exists dm_cursor (
+  id integer primary key default 1 check (id = 1),
+  cursor text,
+  updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Per conversation: the numbered menu last offered, the post last sent, and a
+-- pending yes/no question.
+create table if not exists dm_choice (
+  convo_id text primary key,
+  options JSON not null default '[]',
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  last_post text,
+  last_post_at text,
+  pending JSON
+);
+
+-- "remember: ..." notes, from the owner's own words only.
+create table if not exists memory (
+  id text primary key,
+  text text not null,
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  removed_at text
+);
+
+-- Posts being watched for new quotes and replies.
+create table if not exists watch (
+  id text primary key,
+  convo_id text not null,
+  uri text not null,
+  plan_id text,
+  mode text not null default 'ask' check (mode in ('ask', 'auto')),
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  until text not null,
+  stopped_at text,
+  last_checked_at text,
+  last_digest_at text,
+  stats JSON not null default '{}'
+);
+create index if not exists watch_live on watch (until) where stopped_at is null;
+
+-- The owner's own posts, checked for a sudden run of quotes and replies.
+create table if not exists post_alert (
+  uri text primary key,
+  last_count integer,
+  last_seen_at text,
+  alerted_at text
+);
+
+-- One row per model call, for the spend line.
+create table if not exists llm_usage (
+  id integer primary key autoincrement,
+  at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  kind text not null,
+  model text,
+  input_tokens integer,
+  output_tokens integer,
+  cost_usd real
+);

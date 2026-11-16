@@ -1,0 +1,310 @@
+// The account report, rendered rather than written.
+//
+// A lookup is a form with the same nine fields every time. Handing that to a
+// model costs a call, a couple of thousand tokens and a different shape on
+// every answer, and buys prose where the owner wanted a table. So this is a
+// template with variables, filled from what score.js already computed, and no
+// model runs.
+//
+// The template is editable in the config file. The VALUES are not, and one of them
+// is dangerous: `displayName` is written by the account being looked at. A
+// display name carrying a newline could forge a line of the report, and a forged
+// "Band: PROTECTED" reads exactly like a field this code produced. Every
+// substituted value is flattened to one line and capped before it is used.
+
+/** What a lookup looks like unless the owner changes it. */
+export const DEFAULT_REPORT_TEMPLATE = [
+  'Name: "{displayName}"',
+  'Handle: @{handle}',
+  'Band: {band}',
+  'Distance: {distance}',
+  'Relationship: {relationship}',
+  'My Circle: {vouches}',
+  'Reach: {followers} followers',
+  'Age: {ageDays} days',
+  'Cadence: Posting ~{postsPerDay}/day',
+  'Lists: {lists}',
+].join('\n');
+
+/**
+ * One line, bounded.
+ *
+ * Newlines are the attack: a field that can contain one can add a row to the
+ * report that looks like this code wrote it. \p{C} covers control and format
+ * characters together, which also catches the bidi overrides that can reorder
+ * a line without adding anything visible to it. The cap is so a 300-character
+ * display name cannot push the real fields out of a chat bubble.
+ */
+export function sanitiseField(value, { max = 64 } = {}) {
+  if (value === null || value === undefined || value === '') return '—';
+  const flat = String(value)
+    .replace(/\p{C}/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!flat) return '—';
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** How this account stands to the owner, in words rather than three booleans. */
+export function relationshipOf(a) {
+  // First, because it settles the rest: someone who blocks you follows nobody
+  // you can see, and cannot reply to you or quote you while the block stands.
+  if (a.blocksYou) return 'They block you';
+  if (a.mutual) return 'Mutual';
+  if (a.youFollow) return 'You follow them';
+  if (a.followsYou) return 'They follow you';
+  return 'Not mutual, not following, not followed';
+}
+
+/** Which of the owner's lists already hold them. */
+export function listsOf(a) {
+  const on = [];
+  if (a.alreadyListed) on.push('moderation list');
+  if (a.protectedReason) on.push(`PROTECTED (${a.protectedReason})`);
+  return on.length ? on.join(', ') : 'None';
+}
+
+/** Every variable a template may use. */
+export function variablesFor(account) {
+  const num = (n) =>
+    typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : '—';
+  return {
+    handle: account.handle || account.did,
+    did: account.did,
+    displayName: account.displayName || '',
+    band: account.band,
+    trust: account.trust,
+    distance: account.distance,
+    vouches: account.vouches ?? 0,
+    followers: num(account.followers),
+    follows: num(account.follows),
+    posts: num(account.posts),
+    ageDays: num(account.ageDays),
+    postsPerDay:
+      typeof account.postsPerDay === 'number'
+        ? account.postsPerDay.toFixed(0)
+        : '—',
+    relationship: relationshipOf(account),
+    lists: listsOf(account),
+    protectedReason: account.protectedReason || '',
+  };
+}
+
+/**
+ * Fill the template.
+ *
+ * An unknown {placeholder} is left alone rather than blanked, so a typo in the
+ * config file shows up in the output instead of silently deleting a line.
+ */
+export function renderReport(
+  account,
+  { template = DEFAULT_REPORT_TEMPLATE } = {},
+) {
+  const vars = variablesFor(account);
+  return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
+    key in vars ? sanitiseField(vars[key]) : whole,
+  );
+}
+
+/**
+ * What the owner can do about this account, as parseable commands.
+ *
+ * PROTECTED gets no add option. The write would refuse it anyway, and a button
+ * that exists to be rejected is worse than no button.
+ */
+/**
+ * What this thing can do, said out loud.
+ *
+ * It did not exist for the first several months and the capabilities were
+ * discoverable only by having built them, which is a fine state for a tool
+ * nobody else uses and a silly one for a tool you talk to. Deterministic: a
+ * model asked what it can do will answer confidently and be wrong, because it
+ * reads the same prompt whether or not a tool is wired up behind it.
+ *
+ * WRITES ARE LEFT OUT FOR A READ-ONLY SENDER rather than listed and refused,
+ * the same rule the menus already follow. A menu of buttons that reject you
+ * teaches you to stop reading the menu.
+ */
+export function helpText({ canWrite = true } = {}) {
+  const reads = [
+    'WHAT THE NETWORK IS SAYING',
+    '  pulse                     what your circle is talking about, last 24h',
+    '  pulse 3d                  same, over three days (or 72, or 168)',
+    '  pulse amplified           only what they reposted, and who passed it on',
+    '  pulse about atproto       only posts mentioning that',
+    '  pulse <feed or list link> any custom feed or list, same window',
+    '  thread <post link>        what a cited post is actually arguing about',
+    '  Or just ask: "what are the people I follow talking about today?"',
+    '  A digest numbers what it names, links each one, and takes a number back.',
+    '',
+    'ONE ACCOUNT',
+    '  @handle                   band, vouches, reach, tenure',
+    '  read @handle              what they actually post about',
+    '  history @handle           every decision recorded about them',
+    '',
+    'ONE POST',
+    '  <paste a link>            score everyone who engaged with it',
+  ];
+  const writes = [
+    '',
+    'ACTING',
+    '  add likers <post>         harvest, score, propose a batch',
+    '  review <code>             the accounts in it that need a look',
+    '  approve <code> UNKNOWN    add that band only',
+    '  block @handle             add one account to the list',
+    '  unblock @handle           take them back off',
+    '  undo                      reverse the last batch',
+  ];
+  const tail = [
+    '',
+    'Replies that end in a numbered menu take a number instead of retyping.',
+  ];
+  return [...reads, ...(canWrite ? writes : []), ...tail].join('\n');
+}
+
+export function actionsFor(account) {
+  const at = `@${account.handle || account.did}`;
+  const out = [];
+  if (!account.protectedReason) {
+    out.push({ label: `Add ${at} to the list`, command: `list add ${at}` });
+  }
+  out.push({
+    label: `Remove ${at} from the list`,
+    command: `list remove ${at}`,
+  });
+  // The way to LEARN something before acting. The band answers "who would
+  // notice if I blocked them" and says nothing at all about conduct, which is
+  // the question a person is usually actually asking. Offering the read beside
+  // the act is what keeps the band from being read as a verdict by default.
+  out.push({
+    label: `Read ${at}'s recent posts first`,
+    command: `read ${at}`,
+  });
+  return out;
+}
+
+/** What a post scan looks like unless the owner changes it. */
+export const DEFAULT_PLAN_TEMPLATE = [
+  'Post by @{author} ({authorBand})',
+  '{uri}',
+  '',
+  'Participants: {participants}',
+  'Engagements: {engagements}',
+  '',
+  'PROTECTED: {PROTECTED}',
+  'CONNECTED: {CONNECTED}',
+  'PERIPHERAL: {PERIPHERAL}',
+  'NOTABLE: {NOTABLE}',
+  'UNKNOWN: {UNKNOWN}',
+  '',
+  'Need a look: {needsLook}',
+  'Plan: {code}',
+  'If you add all: {cost}',
+].join('\n');
+
+/** Every variable a post-scan template may use. */
+export function planVariablesFor(plan) {
+  const byBand = plan.byBand || {};
+  const needsLook = Object.entries(byBand)
+    .filter(([b, n]) => b !== 'UNKNOWN' && n)
+    .map(([b, n]) => `${n} ${b}`)
+    .join(', ');
+  const engagements = Object.entries(plan.engagements || {})
+    .filter(([, n]) => n)
+    .map(([k, n]) => `${n} ${k}`)
+    .join(', ');
+  return {
+    uri: plan.uri,
+    code: plan.code,
+    kind: plan.kind,
+    author: plan.author?.handle || plan.author?.did || 'unknown',
+    withText: plan.withText ?? 0,
+    authorBand: plan.author?.band || 'UNSCORED',
+    authorVouches: plan.author?.vouches ?? 0,
+    authorFollowers: plan.author?.followers ?? null,
+    participants: plan.total,
+    engagements: engagements || '—',
+    needsLook: needsLook || 'none',
+    truncated: plan.truncated ? 'yes, the harvest hit a page cap' : 'no',
+    cost: plan.cost || '',
+    ...byBand,
+  };
+}
+
+/** Fill the post-scan template. Unknown placeholders survive, as above. */
+export function renderPlanReport(
+  plan,
+  { template = DEFAULT_PLAN_TEMPLATE } = {},
+) {
+  const vars = planVariablesFor(plan);
+  return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
+    key in vars ? sanitiseField(vars[key], { max: 120 }) : whole,
+  );
+}
+
+/**
+ * What the owner can do about a scanned post.
+ *
+ * Bands with nothing in them get no option: an approval that would carry zero
+ * accounts is a button that does nothing, and a menu of those teaches you to
+ * stop reading the menu.
+ */
+export function planActions(plan) {
+  const byBand = plan.byBand || {};
+  const out = [];
+
+  // THE AUTHOR LEADS. A post with no likes and no replies scored every band at
+  // zero and offered only "Do nothing", which is a true report about the graph
+  // around the post and a useless one about the post: the account in front of
+  // the owner is the one who WROTE it. PROTECTED gets no add option here for the
+  // same reason it gets none in actionsFor.
+  const author = plan.author;
+  const at = author ? `@${author.handle || author.did}` : null;
+  if (at && !author.protectedReason) {
+    out.push({
+      label: `Add the author ${at} to the list`,
+      command: `list add ${at}`,
+    });
+  }
+  if (at) {
+    out.push({
+      label: `Read ${at}'s recent posts first`,
+      command: `read ${at}`,
+    });
+  }
+
+  // Sorting by band tells you who would notice. On a post with hundreds of
+  // quotes that is 639 UNKNOWN and no way to tell the person who wrote an
+  // insult from the person arguing about a policy -- so when there are words to
+  // read, offer to read them BEFORE offering to add everyone.
+  if (plan.withText) {
+    out.push({
+      label: `Sort the ${plan.withText} who wrote something by tone`,
+      command: `triage ${plan.code}`,
+    });
+  }
+
+  if (byBand.UNKNOWN) {
+    out.push({
+      label: `Add the ${byBand.UNKNOWN} UNKNOWN accounts`,
+      command: `approve ${plan.code} UNKNOWN`,
+    });
+  }
+  const named = Object.entries(byBand)
+    .filter(([b, n]) => b !== 'UNKNOWN' && b !== 'PROTECTED' && n)
+    .reduce((t, [, n]) => t + n, 0);
+  if (named) {
+    out.push({
+      label: `Show me the ${named} that need a look`,
+      command: `review ${plan.code}`,
+    });
+    out.push({
+      label: `Add all ${plan.total - (byBand.PROTECTED || 0)}, every band`,
+      command: `approve ${plan.code} ${Object.keys(byBand)
+        .filter((b) => b !== 'PROTECTED' && byBand[b])
+        .join(',')}`,
+    });
+  }
+  out.push({ label: 'Do nothing', command: `cancel ${plan.code}` });
+  return out;
+}

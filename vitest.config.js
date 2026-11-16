@@ -1,0 +1,18 @@
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.js', 'scripts/**/*.test.js'],
+    // A stand-in owner, so modules that read the owner at import time have
+    // one. Tests never reach the network or a real account.
+    env: {
+      MOD_OWNER_DID: 'did:plc:owner0000000000000000000',
+      DATABASE_PATH: ':memory:',
+      // The tests were written against the measured gateway setup; nothing
+      // here calls a real model.
+      MODEL_PROVIDER: 'gateway',
+      AI_GATEWAY_API_KEY: 'test-key-not-real',
+    },
+  },
+});
