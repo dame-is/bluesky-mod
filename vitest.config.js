@@ -13,6 +13,8 @@ export default defineConfig({
       // here calls a real model.
       MODEL_PROVIDER: 'gateway',
       AI_GATEWAY_API_KEY: 'test-key-not-real',
+      // A second model, so the escalation paths are exercised.
+      MOD_ESCALATION_MODEL: 'test/escalation',
     },
   },
 });

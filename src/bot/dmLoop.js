@@ -901,7 +901,7 @@ async function answerAsAgent({
     );
   }
 
-  // One row per model and kind: the first wave, the second, the judge. A
+  // One row per model and kind: the first wave, the second, the check. A
   // single "dm-agent" row would put Sonnet's tokens and Jev's under one name.
   const usageRows = (reply.usages || [])
     .filter((u) => u.inputTokens || u.outputTokens)

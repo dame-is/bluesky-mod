@@ -33,14 +33,7 @@ import { harvestPost } from '../lib/harvest.js';
 import { untrusted, MODEL_TIMEOUT_MS } from '../lib/agent.js';
 import { LABELS } from '../lib/command.js';
 import { selectAll, upsert } from './db.js';
-import {
-  CHECK_MODEL,
-  ESCALATION_MODEL,
-  JUDGE_MODEL,
-  escalationEnabled,
-  hostileProbabilities,
-  withFallback,
-} from './tiers.js';
+import { CHECK_MODEL, ESCALATION_MODEL, escalationEnabled } from './tiers.js';
 
 // LABELS lives in command.js, not here. The parser needs it, and nothing under
 // src/lib/ imports the database (src/bot/db.js). The dependency runs this way
@@ -222,7 +215,6 @@ async function labelBatch(items, { generate, model, usage = [] }) {
     // See MODEL_TIMEOUT_MS. A hung gateway request here stopped the entire
     // consumer for as long as nobody noticed.
     abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
-    ...withFallback(model),
   });
   usage.push({
     model: String(model),
@@ -239,14 +231,6 @@ async function labelBatch(items, { generate, model, usage = [] }) {
  * about 100 posts here, so this is two or three rounds either way.
  */
 const SECOND_CONCURRENCY = 4;
-
-/**
- * A post goes to the second wave at or above this P(hostile) from the judge,
- * whatever the first-wave reader said. Measured on 762 real rows: the judge
- * finds hostile posts the first reader missed, and over-calls many more, so its
- * opinion is a reason to look again and never the label itself.
- */
-export const HOSTILE_CANDIDATE = 0.5;
 
 /**
  * The stronger model reads a set of posts. Same prompt, same parser, same
@@ -314,18 +298,14 @@ export async function runTriage(
     perRun = PER_RUN,
     log = () => {},
     escalation = ESCALATION_MODEL,
-    judge = JUDGE_MODEL,
-    evaluate,
   },
 ) {
-  // TWO WAVES when a stronger model is configured. The first-wave model labels
-  // everything; the judge scores every post for hostility alongside it; any
-  // post either of them calls hostile is read again by the second wave, whose
-  // label is the one kept. "hostile" is the only label that leads to a write,
-  // so it is the only one that has to get past the stronger reader.
+  // TWO WAVES when an escalation model is configured. The first-wave model
+  // labels everything, and any post it calls hostile is read again by the
+  // second, whose label is the one kept. "hostile" is the only label that
+  // leads to a write, so it is the only one that has to get past both.
   const twoWaves = escalationEnabled(escalation);
   const firstUsage = [];
-  const judgeUsage = [];
   const secondUsage = [];
   let escalated = 0;
   let overturned = 0;
@@ -418,13 +398,6 @@ export async function runTriage(
   for (let w = 0; w < batches.length; w += CONCURRENCY) {
     const wave = batches.slice(w, w + CONCURRENCY);
     const waveItems = wave.flat();
-    // The judge reads the same posts at the same time, so it adds no wall time.
-    const scoring = twoWaves
-      ? hostileProbabilities(
-          waveItems.map((row) => row.text),
-          { judge, usage: judgeUsage, ...(evaluate ? { evaluate } : {}) },
-        )
-      : Promise.resolve([]);
     const results = await Promise.all(
       wave.map((batch) =>
         labelBatch(batch, { generate, model, usage: firstUsage })
@@ -447,14 +420,8 @@ export async function runTriage(
       if (!r) continue;
       r.batch.forEach((row, n) => first.set(row, r.labels[n] || null));
     }
-    const pHostile = await scoring;
-
     const candidates = twoWaves
-      ? waveItems.filter(
-          (row, k) =>
-            first.get(row) === 'hostile' ||
-            (pHostile[k] ?? 0) >= HOSTILE_CANDIDATE,
-        )
+      ? waveItems.filter((row) => first.get(row) === 'hostile')
       : [];
     const second = candidates.length
       ? await secondWave(candidates, {
@@ -500,7 +467,6 @@ export async function runTriage(
 
   await recordUsage([
     ...firstUsage.map((u) => ({ ...u, kind: 'triage' })),
-    ...judgeUsage.map((u) => ({ ...u, kind: 'triage-judge' })),
     ...secondUsage.map((u) => ({ ...u, kind: 'triage-escalated' })),
   ]);
 

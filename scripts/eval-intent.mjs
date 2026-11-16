@@ -1,32 +1,19 @@
 #!/usr/bin/env node
-// Measure the agent's pre-write intent check against
-// scripts/evals/intent-cases.js.
+// Measure the agent-mode write check against scripts/evals/intent-cases.js.
 //
-// For each case it asks the evaluation model (Jev) once and each candidate
-// second-wave model once, then reports three things per candidate:
-//
-//   judge alone     Jev's probability against 0.5, no second wave
-//   strong alone    the candidate answering every case itself
-//   cascade         what production does: Jev decides above ALLOW and below
-//                   REFUSE, the candidate decides the middle band
-//
-// A FALSE ALLOW is the error that matters: a write the owner did not ask for. A
-// false refusal costs one "go ahead?" message. The table keeps them apart.
+// Each case is a message from the owner and a write the agent proposed. The
+// check answers YES or NO, and this reports how often it was right. A FALSE
+// ALLOW is the error that matters: a write the owner did not ask for. A false
+// refusal costs one "go ahead?" message. The table keeps them apart.
 //
 // Uses the model provider in .env (src/models.js). From the repo root:
-//   node --env-file=.env scripts/eval-intent.mjs
-//   node --env-file=.env scripts/eval-intent.mjs --strong model-a,model-b
+//   npm run eval:intent
+//   npm run eval:intent -- --models model-a,model-b
 //
-// Only the Vercel AI Gateway has evaluation models, so the judge column and
-// the cascade only run there. With any other provider the script measures
-// each candidate alone, which is how production checks writes there; the
-// default candidate is MOD_CHECK_MODEL (or MOD_AGENT_MODEL).
-//
-// On the gateway, cost is read from its public price list, so it stays honest
-// when prices move. A full run is one judge call per case, plus one per case
-// for each candidate.
+// With no --models, it tests MOD_CHECK_MODEL (which defaults to the agent
+// model). Run it again after changing the check prompt or the model.
 
-import { experimental_evaluate, generateText, gateway } from 'ai';
+import { generateText } from 'ai';
 
 import {
   PROVIDER,
@@ -34,49 +21,31 @@ import {
   installProvider,
   modelProblems,
 } from '../src/models.js';
-
 import { CASES } from './evals/intent-cases.js';
-import {
-  intentState,
-  INTENT_QUESTION,
-  SECOND_OPINION_PROMPT,
-  JUDGE_MODEL,
-} from '../src/bot/tiers.js';
+import { intentState, CHECK_PROMPT } from '../src/bot/tiers.js';
 import { actionText, accountPhrase, planPhrase } from '../src/bot/operator.js';
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`);
   return i > -1 ? process.argv[i + 1] : def;
 };
-const USE_JUDGE = PROVIDER === 'gateway';
-const STRONG = arg(
-  'strong',
-  USE_JUDGE
-    ? 'anthropic/claude-sonnet-5.5,openai/gpt-6-luna,openai/gpt-6-sol,deepseek/deepseek-v4.1-flash'
-    : MODELS.check || '',
-)
+const CANDIDATES = String(arg('models', MODELS.check || ''))
   .split(',')
+  .map((m) => m.trim())
   .filter(Boolean);
-const JUDGE = arg('judge', JUDGE_MODEL);
-const BANDS = [
-  [0.2, 0.6],
-  [0.15, 0.7],
-  [0.3, 0.5],
-  [0.1, 0.8],
-];
 
 const problems =
   PROVIDER === 'none'
     ? ['No model provider is set up: set MODEL_PROVIDER and a key in .env.']
     : modelProblems();
-if (!STRONG.length) problems.push('No model to test.');
+if (!CANDIDATES.length) problems.push('No model to test.');
 if (problems.length) {
   console.error(problems.join('\n'));
   process.exit(1);
 }
 installProvider();
 
-/** The judge's input for one case, built the way production builds it. */
+/** The check's input for one case, built the way production builds it. */
 function stateOf(c) {
   const action = actionText(c.kind, {
     accounts: (c.accounts || []).map(accountPhrase),
@@ -87,25 +56,6 @@ function stateOf(c) {
     label: c.label,
   });
   return intentState({ said: c.said, earlier: c.earlier, action });
-}
-
-async function prices() {
-  if (!USE_JUDGE) return new Map();
-  try {
-    const res = await fetch('https://ai-gateway.vercel.sh/v1/models');
-    const { data } = await res.json();
-    return new Map(
-      data.map((m) => [
-        m.id,
-        {
-          in: Number(m.pricing?.input || 0),
-          out: Number(m.pricing?.output || 0),
-        },
-      ]),
-    );
-  } catch {
-    return new Map();
-  }
 }
 
 async function pool(items, n, fn) {
@@ -122,39 +72,7 @@ async function pool(items, n, fn) {
   return out;
 }
 
-const price = await prices();
-const cost = (model, tin, tout) => {
-  const p = price.get(model) || { in: 0, out: 0 };
-  return tin * p.in + tout * p.out;
-};
-
-const states = CASES.map(stateOf);
-const judge = USE_JUDGE ? gateway.evaluationModel(JUDGE) : null;
-
-console.log(
-  `${CASES.length} cases: ${CASES.filter((c) => c.want).length} allow, ${CASES.filter((c) => !c.want).length} refuse\n`,
-);
-
-let judgeIn = 0;
-const t0 = Date.now();
-const ps = await pool(states, 8, async (state) => {
-  if (!judge) return null;
-  try {
-    const r = await experimental_evaluate({
-      model: judge,
-      state,
-      questions: INTENT_QUESTION,
-    });
-    judgeIn += r.usage.inputTokens || 0;
-    return r.answers.asked.probability;
-  } catch (err) {
-    console.error('judge failed:', err.message);
-    return null;
-  }
-});
-const judgeMs = Date.now() - t0;
-
-const score = (decisions) => {
+function score(decisions) {
   let right = 0;
   const falseAllow = [];
   const falseRefuse = [];
@@ -164,39 +82,27 @@ const score = (decisions) => {
     else falseRefuse.push(CASES[i].id);
   });
   return { right, falseAllow, falseRefuse };
-};
-const line = (name, s, extra = '') =>
-  console.log(
-    `${name.padEnd(46)} ${String(s.right).padStart(2)}/${CASES.length}  false allow ${String(s.falseAllow.length).padStart(2)}  false refuse ${String(s.falseRefuse.length).padStart(2)}  ${extra}`,
-  );
-
-if (USE_JUDGE) {
-  const alone = score(ps.map((p) => p !== null && p >= 0.5));
-  line(
-    `${JUDGE} alone (0.5)`,
-    alone,
-    `$${cost(JUDGE, judgeIn, 0).toFixed(5)}, ${judgeMs}ms total`,
-  );
-  if (alone.falseAllow.length)
-    console.log('   false allows:', alone.falseAllow.join(', '));
-  if (alone.falseRefuse.length)
-    console.log('   false refusals:', alone.falseRefuse.join(', '));
-  console.log('');
 }
 
-for (const model of STRONG) {
+const states = CASES.map(stateOf);
+console.log(
+  `${CASES.length} cases: ${CASES.filter((c) => c.want).length} allow, ${CASES.filter((c) => !c.want).length} refuse\n`,
+);
+
+for (const model of CANDIDATES) {
   let tin = 0;
   let tout = 0;
-  const t1 = Date.now();
-  const says = await pool(states, 6, async (state) => {
+  let failed = 0;
+  const t0 = Date.now();
+  const answers = await pool(states, 6, async (state) => {
     try {
       const r = await generateText({
         model,
-        instructions: SECOND_OPINION_PROMPT,
+        instructions: CHECK_PROMPT,
         messages: [{ role: 'user', content: state }],
       });
-      tin += r.usage.inputTokens || 0;
-      tout += r.usage.outputTokens || 0;
+      tin += r.usage?.inputTokens || 0;
+      tout += r.usage?.outputTokens || 0;
       const first = String(r.text || '')
         .trim()
         .split('\n')[0];
@@ -204,48 +110,23 @@ for (const model of STRONG) {
       if (/^\W*no\b/i.test(first)) return false;
       return null;
     } catch (err) {
+      failed += 1;
       console.error(`${model} failed:`, err.message);
       return null;
     }
   });
-  const ms = Date.now() - t1;
-  const s = score(says.map((x) => x === true));
-  line(
-    `${model} alone`,
-    s,
-    `$${cost(model, tin, tout).toFixed(4)}, ${Math.round(ms / CASES.length)}ms/case`,
+  const ms = Date.now() - t0;
+  // An unreadable or failed answer is a refusal, as it is in production.
+  const s = score(answers.map((x) => x === true));
+  console.log(
+    `${model.padEnd(40)} ${String(s.right).padStart(2)}/${CASES.length}  ` +
+      `false allow ${String(s.falseAllow.length).padStart(2)}  ` +
+      `false refuse ${String(s.falseRefuse.length).padStart(2)}  ` +
+      `${Math.round(ms / CASES.length)}ms/case, ${tin} in / ${tout} out tokens` +
+      (failed ? `, ${failed} calls failed` : ''),
   );
-  if (s.falseAllow.length)
-    console.log('   false allows:', s.falseAllow.join(', '));
+  if (s.falseAllow.length) console.log('   false allows:', s.falseAllow.join(', '));
   if (s.falseRefuse.length)
     console.log('   false refusals:', s.falseRefuse.join(', '));
-
-  for (const [refuse, allow] of USE_JUDGE ? BANDS : []) {
-    const middle = ps.map((p) => p === null || (p >= refuse && p < allow));
-    const decisions = ps.map((p, i) =>
-      middle[i] ? says[i] === true : p >= allow,
-    );
-    const asked = middle.filter(Boolean).length;
-    const share = asked / CASES.length;
-    const c = score(decisions);
-    line(
-      `  cascade [${refuse}, ${allow})`,
-      c,
-      `${asked} sent up, est $${(cost(JUDGE, judgeIn, 0) + cost(model, tin, tout) * share).toFixed(4)}`,
-    );
-    if (c.falseAllow.length)
-      console.log('     false allows:', c.falseAllow.join(', '));
-    if (c.falseRefuse.length)
-      console.log('     false refusals:', c.falseRefuse.join(', '));
-  }
   console.log('');
-}
-
-if (USE_JUDGE) {
-  console.log('Judge probabilities (want -> p):');
-  CASES.forEach((c, i) =>
-    console.log(
-      `  ${c.want ? 'allow ' : 'refuse'} ${ps[i] === null ? '  -  ' : ps[i].toFixed(2)}  ${c.id}`,
-    ),
-  );
 }

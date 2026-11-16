@@ -43,52 +43,30 @@ export const PROVIDER = providerName();
 /** True when a model can be called at all. */
 export const modelsEnabled = (name = PROVIDER) => name !== 'none';
 
-/**
- * Defaults per provider, for the jobs that have one.
- *
- * Only the Vercel AI Gateway gets named defaults, because those ids were
- * measured against this code (see docs/HOW-IT-WORKS.md, "Two waves"). Every
- * other provider names models its own way, so the agent model must be set and
- * the rest fall back to it or turn off:
- *
- *   agent       answers DMs and mentions; triage's first reader
- *   judge       an evaluation model (gateway only): did the owner ask for this write?
- *   check       second opinion on a write, and the check itself when there is no judge
- *   escalation  takes a turn the first model fumbled; re-reads "hostile" labels
- */
-export function modelDefaults(name = PROVIDER) {
-  if (name === 'gateway') {
-    return {
-      agent: 'deepseek/deepseek-v4-flash',
-      judge: 'typesafe-ai/jev',
-      check: 'openai/gpt-6-luna',
-      escalation: 'zai/glm-5.3-flash',
-      escalationFallback: 'zai/glm-5.3',
-    };
-  }
-  return {
-    agent: null,
-    judge: 'off',
-    check: null, // filled with the agent model below
-    escalation: 'off',
-    escalationFallback: 'off',
-  };
-}
+/** The default model, where the provider names it the same way. */
+export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash';
 
-/** The model ids in use, from the environment over the defaults. */
+/**
+ * The model ids in use, from the environment over the defaults.
+ *
+ *   agent       answers DMs and mentions, and labels posts in triage.
+ *               Defaults to DeepSeek V4.1 Flash on the gateway and OpenRouter;
+ *               every other provider names models its own way, so it must be
+ *               set there.
+ *   check       answers the write check in agent mode. Defaults to the agent
+ *               model: a separate call that reads only the owner's words and a
+ *               description of the change, never the posts the agent read.
+ *   escalation  optional second model: takes a turn the first fumbled, and
+ *               re-reads posts labelled hostile. "off" by default.
+ */
 export function modelIds(env = process.env, name = providerName(env)) {
-  const d = modelDefaults(name);
-  const agent = env.MOD_AGENT_MODEL || d.agent;
+  const fallback =
+    name === 'gateway' || name === 'openrouter' ? DEFAULT_MODEL : null;
+  const agent = env.MOD_AGENT_MODEL || fallback;
   return {
     agent,
-    judge: env.MOD_JUDGE_MODEL || d.judge,
-    // A write the agent chose is always checked by something, so with no
-    // dedicated check model the agent's own model asks the question. It reads
-    // only the owner's words and a description of the change, never the posts
-    // the agent read, which is what makes it a check.
-    check: env.MOD_CHECK_MODEL || d.check || agent,
-    escalation: env.MOD_ESCALATION_MODEL || d.escalation,
-    escalationFallback: env.MOD_ESCALATION_FALLBACK || d.escalationFallback,
+    check: env.MOD_CHECK_MODEL || agent,
+    escalation: env.MOD_ESCALATION_MODEL || 'off',
   };
 }
 
@@ -159,9 +137,6 @@ export function modelProblems(env = process.env) {
   }
   if (!modelIds(env, name).agent) {
     problems.push(`MOD_AGENT_MODEL is not set (needed with MODEL_PROVIDER=${name})`);
-  }
-  if (name !== 'gateway' && env.MOD_JUDGE_MODEL && env.MOD_JUDGE_MODEL !== 'off') {
-    problems.push('MOD_JUDGE_MODEL needs an evaluation model, which only the Vercel AI Gateway offers; unset it');
   }
   return problems;
 }

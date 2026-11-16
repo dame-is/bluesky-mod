@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { experimental_evaluate } from 'ai';
-import { Experimental_EvaluationMockModelV4 } from 'ai/test';
+import { generateText } from 'ai';
+import { MockLanguageModelV4 } from 'ai/test';
 
-import { checkIntent, intentState, hostileProbabilities } from './tiers.js';
+import { checkIntent, intentState, CHECK_PROMPT } from './tiers.js';
 
 const input = {
   said: 'block the hostile ones',
@@ -11,114 +11,53 @@ const input = {
     'Add 4 accounts to the moderation list from plan 3f9a2c1b: every account on it that a triage labelled hostile.',
 };
 
-/** A fake `evaluate` that answers the intent question with this probability. */
-const judgeSays = (p) =>
-  vi.fn(async () => ({
-    answers: { asked: { type: 'boolean', probability: p } },
-    usage: { inputTokens: 300, outputTokens: 0 },
-  }));
-
-const strongSays = (text) =>
+const says = (text) =>
   vi.fn(async () => ({ text, usage: { inputTokens: 500, outputTokens: 10 } }));
 
-describe('the intent check', () => {
-  it('allows a confident yes without asking the stronger model', async () => {
-    const generate = strongSays('NO');
+describe('the write check', () => {
+  it('allows a yes, and keeps the reason', async () => {
     const out = await checkIntent(input, {
-      evaluate: judgeSays(0.92),
-      generate,
-      judge: 'j/jev',
-      second: 's/strong',
+      generate: says('YES\nThe owner asked for the hostile ones.'),
+      model: 'm/check',
     });
-    expect(out.allow).toBe(true);
-    expect(out.by).toBe('j/jev');
-    expect(generate).not.toHaveBeenCalled();
-  });
-
-  it('refuses a confident no without asking the stronger model', async () => {
-    const generate = strongSays('YES');
-    const out = await checkIntent(input, {
-      evaluate: judgeSays(0.05),
-      generate,
-      judge: 'j/jev',
-      second: 's/strong',
-    });
-    expect(out.allow).toBe(false);
-    expect(generate).not.toHaveBeenCalled();
-  });
-
-  it('asks the stronger model in the middle band, and does what it says', async () => {
-    const yes = await checkIntent(input, {
-      evaluate: judgeSays(0.38),
-      generate: strongSays('YES\nThe owner asked for the hostile ones.'),
-      judge: 'j/jev',
-      second: 's/strong',
-    });
-    expect(yes).toMatchObject({
+    expect(out).toMatchObject({
       allow: true,
-      by: 's/strong',
+      by: 'm/check',
       why: 'The owner asked for the hostile ones.',
     });
-    const no = await checkIntent(input, {
-      evaluate: judgeSays(0.38),
-      generate: strongSays('NO\nwider than asked'),
-      judge: 'j/jev',
-      second: 's/strong',
-    });
-    expect(no.allow).toBe(false);
-    expect(yes.usage.map((u) => u.kind)).toEqual(['judge', 'judge-escalated']);
+    expect(out.usage.map((u) => u.kind)).toEqual(['judge']);
   });
 
-  it('asks the stronger model when the judge is down', async () => {
-    const generate = strongSays('YES\nfine');
+  it('refuses a no', async () => {
     const out = await checkIntent(input, {
-      evaluate: vi.fn().mockRejectedValue(new Error('503')),
-      generate,
-      judge: 'j/jev',
-      second: 's/strong',
-    });
-    expect(generate).toHaveBeenCalled();
-    expect(out.allow).toBe(true);
-  });
-
-  it('fails closed when nobody can check', async () => {
-    const out = await checkIntent(input, {
-      evaluate: vi.fn().mockRejectedValue(new Error('503')),
-      generate: vi.fn().mockRejectedValue(new Error('503')),
-      judge: 'j/jev',
-      second: 's/strong',
+      generate: says('NO\nwider than asked'),
+      model: 'm/check',
     });
     expect(out.allow).toBe(false);
+    expect(out.why).toBe('wider than asked');
   });
 
   it('refuses an answer it cannot read', async () => {
     const out = await checkIntent(input, {
-      evaluate: judgeSays(0.4),
-      generate: strongSays('Well, it depends.'),
-      judge: 'j/jev',
-      second: 's/strong',
+      generate: says('Well, it depends.'),
+      model: 'm/check',
     });
     expect(out.allow).toBe(false);
   });
 
-  it('is off when both tiers are off', async () => {
-    const evaluate = judgeSays(0.01);
+  it('fails closed when the call fails', async () => {
     const out = await checkIntent(input, {
-      evaluate,
-      judge: 'off',
-      second: 'off',
+      generate: vi.fn().mockRejectedValue(new Error('503')),
+      model: 'm/check',
     });
-    expect(out.allow).toBe(true);
-    expect(evaluate).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ allow: false, by: 'none' });
   });
 
-  it('asks the owner when only an uncertain judge is available', async () => {
-    const out = await checkIntent(input, {
-      evaluate: judgeSays(0.4),
-      judge: 'j/jev',
-      second: 'off',
-    });
+  it('fails closed when there is no model to ask', async () => {
+    const generate = says('YES');
+    const out = await checkIntent(input, { generate, model: null });
     expect(out.allow).toBe(false);
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("puts the owner's words, the last reply and the change in the state, and nothing else", () => {
@@ -130,80 +69,29 @@ describe('the intent check', () => {
 });
 
 // The fakes above agree with whatever shape they are handed. This runs the
-// REAL experimental_evaluate against a mock model, so a question shape the SDK
-// rejects fails here and not on the first write of the day.
+// REAL generateText against a mock model, so a call shape the SDK rejects
+// fails here and not on the first write of the day.
 describe('the real SDK accepts the check', () => {
-  it('asks a boolean question and reads the probability back', async () => {
+  it('sends the prompt and the state, and reads the answer back', async () => {
     let asked = null;
-    const model = new Experimental_EvaluationMockModelV4({
-      supportedQuestionTypes: ['boolean', 'choice', 'score'],
-      doEvaluate: async (options) => {
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
         asked = options;
         return {
-          answers: { asked: { type: 'boolean', probability: 0.83 } },
-          usage: { inputTokens: 321 },
+          content: [{ type: 'text', text: 'YES\nasked for it' }],
+          finishReason: { unified: 'stop', raw: 'stop' },
+          usage: {
+            inputTokens: { total: 300, noCache: 300 },
+            outputTokens: { total: 5, text: 5 },
+          },
           warnings: [],
         };
       },
     });
-    const out = await checkIntent(input, {
-      evaluate: experimental_evaluate,
-      judge: model,
-      second: 'off',
-    });
-    expect(out).toMatchObject({ allow: true, p: 0.83 });
-    expect(asked.questions.asked.type).toBe('boolean');
-    // A string up to ai@7.0.126, content parts after; either carries the text.
-    expect(JSON.stringify(asked.state)).toContain('Proposed change');
-  });
-
-  it('asks a choice question for hostility and reads P(hostile) back', async () => {
-    const model = new Experimental_EvaluationMockModelV4({
-      supportedQuestionTypes: ['boolean', 'choice', 'score'],
-      doEvaluate: async () => ({
-        answers: {
-          tone: {
-            type: 'choice',
-            choice: 'arguing',
-            probabilities: { hostile: 0.2, arguing: 0.7, neutral: 0.1 },
-          },
-        },
-        usage: { inputTokens: 100 },
-        warnings: [],
-      }),
-    });
-    const usage = [];
-    const out = await hostileProbabilities(
-      ['this policy is cowardly', 'second'],
-      {
-        evaluate: experimental_evaluate,
-        judge: model,
-        usage,
-      },
-    );
-    expect(out).toEqual([0.2, 0.2]);
-    expect(usage[0].inputTokens).toBe(200);
-  });
-
-  it('leaves a gap rather than guessing when one call fails', async () => {
-    const evaluate = vi
-      .fn()
-      .mockResolvedValueOnce({
-        answers: {
-          tone: {
-            type: 'choice',
-            choice: 'hostile',
-            probabilities: { hostile: 0.9, arguing: 0.1, neutral: 0 },
-          },
-        },
-        usage: {},
-      })
-      .mockRejectedValueOnce(new Error('503'));
-    const out = await hostileProbabilities(['a', 'b'], {
-      evaluate,
-      judge: 'j/jev',
-      concurrency: 1,
-    });
-    expect(out).toEqual([0.9, null]);
+    const out = await checkIntent(input, { generate: generateText, model });
+    expect(out.allow).toBe(true);
+    const sent = JSON.stringify(asked.prompt);
+    expect(sent).toContain(CHECK_PROMPT.slice(0, 40));
+    expect(sent).toContain('Proposed change');
   });
 });

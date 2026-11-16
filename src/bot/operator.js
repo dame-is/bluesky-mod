@@ -86,7 +86,6 @@ import {
   ESCALATION_MODEL,
   escalationEnabled,
   shortModel,
-  withFallback,
 } from './tiers.js';
 import { select } from './db.js';
 
@@ -674,18 +673,16 @@ export function buildActionTools(ctx, deps = DEPS) {
       // checkIntent fails closed on its own; this is for one that throws.
       out = {
         allow: false,
-        p: null,
         by: 'none',
         why: 'the check could not be run',
         usage: [],
       };
       ctx.log?.('Intent check threw', { err: String(err?.message || err) });
     }
-    ctx.checks?.push({ action, allow: out.allow, p: out.p, by: out.by });
+    ctx.checks?.push({ action, allow: out.allow, by: out.by });
     ctx.usages?.push(...(out.usage || []));
     ctx.log?.('Intent check', {
       allow: out.allow,
-      p: out.p == null ? 'none' : out.p.toFixed(2),
       by: out.by,
       action: action.slice(0, 200),
     });
@@ -744,7 +741,7 @@ export function buildActionTools(ctx, deps = DEPS) {
 
     triage_plan: tool({
       description:
-        'Read what each account on a plan actually wrote on the post (its reply or quote) and label it hostile, arguing or neutral. Anything the first reader or the judge thinks is hostile is read again by a stronger model, whose label is kept. Labels only; adds nobody. Reads up to 240 accounts per call and reports how many are left; call again to continue. With recheck: true, two stronger models re-read the posts already labelled hostile (for plans triaged before the second wave existed) and a label changes only where both disagree with it; nobody is added or removed either way.',
+        'Read what each account on a plan actually wrote on the post (its reply or quote) and label it hostile, arguing or neutral. When a second model is configured, anything the first reader calls hostile is read again by it, and its label is kept. Labels only; adds nobody. Reads up to 240 accounts per call and reports how many are left; call again to continue. With recheck: true, two stronger models re-read the posts already labelled hostile (for plans triaged before the second wave existed) and a label changes only where both disagree with it; nobody is added or removed either way.',
       inputSchema: z.object({
         code: z.string().describe('the plan code'),
         recheck: z.boolean().optional(),
@@ -1429,7 +1426,6 @@ async function runTurn({
       stopWhen: [stepCountIs(maxSteps), hasToolCall('hand_off')],
       messages: [...history, { role: 'user', content: message }],
       ...(reasoning ? { reasoning } : {}),
-      ...withFallback(model),
     });
     return done({
       ok: true,

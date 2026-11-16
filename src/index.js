@@ -34,11 +34,7 @@ import {
 import { loadReference, makeIo } from './bot/reference.js';
 import { loadAgentConfig } from './bot/agentConfig.js';
 import { runDmPass } from './bot/dmLoop.js';
-import {
-  JUDGE_MODEL,
-  CHECK_MODEL,
-  ESCALATION_MODEL,
-} from './bot/tiers.js';
+import { CHECK_MODEL, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
 import { upsert, openDb, closeDb } from './bot/db.js';
 import { snapshotStep, hasSnapshot } from './snapshot.js';
@@ -586,9 +582,6 @@ async function start() {
     ...(config.dmMode === 'agent'
       ? { operatorModel: config.operatorModel || '(same as analyst)' }
       : {}),
-    // The other tiers. Triage uses the judge and the escalation model in
-    // classic mode too, so these are logged whatever the DM mode is.
-    judge: JUDGE_MODEL,
     check: CHECK_MODEL,
     escalation: ESCALATION_MODEL,
     watchEveryMs: config.watchEveryMs,

@@ -83,10 +83,9 @@ afterEach(() => vi.unstubAllGlobals());
 const label = (did) => db.decision.find((r) => r.did === did);
 
 describe('triage in two waves', () => {
-  it("re-reads what either first-wave reader calls hostile, and keeps the stronger model's label", async () => {
+  it("re-reads what the first wave calls hostile, and keeps the second model's label", async () => {
     // First wave: calls the idiot post AND the policy post hostile.
-    // Judge: thinks the clown post is hostile, which the first wave missed.
-    // Second wave: agrees about the idiot and the clown, not the policy post.
+    // Second wave: agrees about the idiot, not the policy post.
     const generate = vi.fn(async (opts) =>
       opts.model === 'strong/model'
         ? labeller({ idiot: 'hostile', cowardly: 'arguing', clown: 'hostile' })(
@@ -96,23 +95,10 @@ describe('triage in two waves', () => {
             opts,
           ),
     );
-    const evaluate = vi.fn(async ({ state }) => ({
-      answers: {
-        tone: {
-          type: 'choice',
-          choice: 'x',
-          probabilities: { hostile: /clown|idiot/.test(state) ? 0.9 : 0.1 },
-        },
-      },
-      usage: { inputTokens: 50 },
-    }));
-
     const out = await runTriage(PLAN, {
       generate,
       model: 'cheap/model',
       escalation: 'strong/model',
-      judge: 'j/jev',
-      evaluate,
     });
 
     expect(label('did:plc:p1')).toMatchObject({
@@ -123,25 +109,24 @@ describe('triage in two waves', () => {
       triage: 'arguing',
       triage_model: 'strong/model',
     });
+    // Not flagged by the first wave, so its label stands and nobody re-reads it.
     expect(label('did:plc:p4')).toMatchObject({
-      triage: 'hostile',
-      triage_model: 'strong/model',
+      triage: 'arguing',
+      triage_model: 'cheap/model',
     });
-    // Nobody flagged the "lol" post, so the first wave's label stands.
     expect(label('did:plc:p3')).toMatchObject({
       triage: 'neutral',
       triage_model: 'cheap/model',
     });
     expect(out.secondWave).toMatchObject({
       model: 'strong/model',
-      read: 3,
-      overturned: 2,
+      read: 2,
+      overturned: 1,
     });
-    expect(out.counts.hostile).toBe(2);
+    expect(out.counts.hostile).toBe(1);
     expect(db.usage.map((u) => u.kind).sort()).toEqual([
       'triage',
       'triage-escalated',
-      'triage-judge',
     ]);
   });
 
@@ -154,7 +139,6 @@ describe('triage in two waves', () => {
       generate,
       model: 'cheap/model',
       escalation: 'strong/model',
-      judge: 'off',
     });
     // The one post that would have been "hostile" is exactly the one not
     // trusted to the first wave alone, so it stays pending for next time.
@@ -164,7 +148,7 @@ describe('triage in two waves', () => {
     expect(out.counts.hostile).toBe(0);
   });
 
-  it('is the old single pass when there is no second wave', async () => {
+  it('is a single pass when there is no second model', async () => {
     const generate = labeller({ idiot: 'hostile' });
     const out = await runTriage(PLAN, {
       generate,

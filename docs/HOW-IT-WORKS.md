@@ -139,30 +139,27 @@ A message starting with `!` takes the classic path for that one message (`!block
 - **The roster.** A read-only guest's toolset has no write tool in it at all.
 - **The PROTECTED veto at the write.** This is the backstop for the new risk: the model reads strangers' posts in the same turn it can write.
 - **Caps per call:** 10 named accounts, 500 approvals, 240 triage reads, 1,000 undos. It can call again; it can't write thousands in one step.
-- **The write check** (below).
+- **The write check** (see Models).
 - **The log.** Every write keeps your literal message plus the model's stated reason, marked `[agent: ...]`, so "the owner typed this handle" and "a model read the owner's sentence" stay distinguishable.
 
-A turn that runs past five seconds sends an ack. A model call that stalls is cut off and the turn goes to the second wave.
+A turn that runs past five seconds sends an ack. A model call that stalls is cut off, and the turn goes to the escalation model if one is set.
 
-## Two waves
+## Models
 
-Cheap models do the work. A stronger one is asked only when the cheap ones are unsure, disagree, hand off, or fail. All of it is in `src/bot/tiers.js`; the models are chosen in `src/models.js`.
+One model does the work: the analyst, agent mode and triage all run on `MOD_AGENT_MODEL`, which defaults to DeepSeek V4.1 Flash on the gateway and OpenRouter. Two optional settings add a second model (`src/bot/tiers.js`):
 
-| Job | First wave | Second wave, and when |
+| Setting | Does | Unset |
 | --- | --- | --- |
-| An agent turn | `MOD_AGENT_MODEL` | `MOD_ESCALATION_MODEL`, on a hand-off, a failed or stalled turn, or a `^` message |
-| Is this write what the owner asked for? | `MOD_JUDGE_MODEL` (gateway evaluation model) | `MOD_CHECK_MODEL`, when the judge is unsure or absent |
-| Triage labels | the agent model labels; the judge nominates | `MOD_ESCALATION_MODEL` re-reads every post either calls hostile |
-
-With the Vercel AI Gateway the defaults are the models this was measured with. With any other provider, the agent model is required, the check falls back to the agent model, and the second wave is off until you name one.
+| `MOD_CHECK_MODEL` | Answers the write check below | The agent model answers it, in a separate call |
+| `MOD_ESCALATION_MODEL` | Takes over an agent turn that hands off, stalls or fails, or starts with `^`; re-reads every post triage labels hostile and keeps its own label | Everything stays on the agent model |
 
 ### The write check
 
 Before agent mode adds, removes, approves or undoes anything, a separate call is asked one question: did the owner ask for exactly this? It reads your message, the bot's previous message, and the change **as described by code**, including where each target came from ("the author of the post the owner attached", "not mentioned anywhere in this conversation"). It never reads the strangers' posts the agent read, and it never reads the agent's own reasoning, so a turn that talked itself into something can't talk the check into it too.
 
-A refused write goes back to the agent as "not done", and the agent asks you. If the check can't run at all, the write is refused.
+A refused write goes back to the agent as "not done", and the agent asks you. If the check can't run, or answers neither yes nor no, the write is refused.
 
-`npm run eval:intent` measures the check against the synthetic cases in `scripts/evals/intent-cases.js`, with whatever provider `.env` names. With the gateway it also measures the evaluation model and the cascade; elsewhere it measures your check model alone, which is how writes are checked there. When it was tuned, on the gateway models, the cheap evaluation model with a second opinion in the uncertain middle got 59 to 60 of 61 cases right with no wrong allows. Larger general models made the only wrong allows seen. Run the eval again after changing a prompt or a model.
+`npm run eval:intent` measures the check model against 61 synthetic cases in `scripts/evals/intent-cases.js`, and lists every wrong allow (a write you didn't ask for) and wrong refusal. Run it after changing the check prompt or the model.
 
 ### Sorting by what people wrote
 

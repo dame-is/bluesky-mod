@@ -83,14 +83,14 @@ The model provider is one environment variable. Supported:
 
 | `MODEL_PROVIDER`    | Needs                                   |
 | ------------------- | --------------------------------------- |
-| `gateway`           | `AI_GATEWAY_API_KEY` (Vercel AI Gateway). Model defaults are set for you. |
-| `openrouter`        | `OPENROUTER_API_KEY`, `MOD_AGENT_MODEL` |
+| `gateway`           | `AI_GATEWAY_API_KEY` (Vercel AI Gateway) |
+| `openrouter`        | `OPENROUTER_API_KEY`                    |
 | `anthropic`         | `ANTHROPIC_API_KEY`, `MOD_AGENT_MODEL`  |
 | `openai`            | `OPENAI_API_KEY`, `MOD_AGENT_MODEL`     |
 | `openai-compatible` | `MODEL_BASE_URL`, `MOD_AGENT_MODEL` (Ollama, LM Studio, vLLM, Groq, Together, DeepSeek and others) |
 | `none`              | nothing. Commands only.                 |
 
-The model has to support tool calling. Small local models work for the analyst but are weaker at agent mode; try classic mode first.
+On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepseek/deepseek-v4.1-flash`). Elsewhere, set `MOD_AGENT_MODEL` in the provider's own naming. The model has to support tool calling. Small local models work for the analyst but are weaker at agent mode; try classic mode first.
 
 ## What it stores
 
