@@ -1,6 +1,6 @@
 # Setting it up on a VPS
 
-This walks through a fresh Linux server with Docker. The worked example is a DigitalOcean droplet, but nothing here is specific to DigitalOcean: any VPS running Ubuntu or Debian works the same way. Notes for other kinds of hosting are at the end.
+This walks through a fresh Linux server with Docker. Any VPS running Ubuntu or Debian works the same way. Notes for other kinds of hosting are at the end.
 
 Budget about half an hour the first time.
 
@@ -23,7 +23,7 @@ curl "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle
 
 ## 2. Make the server
 
-In DigitalOcean: Create > Droplets, Ubuntu 24.04 LTS, the smallest regular plan with **1 GB of memory**. 512 MB can work for someone who follows a few hundred accounts, but the follow-graph snapshot lives in memory while the bot answers, and 1 GB leaves room. Add your SSH key, create it, and note the IP address.
+At any VPS provider, pick Ubuntu 24.04 LTS and a plan with **1 GB of memory**. 512 MB can work for someone who follows a few hundred accounts, but the follow-graph snapshot is held in memory while the bot answers, and 1 GB leaves room. Add your SSH key, create the server, and note its IP address.
 
 Log in and install Docker:
 
@@ -89,21 +89,22 @@ Try `block` with a post shared into the DM, or `@someone` on its own to see how 
 
 ```bash
 docker compose logs -f --tail 100   # what it's doing
-docker compose restart              # after editing .env
+docker compose up -d                # after editing .env
 git pull && docker compose up -d --build   # update to the latest code
 ```
 
 ### Backups
 
-Everything lives in one SQLite file in the `data` volume. The follow-graph snapshot rebuilds itself if lost, but the decision log doesn't. To take a consistent copy while the bot runs:
+Everything that matters lives in one SQLite file in the `data` volume. The follow-graph snapshot rebuilds itself if lost, but the decision log doesn't. To take a consistent copy while the bot runs:
 
 ```bash
 F=backup-$(date +%F).db
 docker compose exec bot node -e "new (require('node:sqlite').DatabaseSync)('/app/data/bluesky-mod.db').exec(\"vacuum into '/app/data/$F'\")"
-docker compose cp bot:/app/data/$F ./$F
+docker compose cp bot:/app/data/$F ./$F && chmod 600 ./$F
+docker compose exec bot rm /app/data/$F
 ```
 
-then move the copy somewhere off the server.
+then move the copy somewhere off the server. It holds the bot's session token, so keep it as private as `.env`.
 
 ### Voice and limits
 
@@ -114,7 +115,7 @@ Copy `config/bot.example.json` to `config/bot.json` and edit it. The bot reads i
 The bot is one long-running process that needs to keep a small file between restarts. Anywhere that gives you both will do.
 
 - **Fly.io, Railway, Render and similar.** Deploy the Dockerfile, set the variables from `.env.example` in the host's settings, and attach a persistent volume at `/app/data`. Run exactly one instance, and turn off anything that scales to zero or starts a second copy during deploys: two copies polling the same DMs will both answer. Run setup once with the host's "run a command" feature (`npm run setup`).
-- **A machine at home** (a spare laptop, a Raspberry Pi). Docker works the same way. Without Docker, install Node 22.13 or newer and use a systemd unit like this one:
+- **A machine at home** (a spare laptop, a Raspberry Pi). Docker works the same way. Without Docker, install Node 22.13 or newer, create a `bluesky-mod` user that owns the checkout's `data` directory, and use a systemd unit like this one:
 
   ```ini
   # /etc/systemd/system/bluesky-mod.service
@@ -145,5 +146,4 @@ The bot is one long-running process that needs to keep a small file between rest
 | The bot never answers | The app password lacks DM access, or your DID isn't `MOD_OWNER_DID`. Check the log for `Chat access FAILED`. |
 | `the configuration is not usable` on start | The log lists each missing or malformed setting. |
 | "the follow-graph snapshot is not built yet" | First start; wait for `Snapshot finalised` in the log. |
-| A write fails with a permission error | `MOD_LIST_URI` isn't in the bot's repo. Rerun setup with it empty. |
 | Answers about the wrong person's circle | `MOD_OWNER_DID` is set to the wrong account. |

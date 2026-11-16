@@ -4,7 +4,7 @@ The bot is a circuit breaker on bulk moderation, with an assistant in your DMs. 
 
 ## Why it is built this way
 
-The simple version of this tool takes a post, collects everyone who engaged with it, and adds them all to a block list. That works, and it is blind. It knows the graph around one post at one moment and nothing about how those accounts relate to you. In the deployment this code came from, one such sweep added thousands of accounts in a day, and hundreds of them were followed by someone the owner followed. None were looked at, because a batch that size is not a list anyone reads.
+The simplest tool for this job takes a post, collects everyone who engaged with it, and adds them all to a block list. That works, and it is blind. It knows the graph around one post at one moment and nothing about how those accounts relate to you. A sweep of a busy post can add thousands of accounts, some of them followed by people you follow, and nobody reads a batch that size.
 
 So the bot splits "do this" from "done" and names the people close to you before acting.
 
@@ -12,9 +12,9 @@ So the bot splits "do this" from "done" and names the people close to you before
 
 **Social proximity, which is a proxy for blast radius.** It says nothing about whether anyone deserves anything. Someone close to you can be awful, and a stranger can be harmless.
 
-This came out of measurement rather than preference. Scoring an existing block list against the accounts its owner followed, the features that separated the two groups best (a default `.bsky.social` handle, using many non-Bluesky lexicons, being verified) were really measuring "is this person part of the owner's corner of the network". Against the people the tool actually runs on, strangers who engaged with one post, they fire on nearly everyone. Two more results ran against intuition: accounts the owner followed had *more* inbound blocks than accounts on the block list (blocks pile up with visibility, not with badness), and the PDS an account lives on said almost nothing.
+Some signals separate a block list from your follows well: a default `.bsky.social` handle, using many non-Bluesky lexicons, being verified. Mostly they measure whether someone is part of your corner of the network. Against the people the tool runs on, strangers who engaged with one post, they fire on nearly everyone. Inbound blocks pile up with visibility more than with behaviour, and the PDS an account lives on says almost nothing. The score uses none of these.
 
-**One signal held up: how many of the accounts you follow also follow this person.** In that deployment, 97% of a stranger sweep scored zero, while 44% of the accounts the owner had blocked by hand scored one or more. Read it in one direction only. A vouch is good evidence to **leave someone alone**; the absence of one is evidence of nothing, because most harmless strangers have none either.
+**The bands rest on one signal: how many of the accounts you follow also follow this person.** Each of those is a vouch. Read it in one direction only. A vouch is good evidence to **leave someone alone**; the absence of one is evidence of nothing, because most harmless strangers have none either.
 
 So the bot is good at preventing collateral damage and useless as a threat detector. Those are different jobs, and it only does the first.
 
@@ -40,12 +40,12 @@ PROTECTED is checked in the scorer, again where plans are approved, and again in
 
 ### The snapshot
 
-Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), a few seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call, and that a decision can be replayed later against the graph as it stood that day.
+Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call, and that a decision can be replayed later against the graph as it stood that day.
 
 Known limits:
 
 - **Distance 3 means "not found", not three hops.** Real distances beyond one hop would mean walking the follow graph of everyone your follows follow.
-- **Follow lists are read to 1,500 accounts** per person you follow. Someone who follows more contributes a truncated set, which understates vouches for accounts deep in their list. That is the right way to be wrong: understating sends someone to review, overstating waves them through.
+- **Follow lists are read to 1,500 accounts** per person you follow. Someone who follows more contributes a truncated set, which understates vouches for accounts deep in their list. That is the risky direction: an understated vouch can drop an account to UNKNOWN, the band approved without a named look. The cap keeps a snapshot affordable.
 
 ## Talking to it
 
@@ -130,14 +130,14 @@ actually leave the third one off, that's a friend of mine
 undo that
 ```
 
-A message starting with `!` takes the classic path for that one message (`!block @x`, `!help`). A message starting with `^` skips straight to the second-wave model.
+A message starting with `!` takes the classic path for that one message (`!block @x`, `!help`). A message starting with `^` skips straight to the escalation model (see Models).
 
-**What it gives up, on purpose.** Classic's rule that a command never reaches the model. The model now infers targets ("whoever wrote this", "the hostile ones") and decides when to ask. Prompt rules steer it: ask before adding more than about 25 accounts unless you set that scope, act only on what you pointed at.
+**What it gives up, on purpose.** Classic's rule that a command never reaches the model. Here the model infers targets ("whoever wrote this", "the hostile ones") and decides when to ask. Prompt rules steer it: ask before adding more than about 25 accounts unless you set that scope, act only on what you pointed at.
 
 **What it keeps, in code:**
 
 - **The roster.** A read-only guest's toolset has no write tool in it at all.
-- **The PROTECTED veto at the write.** This is the backstop for the new risk: the model reads strangers' posts in the same turn it can write.
+- **The PROTECTED veto at the write.** This is the backstop for the risk agent mode adds: the model reads strangers' posts in the same turn it can write.
 - **Caps per call:** 10 named accounts, 500 approvals, 240 triage reads, 1,000 undos. It can call again; it can't write thousands in one step.
 - **The write check** (see Models).
 - **The log.** Every write keeps your literal message plus the model's stated reason, marked `[agent: ...]`, so "the owner typed this handle" and "a model read the owner's sentence" stay distinguishable.
@@ -146,7 +146,7 @@ A turn that runs past five seconds sends an ack. A model call that stalls is cut
 
 ## Models
 
-One model does the work: the analyst, agent mode and triage all run on `MOD_AGENT_MODEL`, which defaults to DeepSeek V4.1 Flash on the gateway and OpenRouter. Two optional settings add a second model (`src/bot/tiers.js`):
+By default one model does the work: the analyst, agent mode and triage all run on `MOD_AGENT_MODEL`, which defaults to DeepSeek V4.1 Flash on the gateway and OpenRouter. Two optional settings add a second model (`src/bot/tiers.js`):
 
 | Setting | Does | Unset |
 | --- | --- | --- |
@@ -159,7 +159,7 @@ Before agent mode adds, removes, approves or undoes anything, a separate call is
 
 A refused write goes back to the agent as "not done", and the agent asks you. If the check can't run, or answers neither yes nor no, the write is refused.
 
-`npm run eval:intent` measures the check model against 61 synthetic cases in `scripts/evals/intent-cases.js`, and lists every wrong allow (a write you didn't ask for) and wrong refusal. Run it after changing the check prompt or the model.
+`npm run eval:intent` measures the check model against the synthetic cases in `scripts/evals/intent-cases.js`, and lists every wrong allow (a write you didn't ask for) and wrong refusal. Run it after changing the check prompt or the model.
 
 ### Sorting by what people wrote
 
@@ -173,7 +173,7 @@ A band answers *who would notice if I blocked them*. On a post with hundreds of 
 
 Three labels, because the only line that carries weight is between attacking a person and attacking an argument. Heat is not the test: "this policy is cowardly" is `arguing`; "you are a worthless piece of shit" is `hostile`. Ties go to the less severe label, because someone gets added to a block list off the back of this and the two mistakes don't cost the same.
 
-This is a bulk sweep with a different oracle, and that's worth saying plainly. What makes it defensible is that the subset is smaller and better justified than "everyone who engaged", the words behind each label are stored next to it, `review <code> hostile` shows them before anything is approved, and approving is a separate human step with the PROTECTED veto still in place.
+This is still a bulk sweep, with a model's reading in place of the follow graph. What makes it defensible is that the subset is smaller and better justified than "everyone who engaged", the words behind each label are stored next to it, `review <code> hostile` shows them before anything is approved, and approving is a separate human step with the PROTECTED veto still in place.
 
 **A label is not a band, anywhere.** Bands come from the follow graph and are reproducible. A model's verdict is reproducible by nobody, so it lives in its own column and is approved by its own command.
 
@@ -203,11 +203,11 @@ An optional `config/bot.json` (see `config/bot.example.json`):
 
 Nothing in the file can change what the bands mean, how untrusted text is handled, or the message length budgets. Those stay in code, because they are what keep the decision log replayable and the replies valid.
 
-Mount it read-only, as `compose.yaml` does. The bot holds an app password; if that leaks, the attacker should not also get to rewrite the instructions the bot runs under.
+Mount it read-only, as `compose.yaml` does, so that whoever takes over the bot process cannot also rewrite the instructions it runs under.
 
 ## What writes cost
 
-Bluesky rate-limits writes per account and per PDS, and for anything over a few thousand writes the per-PDS limit usually binds first. A create costs more than a delete. `estimateWrites()` in `src/lib/report.js` quotes the tighter limit before you approve, so a large batch says something like "8,000 writes, about 4.8 hours" up front instead of stalling halfway. An approval writes at most 500 accounts per message and an undo removes at most 1,000; send the same command again to continue.
+Bluesky rate-limits writes per account and per PDS, and a create costs more than a delete. `estimateWrites()` in `src/bot/bulkPlan.js` quotes whichever limit is tighter before you approve, so a large batch says something like "8,000 writes, 24,000 points, about 4.8 hours" up front instead of stalling halfway. An approval writes at most 500 accounts per message and an undo removes at most 1,000; send the same command again to continue.
 
 Logging in is capped separately (`createSession`), which is why the bot stores and resumes its session instead of logging in each time.
 
@@ -218,6 +218,6 @@ Collecting who engaged with a post reads [Constellation](https://constellation.m
 ## What else it can't do
 
 - **Your personalised For You feed.** It personalises off the identity of whoever asks, and the bot is not you. The bot says so rather than substituting something else.
-- **Read everything on a viral post.** Collection stops at 60 pages per source. Replies and quotes on a big post are complete; the tail of the likes is cut, and the result says so.
-- **Auto-block.** Nothing is added without you: a typed command, an approval, a 👍, or agent mode acting on your message under the write check.
+- **Read everything on a viral post.** Collection stops at 60 pages (6,000 records) per source. On a big post that usually cuts the tail of the likes and leaves replies and quotes whole, and the result says when it cut.
+- **Auto-block.** Nothing is added without you: a typed command, an approval, a 👍, a watch you told to block the hostile ones, or agent mode acting on your message under the write check.
 - **More than one list.** Commands act on `MOD_LIST_URI` only.

@@ -17,19 +17,19 @@ With no AI model at all:
 - **Block and unblock by DM.** "block" with a shared post, a pasted link or a typed `@handle`. One account, no model involved, about a second.
 - **Scan a post.** `add likers <post>` (or `reposters`, `repliers`, `quoters`, `everyone`) collects who engaged, scores them, and proposes a batch. Nothing is added until you `approve <code> UNKNOWN` (or another band, or named accounts). `undo` takes a batch back off.
 - **A veto on people you know.** Accounts you follow, and members of curation lists you made, are PROTECTED. No path in the code can add them, including your own typed command.
-- **A weekly re-score.** The bot re-scores everyone on the list and DMs you only when someone on it is no longer a stranger to your circle, or has left Bluesky.
+- **A weekly re-score.** The bot re-scores everyone on the list and DMs you only when someone on it is no longer a stranger, or has left Bluesky.
 - **A decision log.** Every add and removal is recorded with your literal words, so "why is this person on the list" always has an answer, and `history @handle` shows it.
 
 With a model:
 
 - **Ask in plain words.** "what has @someone been posting about this week?" or "what's my circle talking about today?"
-- **Agent mode.** Talk to it in sentences ("block whoever wrote this, and anyone in the quotes being hostile") instead of commands. Each write is checked by a second call that sees only your words, and the PROTECTED veto still holds.
+- **Agent mode.** Talk to it in sentences ("block whoever wrote this, and anyone in the quotes being hostile") instead of commands. Each write is first checked by a separate call that sees your words but not the posts the agent read, and the PROTECTED veto still holds.
 - **Sort replies by tone.** Reads the replies and quotes on a post and labels each `hostile`, `arguing` or `neutral`, so you can add only the hostile ones, with their own words kept next to each label.
 - **Watch a post.** Re-reads a post's new quotes and replies every few minutes for a day and tells you what came in. It can also offer to watch one of your posts when it suddenly takes off.
 
 ## How it decides who is close to you
 
-The bot does not try to decide who is bad. It answers a narrower question: if you blocked this account, who would notice? The one signal that held up when this was measured is **how many of the people you follow also follow them**.
+The bot does not try to decide who is bad. It answers a narrower question: if you blocked this account, who would notice? The bands rest on one signal: **how many of the people you follow also follow them**.
 
 | Band         | Means                                                            |
 | ------------ | ---------------------------------------------------------------- |
@@ -71,8 +71,9 @@ Node 22.13 or newer (for the built-in SQLite).
 ```bash
 npm ci --omit=dev
 cp .env.example .env   # and fill it in
-node --env-file=.env scripts/setup.js --name "a plain name"
-node --env-file=.env --disable-warning=ExperimentalWarning src/index.js
+npm run setup -- --name "a plain name"
+# paste the MOD_LIST_URI line it prints into .env
+npm start
 ```
 
 Keep it running with whatever your machine uses for services (systemd, launchd, pm2). Run one copy only: two bots polling the same DMs will both answer.
@@ -94,13 +95,13 @@ On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepse
 
 ## What it stores
 
-One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and a count of model calls. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log.
+One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log.
 
 The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off).
 
 ## Settings
 
-Every setting is in [.env.example](.env.example), commented. Voice, standing instructions and limits can go in an optional `config/bot.json` (see [config/bot.example.json](config/bot.example.json)), mounted read-only so the bot can't rewrite its own instructions.
+The settings most people change are in [.env.example](.env.example), commented. Voice, standing instructions and limits can go in an optional `config/bot.json` (see [config/bot.example.json](config/bot.example.json)), mounted read-only so the bot can't rewrite its own instructions.
 
 ## Development
 

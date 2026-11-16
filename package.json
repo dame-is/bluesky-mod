@@ -1,6 +1,6 @@
 {
   "name": "bluesky-mod",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A Bluesky moderation bot you run yourself. It owns a block list, takes orders by DM, and refuses to block people you follow.",
   "license": "MIT",
   "type": "module",
@@ -9,12 +9,12 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/index.js",
-    "dry-run": "DRY_RUN=true LOG_LEVEL=debug node --disable-warning=ExperimentalWarning src/index.js",
-    "dev": "LOG_LEVEL=debug node --disable-warning=ExperimentalWarning --watch src/index.js",
-    "setup": "node --disable-warning=ExperimentalWarning scripts/setup.js",
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/index.js",
+    "dry-run": "DRY_RUN=true LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/index.js",
+    "dev": "LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/index.js",
+    "setup": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/setup.js",
     "test": "vitest run",
-    "eval:intent": "node --disable-warning=ExperimentalWarning scripts/eval-intent.mjs"
+    "eval:intent": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/eval-intent.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.105",
