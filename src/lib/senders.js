@@ -1,12 +1,10 @@
 // Who is this message from, and what are they allowed to ask for?
 //
 // ONE MODULE BECAUSE IT IS ONE QUESTION. The public path and the DM path each
-// had their own answer, and they had already drifted: `classify()` checked the
-// configurable `MOD_OWNER_DID` while the DM loop checked the hardcoded
-// `OWNER_DID`, so setting the env var moved the boundary on one surface and left
-// it where it was on the other. `loadReference` existing in three copies is the
-// cautionary tale this repo has already paid for; a security boundary is a
-// worse thing to keep three copies of.
+// had their own answer, and they had already drifted: changing the owner
+// moved the boundary on one surface and left it where it was on the other.
+// Copies of `loadReference` drifted the same way (see reference.js); a
+// security boundary is a worse thing to keep copies of.
 //
 // TWO TIERS, NOT ONE LIST.
 //
@@ -23,8 +21,9 @@
 // WHAT A READ-ONLY GUEST CAN STILL REACH is worth being honest about. They get
 // the analyst, which reads author feeds and the follow graph, and reports that
 // print bands, vouch counts and follower numbers for third parties. That is
-// the owner's private read of their own social graph. Adding someone here hands them
-// that, and on the public path it hands it to everyone in the thread. The tier
+// the owner's private read of their own social graph. Adding someone here
+// hands them that, and on the public path it hands it to everyone in the
+// thread. The tier
 // limits what they can CHANGE, not what they can SEE.
 
 /** DIDs out of a comma or whitespace separated env value. */
