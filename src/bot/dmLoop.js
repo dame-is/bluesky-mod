@@ -14,7 +14,7 @@
 //
 // AGENT MODE (MOD_DM_MODE=agent) relaxes rule 2 on purpose: the model gets the
 // write tools and is talked to in sentences rather than commands. Rule 1 does
-// not move -- the roster still decides who is answered and who may write -- and
+// not move (the roster still decides who is answered and who may write), and
 // the classic path below is still here, reached by a leading "!" or by
 // answering a menu a classic reply just offered. See src/bot/operator.js.
 //
@@ -25,6 +25,7 @@
 // missing.
 
 import { generateText } from 'ai';
+import { modelsEnabled } from '../models.js';
 
 import { OWNER_DID } from '../constants.js';
 import { rosterFromEnv } from '../lib/senders.js';
@@ -296,7 +297,7 @@ async function lastPost(convoId) {
  *
  * REMEMBERED ON SIGHT, not only when a scan happens to run. The only writer
  * used to be the post-scan path, so attaching a post and asking about it IN
- * WORDS -- "there are a lot of quote posts on this that are toxic" -- sent the
+ * WORDS ("there are a lot of quote posts on this that are toxic") sent the
  * turn to the analyst and recorded nothing. "add quoters" one message later was
  * then answered with "send me the post", about a post two messages up the
  * screen. The interface forgetting what it was just told is the whole thing
@@ -395,10 +396,11 @@ export async function runCommand(
   // A verb arrived with nobody and nothing to act on. Every branch here asks
   // rather than guesses, which is the rule the whole command surface turns on.
   //
-  // `history` and `undo` never land here any more -- one takes an optional
-  // account, the other defaults to the last plan -- except when undo was handed
+  // `history` and `undo` never land here any more (one takes an optional
+  // account, the other defaults to the last plan), except when undo was handed
   // a token that was MEANT as a code and is not one. That case gets an answer
-  // naming the token, not a fallback that acts on a batch the owner did not name.
+  // naming the token, not a fallback that acts on a batch the owner did not
+  // name.
   if (cmd.needsTarget) {
     if (cmd.action === 'plan') {
       return say(nudge('post'));
@@ -423,9 +425,13 @@ export async function runCommand(
   if (cmd.action === 'help') {
     // Derived, not written out, for the same reason every other option is: a
     // hand-typed label is one that can quietly stop describing its command.
-    return say(helpText({ canWrite }), [
-      { label: labelFor(parseCommand('pulse')), command: 'pulse' },
-    ]);
+    const hasModel = modelsEnabled();
+    return say(
+      helpText({ canWrite, hasModel }),
+      hasModel
+        ? [{ label: labelFor(parseCommand('pulse')), command: 'pulse' }]
+        : null,
+    );
   }
 
   if (!writeAgent) return say('Commands are not wired up on this path.');
@@ -483,7 +489,7 @@ export async function runCommand(
     const plan = await findPlan(cmd.code);
     if (!plan) return say(`No plan with code ${cmd.code}.`);
 
-    // Read what they wrote and bucket it. Labels only -- nobody is added here,
+    // Read what they wrote and bucket it. Labels only: nobody is added here,
     // and approving a bucket is a separate command on purpose.
     if (cmd.action === 'triage') {
       const out = await runTriage(plan, { generate, model, log });
@@ -1213,7 +1219,7 @@ async function withoutModel({
     }
   }
 
-  // A post with no words. The card, or -- if the owner set it that way -- a block
+  // A post with no words. The card, or (if the owner set it that way) a block
   // of whoever wrote it, through the quick lane.
   const post = parsePostScan(text, { embedUri, links: msgLinks });
   if (post) {
@@ -1418,8 +1424,8 @@ export async function runDmPass({
       for (const chunk of chunkForDm(text)) {
         // Facets only for links this codebase built. chunkForDm splits on
         // whitespace before it ever splits a word, and these are ~70
-        // characters against a 950 limit, so one never straddles a chunk --
-        // which matters, because a facet range is computed per chunk.
+        // characters against a 950 limit, so one never straddles a chunk. That
+        // matters, because a facet range is computed per chunk.
         const facets = ownLinkFacets(chunk, { allow });
         const sent = await chat.chat.bsky.convo.sendMessage({
           convoId,
@@ -1720,17 +1726,17 @@ export async function runDmPass({
         }
       }
 
-      // `read @handle` is a CANNED QUESTION FOR THE ANALYST rather than a branch
-      // of its own. Everything it needs already exists on that path -- the model,
-      // the atmosphere tools, the untrusted fencing, the chunking, the usage row
-      // -- and a second copy of all of it would be a second place for the
-      // fencing to be forgotten. See readRequest in agent.js for why the wording
-      // is fixed rather than taken from what the owner typed.
+      // `read @handle` is a CANNED QUESTION FOR THE ANALYST rather than a
+      // branch of its own. Everything it needs already exists on that path (the
+      // model, the atmosphere tools, the untrusted fencing, the chunking, the
+      // usage row), and a second copy of all of it would be a second place for
+      // the fencing to be forgotten. See readRequest in agent.js for why the
+      // wording is fixed rather than taken from what the owner typed.
       let reading =
         cmd?.action === 'read' && !cmd.needsTarget ? cmd.actor : null;
       // Same shape as `read`: a canned question for the analyst rather than a
-      // branch of its own. The digest is the model's job -- reading six hundred
-      // posts and saying what they amount to is the whole task -- and a second
+      // branch of its own. The digest is the model's job (reading six hundred
+      // posts and saying what they amount to is the whole task), and a second
       // copy of the tool loop would be a second place for the fencing to be
       // forgotten. See pulseRequest in agent.js for why the wording is fixed.
       const pulsing = cmd?.action === 'pulse' ? cmd : null;
@@ -1864,10 +1870,10 @@ export async function runDmPass({
       // owner can answer "2" instead of retyping one. Parsed, not copied: see
       // offersFrom for what that does and does not guarantee.
       let offers = offerable(offersFrom(text));
-      // After a read, the useful next step is the decision it was for. Built from
-      // the scored account rather than lifted from the model's prose, and with
-      // the read itself dropped -- offering to read them again having just done
-      // it is the kind of menu that teaches you to stop reading menus.
+      // After a read, the useful next step is the decision it was for. Built
+      // from the scored account rather than lifted from the model's prose, and
+      // with the read itself dropped. Offering to read them again having just
+      // done it is the kind of menu that teaches you to stop reading menus.
       if (reading) {
         const account = await io.lookUp(reading).catch(() => null);
         if (account) {
@@ -1883,7 +1889,7 @@ export async function runDmPass({
       // runs a read this codebase wrote. Same standing as the menu behind a plan.
       //
       // Built from the TOOL CALL and not from what the owner typed, because
-      // when they ask in words the model picks the window -- and a menu
+      // when they ask in words the model picks the window, and a menu
       // offering to widen to three days under an answer that already covered
       // three days is a menu that has not been reading along.
       const ranPulse = reply.pulses?.[reply.pulses.length - 1] ?? null;

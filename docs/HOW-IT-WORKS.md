@@ -162,7 +162,7 @@ Before agent mode adds, removes, approves or undoes anything, a separate call is
 
 A refused write goes back to the agent as "not done", and the agent asks you. If the check can't run at all, the write is refused.
 
-`npm run eval:intent` measures the check against the synthetic cases in `scripts/evals/intent-cases.js`. When it was tuned, on the gateway models, the cheap evaluation model with a second opinion in the uncertain middle got 59 to 60 of 61 cases right with no wrong allows. Larger general models made the only wrong allows seen. Run the eval again after changing a prompt or a model.
+`npm run eval:intent` measures the check against the synthetic cases in `scripts/evals/intent-cases.js`, with whatever provider `.env` names. With the gateway it also measures the evaluation model and the cascade; elsewhere it measures your check model alone, which is how writes are checked there. When it was tuned, on the gateway models, the cheap evaluation model with a second opinion in the uncertain middle got 59 to 60 of 61 cases right with no wrong allows. Larger general models made the only wrong allows seen. Run the eval again after changing a prompt or a model.
 
 ### Sorting by what people wrote
 

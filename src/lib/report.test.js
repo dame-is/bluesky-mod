@@ -143,7 +143,7 @@ describe('planActions', () => {
 
   it('offers the author when a post has no engagement at all', () => {
     // The reported case: 0 participants, every band 0, and the only option was
-    // "Do nothing" -- a true report about the graph around the post and a
+    // "Do nothing": a true report about the graph around the post and a
     // useless one about the account that wrote it.
     const out = planActions(plan);
     expect(out.map((o) => o.command)).toEqual([
@@ -297,5 +297,14 @@ describe('helpText', () => {
     const rw = helpText({ canWrite: true });
     expect(rw).toContain('block @handle');
     expect(rw).toContain('approve <code> UNKNOWN');
+  });
+
+  it('leaves out what needs a model when there is none', () => {
+    const text = helpText({ hasModel: false });
+    for (const verb of ['pulse', 'thread', 'read @handle']) {
+      expect(text).not.toContain(verb);
+    }
+    expect(text).toContain('history @handle');
+    expect(text).toContain('block @handle');
   });
 });

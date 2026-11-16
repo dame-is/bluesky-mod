@@ -123,10 +123,11 @@ export function renderReport(
  *
  * WRITES ARE LEFT OUT FOR A READ-ONLY SENDER rather than listed and refused,
  * the same rule the menus already follow. A menu of buttons that reject you
- * teaches you to stop reading the menu.
+ * teaches you to stop reading the menu. For the same reason, the commands
+ * that need a model are left out when no model is set up.
  */
-export function helpText({ canWrite = true } = {}) {
-  const reads = [
+export function helpText({ canWrite = true, hasModel = true } = {}) {
+  const network = [
     'WHAT THE NETWORK IS SAYING',
     '  pulse                     what your circle is talking about, last 24h',
     '  pulse 3d                  same, over three days (or 72, or 168)',
@@ -137,9 +138,14 @@ export function helpText({ canWrite = true } = {}) {
     '  Or just ask: "what are the people I follow talking about today?"',
     '  A digest numbers what it names, links each one, and takes a number back.',
     '',
+  ];
+  const reads = [
+    ...(hasModel ? network : []),
     'ONE ACCOUNT',
     '  @handle                   band, vouches, reach, tenure',
-    '  read @handle              what they actually post about',
+    ...(hasModel
+      ? ['  read @handle              what they actually post about']
+      : []),
     '  history @handle           every decision recorded about them',
     '',
     'ONE POST',
