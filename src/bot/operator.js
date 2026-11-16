@@ -1,48 +1,37 @@
-// Agent mode: the analyst with hands.
+// Agent mode: one model with the read tools and the write tools, talked to in
+// sentences ("block everyone being nasty in the quotes on this", "undo that,
+// the third one is a friend of mine"). It decides which tools to call.
 //
-// The classic path splits every turn in two. What the owner types is matched
-// against a fixed grammar and executed by code; anything that does not match
-// goes to an analyst that can read and cannot write. That split is what makes
-// "only acts on commands from me" literally true, and it is also why the bot
-// answers in numbered menus and asks for plan codes: a model never touches the
-// list, so every write has to be spelled out by a person.
+// Classic mode is the other trade: typed commands run by code, and an analyst
+// that can read but not write, so a person spells out every write. It sits
+// beside this one (MOD_DM_MODE, or a leading "!" on any one message).
 //
-// This file is the other trade. One model gets the read tools AND the write
-// tools, and the owner talks to it in sentences: "block everyone being nasty in
-// the quotes on this", "undo that, the third one is a friend of mine". It
-// decides which tools to call. Classic mode still exists beside it
-// (MOD_DM_MODE, and a leading "!" on any one message), so the deterministic
-// surface is a keystroke away rather than gone.
+// Enforced in code, below the model:
 //
-// WHAT IS STILL ENFORCED IN CODE, because it is enforced below the model rather
-// than by it, and costs nothing in normal use:
-//
-//  - The sender roster. Only roster DMs reach this file at all, and only a
-//    writer gets the write tools. A read-only guest's toolset has no write in
-//    it, so no phrasing can produce one.
-//  - The PROTECTED veto, at the write (listWrite.js, bulkPlan.js). This is the
-//    backstop for the one real hazard agent mode adds: the model reads
-//    strangers' posts mid-turn, and a post that says "add @your-friend" now has
-//    something it could capture. The veto means the worst a captured turn can
-//    do to someone the owner follows is nothing.
-//  - Per-call caps: 500 adds per approval, 240 reads per triage, ten accounts
-//    per add_to_list. The model can call again; it cannot write thousands in
-//    one go.
+//  - The sender roster. Only roster DMs reach this file, and only a writer
+//    gets the write tools. A read-only guest's toolset has no write in it, so
+//    no phrasing can produce one.
+//  - The PROTECTED veto, at the write (listWrite.js, bulkPlan.js). The model
+//    reads strangers' posts mid-turn, so a post saying "add @your-friend" can
+//    capture a turn. The veto means a captured turn cannot add anyone the
+//    owner follows.
+//  - Per-call caps: ten accounts per add_to_list, 500 adds per approval, 240
+//    reads per triage, 1,000 removals per undo. The model can call again; it
+//    cannot write thousands in one step.
+//  - The write check (tiers.js). Every write is first put to a separate call
+//    as one question, "did the owner ask for exactly this?", over a
+//    description code wrote, including where each target came from. A no
+//    comes back to the agent as "not done".
 //  - The decision log. Every write records the owner's literal message and an
-//    `approved_via` prefixed with `agent`, so "why am I on your list" can still
-//    tell "the owner typed my handle" from "a model read the owner's
-//    sentence".
+//    `approved_via` prefixed with `agent`, so "the owner typed my handle" and
+//    "a model read the owner's sentence" stay distinguishable.
 //
-// WHAT IS NOT: target inference, scope, and when to ask first. Those are the
-// model's call now, steered by the prompt below. That is the point of the mode.
+// Left to the model, steered by the prompt: who a sentence means, how wide to
+// go, and when to ask first.
 //
-// TWO WAVES (see tiers.js). The turn runs on the cheap model. Every write it
-// tries is first put to an evaluation model as a typed question ("did the
-// owner ask for exactly this?") over a description CODE wrote, including
-// where each target came from; an uncertain answer goes to the stronger model,
-// and a no comes back to the agent as "ask the owner". The stronger model also
-// takes the whole turn when the cheap one hands off, fails without acting, or
-// the owner starts a message with "^".
+// Two waves: the agent model takes the turn. An escalation model, if set,
+// takes over when the first hands off, stalls or fails, or when the owner
+// starts a message with "^".
 
 import { tool, stepCountIs, hasToolCall } from 'ai';
 import { z } from 'zod';
@@ -55,10 +44,8 @@ import {
   pulseCallsIn,
   DEFAULT_VOICE,
 } from '../lib/agent.js';
-import { KINDS, LABELS } from '../lib/command.js';
-import {
-  postWebUrl,
-} from '../lib/links.js';
+import { KINDS, LABELS, parseActor } from '../lib/command.js';
+import { postWebUrl } from '../lib/links.js';
 import { BANDS } from '../lib/score.js';
 import { resolveActor } from '../lib/target.js';
 import {
@@ -80,7 +67,7 @@ import {
 } from './bulkPlan.js';
 import { applyCommand } from './listWrite.js';
 import { startWatch, stopWatch, liveWatches } from './watch.js';
-import { runTriage, reviewTriage, recheckTriage } from './triage.js';
+import { runTriage, reviewTriage } from './triage.js';
 import {
   checkIntent,
   ESCALATION_MODEL,
@@ -89,47 +76,51 @@ import {
 } from './tiers.js';
 import { select } from './db.js';
 
-const num = (v, d) => (v == null || v === '' ? d : Number(v));
+/**
+ * A number from the environment, or the default when unset, not a number, or
+ * negative. A typo must not turn a cap into NaN, which no step count equals.
+ */
+const num = (v, d) => {
+  const n = Number(v);
+  return v == null || v === '' || !Number.isFinite(n) || n < 0 ? d : n;
+};
 
 /**
  * Tool-loop steps for one agent turn.
  *
  * Higher than the analyst's 12. "Block the hostile quoters" is scan, triage,
  * maybe triage again, review, approve, and a reply, and each atmosphere read
- * along the way is a step too.
+ * along the way is a step too. A whole number of at least 1, because the
+ * loop stops only when the step count equals it exactly.
  */
-export const OPERATOR_STEPS = num(process.env.MOD_OPERATOR_STEPS, 24);
+const OPERATOR_STEPS = Math.max(
+  1,
+  Math.floor(num(process.env.MOD_OPERATOR_STEPS, 24)),
+);
 
 /**
  * The deadline for a whole agent turn, tools included.
  *
  * Longer than the analyst's two minutes because the tools here are slow on
- * purpose: a harvest of a viral post is sixty pages per source, and a triage is
- * a wave of model calls of its own. It still exists for the reason the
- * analyst's does: a socket that never returns must not wedge the process's
- * one job queue.
+ * purpose: a harvest of a viral post is sixty pages per source, and a triage
+ * is a wave of model calls of its own. A socket that never returns must still
+ * not wedge the process's one job queue.
  */
-export const OPERATOR_TIMEOUT_MS = num(
-  process.env.MOD_OPERATOR_TIMEOUT_MS,
-  300_000,
-);
+const OPERATOR_TIMEOUT_MS = num(process.env.MOD_OPERATOR_TIMEOUT_MS, 300_000);
 
 /**
  * How long ONE model call may take before the model counts as stalled.
  *
- * Timed around the model call alone: armed when a call starts, disarmed when it
- * returns, so a long harvest or triage (tool time) never trips it. Once a
- * "block" with a post attached spent nearly three minutes on about four
- * DeepSeek calls and came back empty. Replayed, the same message took about six
- * seconds. A healthy first-wave call takes 2 to 15 seconds. The second wave
- * reasons longer over a bigger context, and nothing comes after it, so it waits
- * longer. 0 turns the watchdog off.
+ * Armed when a call starts and disarmed when it returns, so a long harvest or
+ * triage (tool time) never trips it. A healthy first-wave call takes a few
+ * seconds. The second wave reasons longer over a bigger context, and nothing
+ * comes after it, so it waits longer. 0 turns the watchdog off.
  */
-export const OPERATOR_CALL_TIMEOUT_MS = num(
+const OPERATOR_CALL_TIMEOUT_MS = num(
   process.env.MOD_OPERATOR_CALL_TIMEOUT_MS,
   45_000,
 );
-export const ESCALATION_CALL_TIMEOUT_MS = num(
+const ESCALATION_CALL_TIMEOUT_MS = num(
   process.env.MOD_ESCALATION_CALL_TIMEOUT_MS,
   90_000,
 );
@@ -144,8 +135,8 @@ class ModelStall extends Error {
   }
 }
 
-/** off | low | medium | high. Unset leaves it to the provider. */
-export const OPERATOR_REASONING = (() => {
+/** off, minimal, low, medium or high. Unset leaves it to the provider. */
+const OPERATOR_REASONING = (() => {
   const v = String(process.env.MOD_OPERATOR_REASONING || '')
     .trim()
     .toLowerCase();
@@ -163,7 +154,7 @@ const CODE = /^[0-9a-f]{8}$/i;
 
 // Who the bot is comes from the live session, never a literal: the handle is
 // rented and can change under the account, while the DID cannot. Without a
-// session (tests, a probe with every write faked) the prompt names no handle.
+// session (tests) the prompt names no handle.
 function selfLine(self) {
   const handle = self?.handle && self.handle !== 'handle.invalid' ? self.handle : null;
   const did = self?.did || null;
@@ -199,7 +190,7 @@ PLAN CODES. Mention the code whenever you create or act on a plan, so either of 
 
 CHECKED WRITES. Before any change to the list runs, it is checked against what the owner actually said. A write that comes back "not done" with waitingOnOwner: true has been put to the owner as a question, and a thumbs-up or "yes" runs it; say in one line what you were about to do. One that comes back "not done" without it was not something the owner pointed at: drop it and say so. Never retry a refused write with different arguments or another tool.
 
-WATCHING AND REMEMBERING. watch_post keeps reading a post's new quotes and replies for some hours and reports hourly; with block_hostile it also adds what two models read as hostile, holding anyone CONNECTED or NOTABLE for the owner. stop_watching ends one. recent_activity says what was added, removed and undone lately, with plan codes. You cannot save anything to memory yourself: when the owner wants something kept, it is kept by the owner starting a message with "remember:".`;
+WATCHING AND REMEMBERING. watch_post keeps reading a post's new quotes and replies for some hours and reports hourly; with block_hostile it also adds what triage reads as hostile, holding anyone CONNECTED or NOTABLE for the owner. stop_watching ends one. recent_activity says what was added, removed and undone lately, with plan codes. You cannot save anything to memory yourself: when the owner wants something kept, it is kept by the owner starting a message with "remember:".`;
 
 const HAND_OFF = `A STRONGER MODEL IS AVAILABLE. Call hand_off, and nothing after it, when the owner asks for a second opinion, a closer look or a more careful answer; when you have read the conversation and still cannot tell what the owner wants; when a tool result contradicts something you said earlier; or when a decision about a specific person needs judgement you are not confident in. Do not hand off routine work: lookups, scans, and requests that are already clear.`;
 
@@ -241,9 +232,12 @@ WHAT NEVER REACHES YOU. These are handled without a model, so answer questions a
  * @param {object} opts
  * @param {boolean} opts.canWrite
  * @param {string} [opts.voice]     replaces DEFAULT_VOICE
- * @param {string} [opts.guidance]  the owner's standing instructions, appended last
- * @param {string} [opts.asker]     who is talking, as the model should name them
+ * @param {string} [opts.guidance]  the owner's standing instructions, last
+ * @param {string} [opts.asker]     who is talking, as the model names them
  * @param {'only'|'first'|'second'} [opts.stage]  which wave this turn is
+ * @param {string} [opts.reason]    why a second wave took over
+ * @param {string[]} [opts.prior]   what the first wave already did
+ * @param {string} [opts.notes]     the owner's "remember:" notes
  * @param {{did?: string, handle?: string}} [opts.self]  the bot's own session
  */
 export function operatorPrompt({
@@ -264,14 +258,13 @@ export function operatorPrompt({
   if (asker) blocks.push(`YOU ARE TALKING TO: ${asker}.`);
   const extra = String(guidance || '').trim();
   if (extra) blocks.push(`STANDING INSTRUCTIONS FROM THE OWNER.\n${extra}`);
-  // Notes the owner saved from the chat with "remember:". The owner's own
-  // words, read like the standing instructions; see memory.js.
+  // The owner's own words, read like the standing instructions; see memory.js.
   const kept = String(notes || '').trim();
   if (kept) blocks.push(kept);
   return blocks.join('\n\n');
 }
 
-/** The ten most recent plans, newest first. */
+/** The most recent plans, newest first. */
 async function recentPlans(limit = 8) {
   return select('plan', {
     select: 'id,created_at,approved_at,approved_bands,totals,note',
@@ -281,7 +274,7 @@ async function recentPlans(limit = 8) {
 }
 
 /** Everything the tools touch, so tests can swap it without a database. */
-export const DEPS = {
+const DEPS = {
   applyCommand,
   proposePlan,
   findPlan,
@@ -301,7 +294,6 @@ export const DEPS = {
   countDecisions,
   decisionsFor,
   checkIntent,
-  recheckTriage,
   startWatch,
   stopWatch,
   liveWatches,
@@ -311,9 +303,9 @@ export const DEPS = {
 /**
  * A plan's note, as plain text. Written by this system: either "bulk <kind>
  * from <post>" or the owner's own message with the agent's reason in brackets.
- * Not fenced as untrusted, because it is not other people's writing, and
- * fencing it made the agent tell the owner their own words had arrived from
- * the network.
+ * Not fenced as untrusted, because it is not other people's writing, and a
+ * fence leads the agent to tell the owner their own words came from the
+ * network. Angle brackets and backticks are replaced so it cannot forge one.
  */
 const noteText = (note) =>
   String(note || '')
@@ -341,14 +333,37 @@ function noteFor(raw, reason) {
   return why ? `${raw} [agent: ${why}]` : raw;
 }
 
-/** Does any of these strings appear in this text? Case-insensitive. */
+/**
+ * Does any of these handles, DIDs or codes appear in this text, as a whole
+ * token? Case-insensitive. A bare substring match would read "@fan.test" as
+ * naming "n.test" and tell the write check the owner named someone they did
+ * not.
+ */
 function mentioned(text, needles) {
   const hay = String(text ?? '').toLowerCase();
-  return needles.some((n) => n && hay.includes(String(n).toLowerCase()));
+  return needles.some((n) => {
+    const needle = String(n ?? '').toLowerCase();
+    if (!needle) return false;
+    let at = hay.indexOf(needle);
+    while (at !== -1) {
+      const before = hay[at - 1] ?? '';
+      const after = hay.slice(at + needle.length, at + needle.length + 2);
+      // A handle may end a sentence with a full stop, but not run on into a
+      // longer domain, or sit inside one or inside a DID.
+      if (
+        !/[a-z0-9.:_%-]/.test(before) &&
+        !/^([a-z0-9_%-]|\.[a-z0-9])/.test(after)
+      ) {
+        return true;
+      }
+      at = hay.indexOf(needle, at + 1);
+    }
+    return false;
+  });
 }
 
 /** Posts referred to in a message: at:// URIs and bsky.app post links. */
-export function postRefs(text) {
+function postRefs(text) {
   const s = String(text ?? '');
   const out = [];
   for (const m of s.matchAll(
@@ -376,10 +391,10 @@ const ACCOUNT_SOURCE = {
  * One target, as the intent check reads it.
  *
  * `inPlan` is what the plan says about them, for an approval by name. It
- * leads, because for an account the agent picked out of a triage that IS where
- * it came from: "The owner said block the hostile ones" and "triage labelled this
- * one hostile" together are the request and its target, and without the second
- * half the target reads as having come from nowhere.
+ * leads, because for an account picked out of a triage that IS where it came
+ * from: "block the hostile ones" and "triage labelled this one hostile" are
+ * the request and its target. Without the second, the target reads as having
+ * come from nowhere.
  */
 export function accountPhrase({ label, source, inPlan = null }) {
   const where = ACCOUNT_SOURCE[source] ?? ACCOUNT_SOURCE.none;
@@ -390,7 +405,7 @@ export function accountPhrase({ label, source, inPlan = null }) {
 }
 
 /** What a plan's row says about one account, in words. */
-export function planFact(row) {
+function planFact(row) {
   if (!row) return 'not in this plan';
   if (row.triage && ['hostile', 'arguing', 'neutral'].includes(row.triage)) {
     return `in this plan, triage labelled ${row.triage}`;
@@ -416,9 +431,9 @@ function stamp(iso) {
 }
 
 /**
- * Who a scan plan holds, by its kind (KINDS in command.js). Without this the
- * check read "every account in band UNKNOWN or PERIPHERAL" against "everyone
- * that liked this post" and could not tell they were the same 14 people.
+ * Who a scan plan holds, by its kind (KINDS in command.js). Without it, the
+ * check reads "every account in band UNKNOWN or PERIPHERAL" against "everyone
+ * that liked this post" and cannot tell they are the same people.
  */
 const PLAN_HOLDS = {
   likers: "the post's likers",
@@ -449,15 +464,31 @@ export function planPhrase({
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-/** An account as a classic command takes it: a DID, a link, or @handle. */
-export function asCommandActor(account) {
-  const a = String(account ?? '').trim();
-  if (a.startsWith('did:') || /^https?:\/\//.test(a)) return a;
-  return `@${a.replace(/^@/, '')}`;
+/**
+ * A model-supplied account as a classic command names it: a DID or @handle,
+ * or null when it is neither (a profile link counts as what it links to).
+ * Parsed by the same code as a typed command, so free text from the model
+ * never reaches a write, the write check's description, or a stored question.
+ */
+function asCommandActor(account) {
+  const actor = parseActor(String(account ?? '').trim().replace(/^@/, ''));
+  if (!actor) return null;
+  return actor.startsWith('did:') ? actor : `@${actor}`;
+}
+
+/** The accounts as asCommandActor reads them, or an error naming the rest. */
+function commandActors(accounts) {
+  const actors = accounts.map(asCommandActor);
+  const bad = accounts.filter((_, i) => !actors[i]);
+  return bad.length
+    ? {
+        error: `Not a handle, DID or profile link: ${bad.join(', ').slice(0, 200)}. Nothing was done.`,
+      }
+    : { actors };
 }
 
 /** Up to five names, then a count, for a line the owner reads. */
-export function someNames(labels, max = 5) {
+function someNames(labels, max = 5) {
   return labels.length > max
     ? `${labels.slice(0, max).join(', ')} and ${labels.length - max} more`
     : labels.join(', ');
@@ -540,36 +571,35 @@ export function buildActionTools(ctx, deps = DEPS) {
   };
 
   // The authors of the posts the owner put in this message, resolved once.
+  // The promise is what is kept, so accounts checked in parallel all wait for
+  // the whole set rather than reading it half filled.
   let authors = null;
-  const attachedAuthors = async () => {
-    if (authors) return authors;
-    authors = new Set();
-    for (const ref of postRefs(ctx.said)) {
-      try {
-        authors.add(
-          ref.author.startsWith('did:')
-            ? ref.author
-            : await deps.resolveActor(ref.author),
-        );
-      } catch {
-        /* an unresolvable author is simply not matched */
+  const attachedAuthors = () =>
+    (authors ??= (async () => {
+      const found = new Set();
+      for (const ref of postRefs(ctx.said)) {
+        try {
+          found.add(
+            ref.author.startsWith('did:')
+              ? ref.author
+              : await deps.resolveActor(ref.author),
+          );
+        } catch {
+          /* an unresolvable author is simply not matched */
+        }
       }
-    }
-    return authors;
-  };
+      return found;
+    })());
 
-  /** Where a target came from, worked out by code from the conversation. */
-  const accountSource = async (account, plan = null) =>
-    (await accountInfo(account, plan)).phrase;
-
-  /** The same, plus what a question to the owner needs: source and label. */
-  const accountInfo = async (account, plan = null) => {
-    const given = String(account ?? '')
-      .trim()
-      .replace(/^@/, '');
-    const fromLink = /bsky\.app\/profile\/([^/?#\s]+)/.exec(given)?.[1];
+  /**
+   * Where a target came from, worked out by code from the conversation, and
+   * the label a question to the owner shows. Takes an actor as
+   * asCommandActor returns it.
+   */
+  const accountInfo = async (actor, plan = null) => {
+    const given = actor.replace(/^@/, '');
     let did = given.startsWith('did:') ? given : null;
-    let handle = fromLink || (did ? null : given);
+    let handle = did ? null : given;
     try {
       if (!did) did = await deps.resolveActor(given);
     } catch {
@@ -605,10 +635,7 @@ export function buildActionTools(ctx, deps = DEPS) {
     };
   };
 
-  /** Where a plan came from, and when. */
-  const planSource = (plan, extra = []) => planInfo(plan, extra).phrase;
-
-  /** The same, with the source keys a question to the owner needs. */
+  /** Where a plan came from and when, and whether anyone pointed at it. */
   const planInfo = (plan, extra = []) => {
     const code = shortCode(plan.id);
     const sources = [...extra];
@@ -636,15 +663,15 @@ export function buildActionTools(ctx, deps = DEPS) {
   };
 
   /**
-   * Put a write to the intent check. Allowed writes run; anything else comes
-   * back to the agent as "not done", with the classic command that would do it
-   * directly, because the classic path never involves a model at all.
+   * Put a write to the write check. Returns null when it may run, or the
+   * "not done" result to hand back to the agent.
    */
   const gate = async (action, offer = null, { askFirst = false } = {}) => {
     // A change the owner or this conversation pointed at is put to the owner as
-    // a question a thumbs-up can answer. One aimed at someone the agent found by
-    // itself is refused and NOT offered: a stranger's post that talked the
-    // model into "block @x" must not get as far as a one-tap yes.
+    // a question a thumbs-up can answer. It is stored as the classic commands
+    // it stands for, which run without a model. One aimed at someone the agent
+    // found by itself is refused and NOT offered: a stranger's post that
+    // talked the model into "block @x" must not get as far as a one-tap yes.
     const ask = (why) => {
       if (!offer?.pointedAt || !ctx.pending) {
         return {
@@ -741,29 +768,13 @@ export function buildActionTools(ctx, deps = DEPS) {
 
     triage_plan: tool({
       description:
-        'Read what each account on a plan actually wrote on the post (its reply or quote) and label it hostile, arguing or neutral. When a second model is configured, anything the first reader calls hostile is read again by it, and its label is kept. Labels only; adds nobody. Reads up to 240 accounts per call and reports how many are left; call again to continue. With recheck: true, two stronger models re-read the posts already labelled hostile (for plans triaged before the second wave existed) and a label changes only where both disagree with it; nobody is added or removed either way.',
+        'Read what each account on a plan actually wrote on the post (its reply or quote) and label it hostile, arguing or neutral. When a second model is configured, anything the first reader calls hostile is read again by it, and its label is kept. Labels only; adds nobody. Reads up to 240 accounts per call and reports how many are left; call again to continue.',
       inputSchema: z.object({
         code: z.string().describe('the plan code'),
-        recheck: z.boolean().optional(),
       }),
-      execute: async ({ code, recheck = false }) => {
+      execute: async ({ code }) => {
         try {
           const plan = await findOrFail(code);
-          if (recheck) {
-            const out = await deps.recheckTriage(plan, {
-              generate: ctx.generate,
-              log: ctx.log,
-            });
-            return {
-              code,
-              recheck: out,
-              // On the list, and now read as not hostile by both readers.
-              disputedOnList: {
-                arguing: `review ${code} arguing`,
-                neutral: `review ${code} neutral`,
-              },
-            };
-          }
           const out = await deps.runTriage(plan, {
             generate: ctx.generate,
             model: ctx.triageModel || ctx.model,
@@ -954,7 +965,9 @@ export function buildActionTools(ctx, deps = DEPS) {
           .describe('put it to the owner as a question instead of doing it'),
       }),
       execute: async ({ accounts, reason, ask_first: askFirst = false }) => {
-        const infos = await Promise.all(accounts.map((a) => accountInfo(a)));
+        const { actors, error } = commandActors(accounts);
+        if (error) return { error };
+        const infos = await Promise.all(actors.map((a) => accountInfo(a)));
         const adding = verb === 'list_add';
         const stopped = await gate(
           actionText(adding ? 'add' : 'remove', {
@@ -962,8 +975,8 @@ export function buildActionTools(ctx, deps = DEPS) {
           }),
           {
             pointedAt: infos.every((i) => i.source !== 'none'),
-            commands: accounts.map(
-              (a) => `list ${adding ? 'add' : 'remove'} ${asCommandActor(a)}`,
+            commands: actors.map(
+              (a) => `list ${adding ? 'add' : 'remove'} ${a}`,
             ),
             describe: adding
               ? `add ${someNames(infos.map((i) => i.label))} to the list`
@@ -973,7 +986,7 @@ export function buildActionTools(ctx, deps = DEPS) {
         );
         if (stopped) return stopped;
         const results = [];
-        for (const account of accounts) {
+        for (const account of actors) {
           try {
             const out = await deps.applyCommand(ctx.writeAgent, verb, account, {
               raw: noteFor(ctx.raw, reason),
@@ -981,9 +994,7 @@ export function buildActionTools(ctx, deps = DEPS) {
               via: 'agent',
             });
             results.push({ account, ok: out.ok, result: out.message });
-            if (out.ok) {
-              record(`${verb === 'list_add' ? 'added' : 'removed'} ${account}`);
-            }
+            if (out.ok) record(`${adding ? 'added' : 'removed'} ${account}`);
           } catch (err) {
             results.push({ account, ok: false, ...failed(err) });
           }
@@ -1019,11 +1030,13 @@ export function buildActionTools(ctx, deps = DEPS) {
       if (given.length !== 1) {
         return { error: 'Give exactly one of bands, label or accounts.' };
       }
+      const { actors, error } = commandActors(accounts ?? []);
+      if (error) return { error };
       try {
         const plan = await findOrFail(code);
         const where = planInfo(plan);
-        const named = accounts?.length
-          ? await Promise.all(accounts.map((a) => accountInfo(a, plan)))
+        const named = actors.length
+          ? await Promise.all(actors.map((a) => accountInfo(a, plan)))
           : null;
         const count = named
           ? named.length
@@ -1044,14 +1057,14 @@ export function buildActionTools(ctx, deps = DEPS) {
         const stopped = await gate(
           action,
           {
+            // inPlan is null when the plan could not be read: not offered.
             pointedAt:
               where.pointedAt &&
-              (!named || named.every((i) => i.inPlan !== 'not in this plan')),
+              (!named ||
+                named.every((i) => i.inPlan && i.inPlan !== 'not in this plan')),
             commands: [
               `approve ${which} ${
-                named
-                  ? accounts.map(asCommandActor).join(' ')
-                  : label || bands.join(',')
+                named ? actors.join(' ') : label || bands.join(',')
               }`,
             ],
             describe: named
@@ -1063,8 +1076,8 @@ export function buildActionTools(ctx, deps = DEPS) {
           { askFirst },
         );
         if (stopped) return stopped;
-        const out = accounts?.length
-          ? await deps.applyPlanToActors(ctx.writeAgent, plan, accounts, {
+        const out = named
+          ? await deps.applyPlanToActors(ctx.writeAgent, plan, actors, {
               by: 'agent',
             })
           : label
@@ -1076,7 +1089,7 @@ export function buildActionTools(ctx, deps = DEPS) {
               });
         if (out.added) {
           record(
-            `approved ${code} ${accounts ? 'by name' : label || bands.join(',')} (${out.added} added)`,
+            `approved ${which} ${named ? 'by name' : label || bands.join(',')} (${out.added} added)`,
           );
         }
         return {
@@ -1100,8 +1113,9 @@ export function buildActionTools(ctx, deps = DEPS) {
       try {
         const plan = await findOrFail(code);
         await deps.cancelPlan(plan);
-        record(`cancelled ${code}`);
-        return { ok: true, result: `Cancelled ${code}. Nothing was added.` };
+        const which = shortCode(plan.id);
+        record(`cancelled ${which}`);
+        return { ok: true, result: `Cancelled ${which}. Nothing was added.` };
       } catch (err) {
         return failed(err);
       }
@@ -1166,7 +1180,7 @@ export function buildActionTools(ctx, deps = DEPS) {
 
   tools.watch_post = tool({
     description:
-      "Keep reading a post's new quotes and replies for some hours, triaging them as they arrive, with an hourly digest to the owner. Nothing is added unless block_hostile is set; then the accounts both models read as hostile are added as they arrive, and anyone CONNECTED or NOTABLE is held for the owner. Starting it again on the same post extends it.",
+      "Keep reading a post's new quotes and replies for some hours, triaging them as they arrive, with an hourly digest to the owner. Nothing is added unless block_hostile is set; then the accounts triage reads as hostile are added as they arrive, and anyone CONNECTED or NOTABLE is held for the owner. Starting it again on the same post extends it.",
     inputSchema: z.object({
       post: z.string().describe('post URL or at:// URI'),
       hours: z.number().int().min(1).max(168).optional(),
@@ -1183,9 +1197,16 @@ export function buildActionTools(ctx, deps = DEPS) {
           fromOwner ||
           mentioned(ctx.earlier, [rkey]) ||
           mentioned(ctx.convoText, [rkey]);
+        // Named by where it came from, never by the model's argument, so the
+        // check reads only words code wrote.
+        const which = fromOwner
+          ? 'the post the owner attached'
+          : pointedAt
+            ? 'a post mentioned earlier in this conversation'
+            : 'a post not mentioned anywhere in this conversation';
         if (auto) {
           const stopped = await gate(
-            `Watch ${fromOwner ? 'the post the owner attached' : `the post ${post}`} for ${hours} hours, and add the accounts two models read as hostile in its new quotes and replies as they arrive (CONNECTED and NOTABLE held for the owner).`,
+            `Watch ${which} for ${hours} hours, and add the accounts triage reads as hostile in its new quotes and replies as they arrive (CONNECTED and NOTABLE held for the owner).`,
             {
               pointedAt,
               commands: [`watch ${post} ${hours}h auto`],
@@ -1273,9 +1294,8 @@ const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 
 /**
  * One step of a turn, short enough for a log line: the model's time, what it
- * called, the tools' time, or how it finished. The journal had nothing like
- * this when a turn stalled for three minutes, and the replay could not show
- * which part was slow.
+ * called, the tools' time, or how it finished. When a turn is slow, this says
+ * which part.
  */
 function stepNote(step, modelMs, toolMs) {
   const calls = (step.toolCalls || []).map((c) =>
@@ -1358,8 +1378,8 @@ async function runTurn({
     links: new Set(),
     plans: [...priorPlans],
     said: message,
-    // The bot's last word before this message: usually the question the owner is
-    // answering, which is what makes "yes" or "the third one" mean anything.
+    // The bot's last word before this message: usually the question the owner
+    // is answering, which is what makes "yes" or "the third one" mean anything.
     earlier:
       [...history].reverse().find((h) => h.role === 'assistant')?.content ?? '',
     convoText: history.map((h) => h.content).join('\n'),
@@ -1369,8 +1389,8 @@ async function runTurn({
     stage,
     handoff: null,
     convoId,
-    // Questions put to the owner this turn, each a set of classic commands that a
-    // thumbs-up runs. See gate() in buildActionTools.
+    // Questions put to the owner this turn, each a set of classic commands
+    // that a thumbs-up runs. See gate() in buildActionTools.
     pending: [],
   };
 
@@ -1427,10 +1447,12 @@ async function runTurn({
       messages: [...history, { role: 'user', content: message }],
       ...(reasoning ? { reasoning } : {}),
     });
+    const steps = result.steps?.length ?? trace.length;
     return done({
       ok: true,
       text: (result.text || '').trim(),
-      steps: result.steps?.length ?? trace.length,
+      steps,
+      outOfSteps: steps >= maxSteps,
       usage: result.usage ?? null,
       pulses: pulseCallsIn(result.steps),
     });
@@ -1459,17 +1481,18 @@ async function runTurn({
 /**
  * Answer one DM in agent mode.
  *
- * The first wave answers. The second wave takes the message over when the owner
- * asked for it ("^"), when the first wave handed off, or when it failed or ran
- * out of steps without having changed anything. A first wave that timed out is
- * not retried: the second would start the same slow work again on a queue
- * that has already waited five minutes.
+ * The first wave answers. The second wave takes the message over when the
+ * owner asked for it ("^"), or when the first wave handed off, stalled, failed
+ * before doing anything, or came back with no answer. A first wave that hit
+ * the turn's deadline is not retried: the second would start the same slow
+ * work again on a queue that has already waited five minutes.
  *
  * Never throws. A turn that fails partway may already have written to the
  * list, and the caller has to be able to say so: "that broke" and "that broke
  * after adding 40 people" are different messages.
  *
- * @returns {Promise<{ ok, text, error?, steps, actions, links, pulses, usages, checks, escalated }>}
+ * @returns {Promise<{ ok, text, error?, stalled?, steps, outOfSteps?, actions,
+ *   links, plans, pulses, usages, checks, pending, trace, escalated }>}
  */
 export async function operate({
   generate,
@@ -1570,11 +1593,10 @@ export async function operate({
   } else if (!first.ok && !first.actions.length && !timedOut(first.error)) {
     reason = 'the first model failed before doing anything';
   } else if (first.ok && !first.text) {
-    // Nothing to say. That is only "out of steps" if it used them all. The
-    // footer used to say so regardless, about a turn that stopped after
-    // three. If it acted, the second wave is told exactly what, and every
-    // write it makes is checked again on its own.
-    const outOfSteps = first.steps >= maxSteps;
+    // Nothing to say. That is only "out of steps" if it used them all. If it
+    // acted, the second wave is told exactly what, and every write it makes
+    // is checked again on its own.
+    const { outOfSteps } = first;
     if (first.actions.length) {
       reason = outOfSteps
         ? 'the first model ran out of steps partway through'
@@ -1593,8 +1615,8 @@ export async function operate({
     reason,
     first: first.trace.join(' › ') || 'no steps',
   });
-  // Said before the second wave starts: by now the owner has been waiting, and in
-  // the DM a stalled model and a dead bot look the same. A hand-off was the
+  // Said before the second wave starts: by now the owner has been waiting, and
+  // in the DM a stalled model and a dead bot look the same. A hand-off was the
   // first model's own choice and needs no announcement.
   if (sendProgress && !first.handoff) {
     await sendProgress(
@@ -1640,7 +1662,7 @@ export async function operate({
  *
  * Built from the actions list rather than left to the model, because the case
  * this covers is the one where the model is not available to ask: it timed
- * out, the gateway failed, or the step budget ran out mid-loop.
+ * out, the gateway failed, or it stopped with nothing to say.
  */
 export function fallbackText(reply) {
   const did = reply.actions?.length
@@ -1655,5 +1677,7 @@ export function fallbackText(reply) {
         : `That failed: ${why.slice(0, 200)}`) + did
     );
   }
-  return `I ran out of steps before finishing.${did}`;
+  return reply.outOfSteps
+    ? `I ran out of steps before finishing.${did}`
+    : `I stopped without an answer.${did}`;
 }
