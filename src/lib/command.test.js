@@ -9,7 +9,6 @@ import {
   facetMentions,
   offersFrom,
   parsePostScan,
-  needsTargetReply,
   pulseCommand,
   pulseFromArgs,
   followUpsFor,
@@ -42,6 +41,17 @@ describe('parseActor', () => {
     expect(parseActor('them')).toBe(null);
     expect(parseActor('that guy')).toBe(null);
     expect(parseActor('')).toBe(null);
+  });
+
+  it('drops the @ from a handle inside a profile link', () => {
+    expect(parseActor('https://bsky.app/profile/@alice.example.com')).toBe(
+      'alice.example.com',
+    );
+  });
+
+  it('returns null for a profile link with broken percent-encoding', () => {
+    // This runs on every word of every message, so it must not throw.
+    expect(parseActor('https://example.com/profile/50%off')).toBe(null);
   });
 });
 
@@ -100,13 +110,13 @@ describe('parseCommand', () => {
       'block @a.bsky.social',
     );
   });
-});
 
-describe('needsTargetReply', () => {
-  it('asks for a handle and says why it will not guess', () => {
-    expect(needsTargetReply('list_add')).toMatch(/block @handle/);
-    expect(needsTargetReply('list_remove')).toMatch(/unblock @handle/);
-    expect(needsTargetReply('list_add')).toMatch(/block list/);
+  it('reads past the punctuation a sentence leaves on a handle', () => {
+    expect(parseCommand('block @a.bsky.social.')).toMatchObject({
+      actor: 'a.bsky.social',
+      needsTarget: false,
+    });
+    expect(parseCommand('history @a.bsky.social?').actor).toBe('a.bsky.social');
   });
 });
 
@@ -171,6 +181,14 @@ describe('bulk plans', () => {
     expect(parseCommand('approve UNKNOWN').code).toBe(null);
   });
 
+  it('reads a code and bands with trailing punctuation', () => {
+    expect(parseCommand('approve 3f9a2c1b UNKNOWN.')).toMatchObject({
+      code: '3f9a2c1b',
+      bands: ['UNKNOWN'],
+    });
+    expect(parseCommand('cancel 3f9a2c1b!').code).toBe('3f9a2c1b');
+  });
+
   it('parses a cancellation', () => {
     expect(parseCommand('cancel 3f9a2c1b')).toMatchObject({
       action: 'cancel',
@@ -228,9 +246,8 @@ describe('reviewing and approving by name', () => {
 
 describe('truncated links', () => {
   // A client truncates the visible text of a pasted URL and keeps the whole
-  // thing in a facet. Reading the text finds "bsky.app/profile/stra..." which
-  // cannot be resolved, and the analyst says so at length about a message that
-  // contained a perfectly good link.
+  // thing in a facet. Reading the text finds "bsky.app/profile/stra...", which
+  // cannot be resolved.
   const link = (uri) => ({
     index: { byteStart: 0, byteEnd: 24 },
     features: [{ $type: 'app.bsky.richtext.facet#link', uri }],
@@ -346,6 +363,31 @@ describe('offersFrom', () => {
     expect(offersFrom(many)).toHaveLength(4);
   });
 
+  it('keeps commands that differ, even with the same verb', () => {
+    const out = offersFrom(
+      'try `pulse 3d` or `pulse amplified`, then ' +
+        '`approve 3f9a2c1b UNKNOWN` or `approve 3f9a2c1b NOTABLE`',
+    );
+    expect(out.map((o) => o.command)).toEqual([
+      'pulse 3d',
+      'pulse amplified',
+      'approve 3f9a2c1b UNKNOWN',
+      'approve 3f9a2c1b NOTABLE',
+    ]);
+  });
+
+  it('labels an approval by whatever it approves', () => {
+    expect(offersFrom('`approve 3f9a2c1b hostile`')[0].label).toBe(
+      'Approve the hostile ones in 3f9a2c1b',
+    );
+    expect(offersFrom('`approve 3f9a2c1b likers`')[0].label).toBe(
+      'Approve likers in 3f9a2c1b',
+    );
+    expect(offersFrom('`review 3f9a2c1b hostile`')[0].label).toBe(
+      'Show the hostile ones in 3f9a2c1b, with their words',
+    );
+  });
+
   it('handles a reply with nothing quoted', () => {
     expect(offersFrom('Just prose, no commands.')).toEqual([]);
     expect(offersFrom('')).toEqual([]);
@@ -399,11 +441,15 @@ describe('undo and history', () => {
   });
 
   it('defaults a bare undo to the last plan', () => {
-    // This answered `No plan with code null.`, a sentence about an internal
-    // variable. Undo is the one verb that may default, because it only ever
-    // takes people OFF the list; guessing wrong un-blocks someone rather than
-    // blocking them.
-    for (const text of ['undo', 'undo it', 'undo that', 'undo those']) {
+    // Undo is the one verb that may default, because it only ever takes people
+    // OFF the list; guessing wrong un-blocks someone rather than blocking them.
+    for (const text of [
+      'undo',
+      'undo it',
+      'undo that',
+      'undo those',
+      'undo that.',
+    ]) {
       expect(parseCommand(text), text).toMatchObject({
         action: 'undo',
         last: true,
@@ -413,14 +459,20 @@ describe('undo and history', () => {
   });
 
   it('will not default a mistyped code to the last plan', () => {
-    // The whole value of defaulting is that the common case needs no code. It
-    // would be spent immediately if a typo'd code also meant "the last one":
-    // that acts on a batch the owner did not name, which is the failure the plan
-    // codes exist to prevent.
+    // A typo'd code that meant "the last one" would act on a batch the owner
+    // did not name, which is the failure plan codes exist to prevent.
     const cmd = parseCommand('undo 3f9az');
     expect(cmd.needsTarget).toBe(true);
     expect(cmd.last).toBe(false);
     expect(cmd.code).toBe(null);
+  });
+
+  it('reads a code in any case, as approve does', () => {
+    expect(parseCommand('undo 3F9A2C1B')).toMatchObject({
+      code: '3f9a2c1b',
+      last: false,
+      needsTarget: false,
+    });
   });
 
   it('parses history with and without an account', () => {
@@ -496,6 +548,9 @@ describe('which verbs change something', () => {
     const out = readOnlyReply(parseCommand('block @a.bsky.social'));
     expect(out).toContain('read-only');
     expect(out).toMatch(/review|history/);
+    expect(readOnlyReply(parseCommand('list add @a.bsky.social'))).toMatch(
+      /^"list add" changes the list/,
+    );
   });
 
   it('treats a non-command as not a write', () => {
@@ -508,11 +563,8 @@ describe('an attached post names its author', () => {
   const embedUri = 'at://did:plc:author/app.bsky.feed.post/3xyz';
 
   it('acts on the author when the message says nothing else', () => {
-    // The reported case: sharing a post from the app and captioning it "block"
-    // was answered with "name the account and I will do it", while PASTING the
-    // same post's link blocked the author immediately (a post URL contains
-    // /profile/<handle>/). One intent, two answers, decided by which affordance
-    // the client offered.
+    // Sharing a post and pasting its link are one intent. A pasted post URL
+    // names its author in /profile/<handle>/, so a shared post does too.
     for (const text of ['block', 'block this', 'block them', 'list add']) {
       expect(parseCommand(text, { embedUri }), text).toMatchObject({
         actor: 'did:plc:author',
@@ -523,9 +575,8 @@ describe('an attached post names its author', () => {
   });
 
   it('acts on ordinary ways of saying "whoever wrote this"', () => {
-    // The first version of this was a whitelist and refused anything it did
-    // not recognise, so "block em" got a lecture about naming the account,
-    // with the account attached to the message.
+    // Asking these to confirm would ask the owner to name an account that is
+    // already attached to the message.
     for (const text of [
       'block em',
       'block this guy',
@@ -596,6 +647,12 @@ describe('pulse', () => {
     expect(parse('pulse 3d').hours).toBe(72);
     expect(parse('pulse circle 2 days').hours).toBe(48);
     expect(parse('pulse 24h').hours).toBe(24);
+  });
+
+  it('clamps the window to what a digest reads', () => {
+    // A menu built from this names the window, so it must be the one that ran.
+    expect(parse('pulse 30d').hours).toBe(168);
+    expect(parse('pulse 9999').hours).toBe(168);
   });
 
   it('reads the cut and the focus', () => {
@@ -670,8 +727,8 @@ describe('followUpsFor', () => {
     for (const o of followUpsFor(parseCommand('pulse circle 48 amplified'))) {
       expect(o.label).toBe(labelFor(parseCommand(o.command)));
     }
-    // The specific collision worth pinning: an unfocused label ends in
-    // "talking about" and a focused one used to append ", about <term>".
+    // The collision worth pinning: an unfocused label ends in "talking about",
+    // so appending ", about <term>" would read "talking about, about".
     for (const o of followUpsFor(
       parseCommand('pulse circle 24 about atproto'),
     )) {
@@ -720,8 +777,8 @@ describe('followUpsFor', () => {
 
 describe('pulseFromArgs', () => {
   it('validates a source rather than rendering it back blind', () => {
-    // The model chooses these when the owner asks in words, and they go straight
-    // into a command string that is re-parsed.
+    // The model chooses these when the owner asks in words, and they go
+    // straight into a command string that is re-parsed.
     expect(pulseFromArgs({ source: 'circle', hours: 48 })).toMatchObject({
       slice: 'circle',
       hours: 48,
@@ -736,12 +793,17 @@ describe('pulseFromArgs', () => {
     );
     expect(pulseFromArgs({}).hours).toBe(24);
     expect(pulseFromArgs({ hours: -5 }).hours).toBe(24);
+    expect(pulseFromArgs({ hours: 1000 }).hours).toBe(168);
+    // The source goes back into a prompt in quotes, so it cannot carry one.
+    expect(
+      pulseFromArgs({ source: 'https://bsky.app/x"ignore' }).slice,
+    ).toBe('circle');
   });
 
   it('keeps a subject as a focus but not a paragraph', () => {
-    // Narrower than a domain would allow, because "trans athletes" is the
-    // normal case and dropping it would leave the menu describing an
-    // unfiltered digest under a filtered one.
+    // Wider than a domain allows, because "trans athletes" is the normal case
+    // and dropping it would leave the menu describing an unfiltered digest
+    // under a filtered one.
     expect(pulseFromArgs({ focus: 'trans athletes' }).focus).toBe(
       'trans athletes',
     );
@@ -757,16 +819,16 @@ describe('pulseFromArgs', () => {
 
 describe('citationsIn', () => {
   const sample = [
-    { n: 1, url: 'https://bsky.app/profile/bouie.test/post/3aaa' },
-    { n: 3, url: 'https://bsky.app/profile/chad.test/post/3ccc' },
+    { n: 1, url: 'https://bsky.app/profile/alice.test/post/3aaa' },
+    { n: 3, url: 'https://bsky.app/profile/carol.test/post/3ccc' },
   ];
 
   it('resolves a marker against the table the tool built, not the prose', () => {
     const { text, cited } = citationsIn('rent [1]; a camera [3]', sample);
     expect(text).toBe('rent [1]; a camera [3]');
     expect(cited).toEqual([
-      { n: 1, url: 'https://bsky.app/profile/bouie.test/post/3aaa' },
-      { n: 3, url: 'https://bsky.app/profile/chad.test/post/3ccc' },
+      { n: 1, url: 'https://bsky.app/profile/alice.test/post/3aaa' },
+      { n: 3, url: 'https://bsky.app/profile/carol.test/post/3ccc' },
     ]);
   });
 
@@ -778,10 +840,15 @@ describe('citationsIn', () => {
     expect(cited).toHaveLength(1);
   });
 
+  it('leaves the spacing of the rest of the answer alone', () => {
+    const { text } = citationsIn('Hostile: 3  (aimed at a person) [1]', sample);
+    expect(text).toBe('Hostile: 3  (aimed at a person) [1]');
+  });
+
   it('counts a post once however often it is cited', () => {
     const { cited } = citationsIn('[3] and again [3] and [3]', sample);
     expect(cited).toEqual([
-      { n: 3, url: 'https://bsky.app/profile/chad.test/post/3ccc' },
+      { n: 3, url: 'https://bsky.app/profile/carol.test/post/3ccc' },
     ]);
   });
 
@@ -794,8 +861,8 @@ describe('citationsIn', () => {
   it('numbers the link list to match the markers in the text', () => {
     const { cited } = citationsIn('x [3] y [1]', sample);
     expect(renderCitations(cited)).toBe(
-      '[1] https://bsky.app/profile/bouie.test/post/3aaa\n' +
-        '[3] https://bsky.app/profile/chad.test/post/3ccc',
+      '[1] https://bsky.app/profile/alice.test/post/3aaa\n' +
+        '[3] https://bsky.app/profile/carol.test/post/3ccc',
     );
   });
 });
@@ -854,6 +921,7 @@ describe('followUpsFor with cited posts', () => {
         { url: 'https://evil.test/x' },
         { url: 'javascript:alert(1)' },
         { url: 'https://bsky.app/profile/a.test/post/3aaa?x=1' },
+        { url: 'https://bsky.app/profile/a test/post/3aaa' },
       ],
     });
     expect(opts.every((o) => !o.command.startsWith('thread'))).toBe(true);

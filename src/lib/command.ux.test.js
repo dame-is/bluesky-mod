@@ -13,8 +13,8 @@ import {
 const POST = 'at://did:plc:author/app.bsky.feed.post/3abc';
 
 describe('the quick lane', () => {
-  // The shapes the owner actually sends, from the DM history: a shared post with
-  // "block", a link then "block this account", a typed handle.
+  // The shapes people send: a shared post with "block", a link then "block
+  // this account", a typed handle.
   it('takes "block" with one target and nothing else', () => {
     for (const text of [
       'block',
@@ -79,7 +79,17 @@ describe('answers to a question', () => {
     ]) {
       expect(isYes(t)).toBe(true);
     }
-    for (const t of ['no', 'nope', 'cancel', 'leave it', 'never mind', '👎']) {
+    for (const t of [
+      'no',
+      'nope',
+      'cancel',
+      'leave it',
+      'never mind',
+      '👎',
+      "don't",
+      // A phone keyboard types a curly apostrophe.
+      'don’t',
+    ]) {
       expect(isNo(t)).toBe(true);
     }
     // A qualified yes is not a yes: it goes to the agent, and the question
@@ -165,6 +175,25 @@ describe('watch commands', () => {
     expect(parseWatchCommand('what are you watching?')).toEqual({
       action: 'watches',
     });
+    // Saying not to block names the verb too, and must not turn blocking on.
+    for (const text of [
+      "watch this but don't block anyone",
+      'watch this, do not block them',
+      'watch this but not automatically',
+      "watch this, I don't want you to block anyone",
+      'watch this but won’t add them',
+    ]) {
+      expect(parseWatchCommand(text, { embedUri: POST }), text).toMatchObject({
+        action: 'watch',
+        auto: false,
+      });
+    }
+    // A negation in another clause leaves the request to block alone.
+    expect(
+      parseWatchCommand('watch this, not sure how long, block the hostile ones', {
+        embedUri: POST,
+      }),
+    ).toMatchObject({ auto: true });
     // A warning with a post attached is not a request to watch it.
     expect(
       parseWatchCommand('watch out, this one is nasty', { embedUri: POST }),

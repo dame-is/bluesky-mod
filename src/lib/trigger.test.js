@@ -7,7 +7,7 @@ import {
   mentions,
 } from './trigger.js';
 
-const OWNER = 'did:plc:the owner';
+const OWNER = 'did:plc:owner';
 const BOT = 'did:plc:bot';
 const STRANGER = 'did:plc:stranger';
 const ids = { ownerDid: OWNER, botDid: BOT };
@@ -96,6 +96,17 @@ describe('who gets answered', () => {
       ids,
     );
     expect(out.trigger).toBe(true);
+  });
+
+  it('answers nothing when the bot does not know its own DID', () => {
+    // Without it, a post with no parent and no quote would compare null to
+    // null and read as addressed to the bot.
+    const out = classify(post({ text: 'good morning' }), {
+      ownerDid: OWNER,
+      botDid: null,
+    });
+    expect(out.trigger).toBe(false);
+    expect(out.reason).toBe('no-bot-did');
   });
 
   it('ignores anything that is not a created post', () => {

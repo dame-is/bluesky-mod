@@ -1,27 +1,23 @@
 // Does this firehose event mean "analyst, look at this"?
 //
-// Pure, and deliberately so. This function IS the security boundary for the
-// public path (everything downstream of a `true` here posts to the network
-// under the moderator account's name), and a boundary you cannot exercise in a
-// test is a boundary you are hoping about. `nextAction` in precompute.js is
-// already the cautionary tale for leaving a decision like this inline.
+// Pure, because this function IS the security boundary for the public path:
+// everything downstream of a `true` here posts to the network under the
+// moderator account's name, and a boundary you cannot exercise in a test is a
+// boundary you are hoping about.
 //
-// TWO INDEPENDENT AUTHOR CHECKS, on purpose. The consumer subscribes to
-// Jetstream with `dids=[everyone answered]`, so in normal operation no other
-// author's posts ever arrive. But that filter is a bandwidth decision made by
-// the transport, and a dropped query parameter, a proxy that rewrites the URL,
-// or someone widening the subscription to debug something would silently turn
-// the rule off. So the author is checked again here, where it is a rule rather
-// than an optimisation.
+// The author is checked here as well as in the Jetstream subscription. The
+// subscription's `wantedDids` filter is a bandwidth choice made by the
+// transport, and a dropped query parameter, a proxy that rewrites the URL, or
+// a subscription widened to debug something would turn it off silently. Here
+// it is a rule.
 //
-// Note what is NOT a trigger: anyone NOT on the roster mentioning the bot. The
-// bot is mentionable by the whole network, and the analyst reads its input as
-// instructions, so a stranger's mention is discarded without a reply: not even
+// A mention from anyone NOT on the roster is not a trigger. The bot is
+// mentionable by the whole network and the analyst reads its input as
+// instructions, so a stranger's mention is dropped without a reply, not even
 // an error, which would itself be a reply.
 //
-// The roster is a predicate rather than a DID so this file never has to know
-// how the tiers are spelled. See senders.js, which is the only place that
-// decides who is on it.
+// The roster is a predicate so this file never has to know how the tiers are
+// spelled. senders.js is the only place that decides who is on it.
 
 import { looksLikeTarget } from './target.js';
 
@@ -93,13 +89,13 @@ export function mentions(record, did) {
  * @param {string} opts.ownerDid  the account that owns the list
  * @param {string} opts.botDid    the moderator account
  * @param {(did: string) => boolean} [opts.answers]  is this author answered?
- *   Defaults to the owner alone, so a caller that has not been taught about
- *   the roster stays as narrow as this was before the roster existed.
+ *   Defaults to the owner alone, the narrowest roster there is.
  * @returns {{
  *   trigger: boolean,
  *   reason: string,
  *   uri?: string,
  *   cid?: string,
+ *   author?: string,
  *   text?: string,
  *   target?: string|null,
  *   targetSource?: 'link'|'quote'|'parent'|null,
@@ -131,6 +127,10 @@ export function classify(
   if (typeof record.text !== 'string') {
     return { trigger: false, reason: 'no-text' };
   }
+
+  // Fail closed without the bot's own DID. `authorOf(null) === null` would
+  // read nearly every post as addressed to the bot.
+  if (!botDid) return { trigger: false, reason: 'no-bot-did' };
 
   const parentUri = record.reply?.parent?.uri ?? null;
   const quoted = quotedUri(record);
@@ -167,8 +167,8 @@ export function classify(
     reason: 'addressed',
     uri,
     cid: commit.cid,
-    // Who asked. Not always the owner now that a roster exists, and the thread
-    // history needs it to tell the asker's posts from the bot's.
+    // Who asked, which may be anyone on the roster. The thread history needs
+    // it to tell the asker's posts from the bot's.
     author: event.did,
     text: record.text,
     target,
