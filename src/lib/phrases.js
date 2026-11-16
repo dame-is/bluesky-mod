@@ -67,9 +67,9 @@ export const ACK_CLAUSE = {
  * Which commands are worth announcing.
  *
  * An ack exists to fill five to twenty seconds of silence. A lookup is rendered
- * now and arrives instantly, so announcing it means two messages for one answer
- * -- the ack was right when everything went through a model and is noise for
- * the things that no longer do.
+ * now and arrives instantly, so announcing it means two messages for one
+ * answer. The ack was right when everything went through a model and is noise
+ * for the things that no longer do.
  */
 export const SLOW = new Set([
   'plan',
@@ -78,7 +78,7 @@ export const SLOW = new Set([
   'review',
   'think',
   // A read pulls a feed and then calls the model, so it is the slowest thing
-  // here by some distance -- except a triage, which does that for hundreds of
+  // here by some distance, except a triage, which does that for hundreds of
   // accounts at once.
   'read',
   'triage',

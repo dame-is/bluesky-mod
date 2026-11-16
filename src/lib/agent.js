@@ -170,8 +170,8 @@ export function readRequest(actor) {
  *
  * FIXED, for the same reason `readRequest` is. This is the other path where the
  * model is handed a pile of other people's writing and asked what it amounts
- * to, and the framing that keeps the answer honest -- say what the circle WROTE
- * apart from what it passed on, say how much you actually read -- has to be
+ * to, and the framing that keeps the answer honest (say what the circle WROTE
+ * apart from what it passed on, say how much you actually read) has to be
  * guaranteed rather than hoped for. Building it from the owner's free text
  * would mean the framing drifts with how they happened to phrase it.
  *
@@ -456,8 +456,8 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
                 omitted: r.omitted,
                 // The whole sample in one fence. This is by far the largest
                 // volume of other people's writing this system has ever put in
-                // front of a model -- eighty posts from eighty accounts, none
-                // of whom know it exists -- so it is fenced as one block rather
+                // front of a model (eighty posts from eighty accounts, none
+                // of whom know it exists), so it is fenced as one block rather
                 // than trusted because it arrived through a tool.
                 posts: untrusted('network:posts', r.rendered),
               };
@@ -538,7 +538,7 @@ export async function answer({
     // never returns wedges the whole consumer: jobs are serialised through one
     // queue and the DM poll skips itself while anything is in flight, so a
     // single hung socket stops DMs, public replies and the drift run
-    // indefinitely -- silently, with the process healthy and idle and nothing
+    // indefinitely and silently, with the process healthy and idle and nothing
     // in the log. That happened, and it cost an answer nobody ever got.
     abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     // The gate's own tools cannot be shadowed by anything merged in: a remote
@@ -555,7 +555,7 @@ export async function answer({
     usage: result.usage ?? null,
     // What the digest actually ran with, lifted from the tool loop rather than
     // from the prose. A follow-up menu has to describe the answer the owner is
-    // looking at -- if they asked in words and the model chose three days, the
+    // looking at. If they asked in words and the model chose three days, the
     // menu that says "widen to 3 days" is already wrong.
     pulses: pulseCallsIn(result.steps),
   };
@@ -566,7 +566,7 @@ export async function answer({
  *
  * Reads both the ai@7 shape (`input`/`output`) and the older one
  * (`args`/`result`), because this is the only place in the codebase that reads
- * a step's internals and a silent shape change here would not fail -- it would
+ * a step's internals and a silent shape change here would not fail. It would
  * just stop offering follow-ups, which looks like a product decision.
  */
 export function pulseCallsIn(steps) {

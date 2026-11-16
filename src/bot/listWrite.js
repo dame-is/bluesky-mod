@@ -108,7 +108,7 @@ export async function applyCommand(
   //
   // IN PARALLEL with the veto and the membership check. A block used to do them
   // one after another, and the membership check alone walked every listitem in
-  // the repo -- 102 pages, 2.7 seconds -- on every block. It is one
+  // the repo (seconds, for a big list) on every block. It is one
   // Constellation request now; see rkeysForWrite in graphFacts.js.
   const [account, reason, rkeys] = await Promise.all([
     !band && lookUp

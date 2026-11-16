@@ -1,6 +1,6 @@
-// One whole DM pass in agent mode, against an in-memory mod schema and a fake
+// One whole DM pass in agent mode, against an in-memory database and a fake
 // chat service. The unit tests pin routeFor and the tools separately; this is
-// the wiring between them -- the part a live probe cannot reach without moving
+// the wiring between them, the part a live probe cannot reach without moving
 // the real cursor.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';

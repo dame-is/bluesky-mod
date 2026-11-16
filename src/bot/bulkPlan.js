@@ -71,7 +71,7 @@ const shortCode = (uuid) => uuid.replace(/-/g, '').slice(0, 8);
  *
  * `by` is null for a typed command and 'agent' when agent mode called the
  * function on the owner's behalf. Prefixed rather than replaced, because the
- * basis still holds -- a band is still a band -- and what changed is that a
+ * basis still holds (a band is still a band) and what changed is that a
  * model chose it from their sentence instead of them typing it. "agent:band"
  * says both.
  */
@@ -132,7 +132,7 @@ export async function proposePlan({ link, kind }) {
 
   // THE AUTHOR IS SCORED WITH THE PARTICIPANTS, in the same call. A post with
   // no likes and no replies used to come back with every band at zero and "Do
-  // nothing" as the only option -- a report about the graph AROUND a post,
+  // nothing" as the only option: a report about the graph AROUND a post,
   // offering nothing about the person who wrote it, who is the one actually in
   // front of the owner. summarise() maps over the harvest, so an extra entry in
   // the score map cannot leak into the plan's rows.
@@ -882,7 +882,7 @@ async function deleteListitems(agent, bot, rkeys) {
  *
  * The decision rows STAY, stamped undone rather than deleted. A log that erases
  * what it undid cannot answer "was I ever on this list", which is a question
- * somebody may reasonably ask after the fact -- and an append-only record that
+ * somebody may reasonably ask after the fact, and an append-only record that
  * quietly rewrites itself is not a record.
  *
  * The listitem rkey is not stored anywhere, so it is looked up: one
@@ -1023,8 +1023,8 @@ export async function historyFor(did = null, { limit = 8 } = {}) {
  * What happened to the list in the last `hours`: adds, removals and undos,
  * grouped by plan, newest first. For "what did you do today?".
  *
- * Read from the decision log, so it covers every path that writes -- typed
- * commands, the agent, approvals, watches -- and says which one it was.
+ * Read from the decision log, so it covers every path that writes (typed
+ * commands, the agent, approvals, watches) and says which one it was.
  */
 export async function activitySince(hours = 24, { now = Date.now() } = {}) {
   const since = new Date(now - hours * 3_600_000).toISOString();

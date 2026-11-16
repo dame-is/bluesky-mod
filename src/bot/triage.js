@@ -23,8 +23,8 @@
 //     vetoed at the write.
 //
 // A LABEL IS NOT A BAND. Nothing here may move an account between bands. Bands
-// stay reproducible -- re-run score.js against the snapshot and you get the same
-// answer -- which is what keeps the decision log meaningful years later. A model
+// stay reproducible (re-run score.js against the snapshot and you get the same
+// answer), which is what keeps the decision log meaningful years later. A model
 // verdict is not reproducible by anyone, including us, so it is stored as a
 // second and weaker axis with its evidence attached.
 
@@ -52,7 +52,7 @@ const POSTS_PER_CALL = 25;
 /**
  * Texts per model call.
  *
- * Was 60, which took ~70 seconds and came back with 42 of them labelled -- the
+ * Was 60, which took ~70 seconds and came back with 42 of them labelled: the
  * model loses the thread of a long numbered list, and every unlabelled row is
  * one that has to be paid for again next run. 20 is both faster to return and
  * more reliable per item.
@@ -65,7 +65,7 @@ const PER_CALL = 20;
  * Measured: one call and twelve concurrent calls take about the same wall time
  * (4.7s vs 5.4s on the same input), so the gateway is not the constraint and a
  * wave costs roughly what its slowest member costs. Sized so PER_RUN is ONE
- * wave -- two waves of six turned a 90-second job into a three-minute one for
+ * wave. Two waves of six turned a 90-second job into a three-minute one for
  * no reason, and on a shared queue that is three minutes of not answering
  * anyone else.
  */
@@ -87,7 +87,7 @@ const KINDS = new Set(['quote', 'reply', 'threadReply']);
  * The at:// URI of the engagement whose text is worth reading.
  *
  * Likes and reposts carry no words, so there is nothing to read and nothing to
- * label -- which is itself a useful answer, and why `none` is reported
+ * label, which is itself a useful answer, and why `none` is reported
  * separately from `neutral` rather than lumped in with it.
  */
 export function evidenceUriFor(row) {
@@ -108,7 +108,7 @@ function planUri(plan) {
 /**
  * Fill in evidence for a plan made before there was anywhere to put it.
  *
- * Re-harvests, which is the expensive thing evidence_uri exists to avoid -- but
+ * Re-harvests, which is the expensive thing evidence_uri exists to avoid, but
  * paying it once beats telling someone to send the post again, which is the
  * complaint that produced half of this file.
  */
@@ -378,7 +378,7 @@ export async function runTriage(
     .filter((r) => r.text);
 
   // POSTS THAT ARE GONE GET MARKED, NOT RETRIED. The AppView answered about
-  // these and did not return them -- deleted, or hidden from us -- so no future
+  // these and did not return them (deleted, or hidden from us), so no future
   // run will ever see them either. Left pending they would sit in `remaining`
   // forever, so every reply would say "54 left, send it again" and every run
   // would label none of them. `gone` is a fact about the record, not a reading
@@ -675,7 +675,7 @@ export async function reviewTriage(plan, label, { limit = 10 } = {}) {
   });
 
   // ALREADY ON THE LIST MEANS ALREADY DECIDED. Without this the review showed
-  // the same ten quotes after they had been added -- re-asking a question that
+  // the same ten quotes after they had been added, re-asking a question that
   // was answered, and making a menu that said "add all of these" about accounts
   // that were already added. `did.asc` made it the SAME ten every time, which
   // is what turned a stale filter into an obviously broken one.
@@ -685,7 +685,7 @@ export async function reviewTriage(plan, label, { limit = 10 } = {}) {
   // Most connected first, the order used everywhere else a human reads a queue:
   // if attention runs out halfway down, it ran out in the right place. 231
   // quotes do not get read in a DM and pretending otherwise would be the lie
-  // this menu is here to avoid -- so what follows is a spot check on the
+  // this menu is here to avoid. So what follows is a spot check on the
   // labelling, and the accounts whose misreading would cost most come first.
   const sorted = pending.sort((a, b) => (b.trust ?? 0) - (a.trust ?? 0));
 

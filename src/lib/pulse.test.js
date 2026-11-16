@@ -295,7 +295,7 @@ describe('circleWindow', () => {
   it('collapses a post seen from several members, keeping every amplifier', async () => {
     // The bug the first live run exposed. One post reposted by two members
     // arrived twice, took two of the three sample slots its author was allowed,
-    // and inflated the post count -- so the digest measured reposting rather
+    // and inflated the post count, so the digest measured reposting rather
     // than conversation. The duplicate is signal, not noise: how many of the
     // circle passed something on is the most useful number in a follow-graph
     // digest, so the copies collapse into one post that carries the list.
@@ -524,7 +524,7 @@ describe('selectPosts', () => {
   it('ranks what was amplified by how many passed it on, not by global likes', () => {
     // The second bug the live run exposed. Ranking both groups together by
     // engagement put four reposts of thirteen-thousand-like posts at the top
-    // of the digest -- a correct ranking of the wrong thing, which rebuilds
+    // of the digest: a correct ranking of the wrong thing, which rebuilds
     // the network-wide answer the owner already has and calls it their circle.
     const viral = normalisePost(
       item({

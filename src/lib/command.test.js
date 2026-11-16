@@ -399,7 +399,7 @@ describe('undo and history', () => {
   });
 
   it('defaults a bare undo to the last plan', () => {
-    // This answered `No plan with code null.` -- a sentence about an internal
+    // This answered `No plan with code null.`, a sentence about an internal
     // variable. Undo is the one verb that may default, because it only ever
     // takes people OFF the list; guessing wrong un-blocks someone rather than
     // blocking them.
@@ -510,8 +510,8 @@ describe('an attached post names its author', () => {
   it('acts on the author when the message says nothing else', () => {
     // The reported case: sharing a post from the app and captioning it "block"
     // was answered with "name the account and I will do it", while PASTING the
-    // same post's link blocked the author immediately -- a post URL contains
-    // /profile/<handle>/. One intent, two answers, decided by which affordance
+    // same post's link blocked the author immediately (a post URL contains
+    // /profile/<handle>/). One intent, two answers, decided by which affordance
     // the client offered.
     for (const text of ['block', 'block this', 'block them', 'list add']) {
       expect(parseCommand(text, { embedUri }), text).toMatchObject({
@@ -524,7 +524,7 @@ describe('an attached post names its author', () => {
 
   it('acts on ordinary ways of saying "whoever wrote this"', () => {
     // The first version of this was a whitelist and refused anything it did
-    // not recognise, so "block em" got a lecture about naming the account --
+    // not recognise, so "block em" got a lecture about naming the account,
     // with the account attached to the message.
     for (const text of [
       'block em',
@@ -835,7 +835,7 @@ describe('followUpsFor with cited posts', () => {
 
   it('ties each post option to its marker, so two by one author differ', () => {
     // Without it, two cited posts from the same account produce two identical
-    // options -- the menu that teaches you to stop reading menus.
+    // options: the menu that teaches you to stop reading menus.
     const sameAuthor = [
       { n: 1, url: 'https://bsky.app/profile/a.test/post/3aaa' },
       { n: 2, url: 'https://bsky.app/profile/a.test/post/3bbb' },

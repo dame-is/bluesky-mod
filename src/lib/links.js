@@ -62,7 +62,7 @@ export function ownLinkFacets(text, { allow = [] } = {}) {
   //
   // A digest cites posts, and a bsky.app URL this codebase built out of an
   // at:// URI is indistinguishable by shape from one the analyst copied out of
-  // a stranger's post text -- which is the failure the comment at the top of
+  // a stranger's post text, which is the failure the comment at the top of
   // this file is about. So the caller passes the exact URLs it built, from the
   // URIs the digest tool actually returned, and nothing else is matched. The
   // set is per message and computed from a tool result, never from prose.

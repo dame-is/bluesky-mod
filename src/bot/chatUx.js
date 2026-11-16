@@ -20,7 +20,7 @@
 //   model in between; "no" or 👎 drops it. Anything else lets it lapse.
 //
 //   THE POST CARD. A post with no words gets one compact summary and answers to
-//   words -- author, likers, unknowns, everyone, hostile -- instead of numbers.
+//   words (author, likers, unknowns, everyone, hostile) instead of numbers.
 
 import { select, upsert } from './db.js';
 
@@ -82,7 +82,7 @@ export async function settle(chat, convoId, messageId, outcome) {
  *
  * `background` marks a question nobody was talking to the bot about: a watch
  * digest or an alert, sent on a timer. There is one question per convo, so
- * those must never replace one asked in conversation -- see questionOpen.
+ * those must never replace one asked in conversation. See questionOpen.
  */
 export async function savePending(
   convoId,

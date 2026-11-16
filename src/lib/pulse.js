@@ -61,7 +61,7 @@ const MAX_FEED_PAGES = 12;
 /**
  * Size the FIRST page to the window rather than always asking for 100.
  *
- * Bandwidth is the real cost of this read, and an author feed is fat -- about
+ * Bandwidth is the real cost of this read, and an author feed is fat: about
  * 2.9 KB of JSON per post once embeds, labels and viewer state are in it.
  * MEASURED in the original deployment, against a circle of a couple of hundred
  * accounts over a 24h window:
@@ -73,7 +73,7 @@ const MAX_FEED_PAGES = 12;
  * That circle averaged 3.4 posts per account per day, so a page sized for the
  * average plus headroom is right and a page sized for the busiest account is
  * 14 MB of posts nobody reads. Fifteen, and the eight accounts that post more
- * than that pay for a second request -- about 2.3 MB between them, which still
+ * than that pay for a second request (about 2.3 MB between them), which still
  * lands the whole refresh at half the cost of never paging at all.
  *
  * The 0.6-per-hour rate is that measured average, rounded up. It is a number
@@ -223,8 +223,8 @@ export function normalisePost(item) {
     quotes: post.quoteCount ?? 0,
     isReply: Boolean(record.reply),
     // Whether THIS COPY arrived as a repost, and who by. A post can reach the
-    // fan-out several times -- once from its author and once from every member
-    // who reposted it -- so these are properties of the copy, and `mergeCopy`
+    // fan-out several times (once from its author and once from every member
+    // who reposted it), so these are properties of the copy, and `mergeCopy`
     // below folds them into one post with a list of amplifiers.
     viaRepost: Boolean(reposter),
     repostedBy: reposter?.handle || reposter?.did || null,
@@ -255,9 +255,9 @@ export function engagementOf(p) {
  *
  * The duplicate is not noise, though, so it is not simply dropped. How many of
  * the circle amplified something is the single most useful number in a digest
- * of a follow graph -- much more useful than the like count, which is a fact
- * about Bluesky rather than about the owner's circle. So the copies collapse into
- * one post carrying the list of who amplified it.
+ * of a follow graph, much more useful than the like count, which is a fact
+ * about Bluesky rather than about the owner's circle. So the copies collapse
+ * into one post carrying the list of who amplified it.
  *
  * `said` wins over amplified on merge: if ANY copy came straight from its
  * author's feed, a member wrote it, whoever else passed it on.
@@ -488,7 +488,7 @@ export async function feedWindow({
  *
  * Everything here is arithmetic on public numbers. It is separate from the post
  * sample below because the model reading eighty posts should not also be the
- * thing that tells the owner how many there were -- it would get it approximately
+ * thing that tells the owner how many there were. It would get it approximately
  * right, which is the worst kind of right for a count.
  *
  * SAID AND AMPLIFIED ARE COUNTED APART. A member writing something and a member
@@ -638,7 +638,7 @@ function ago(at, now) {
 /**
  * What a post IS when it has no words.
  *
- * An image post, a video, a bare quote -- `record.text` is an empty string and
+ * An image post, a video, a bare quote: `record.text` is an empty string and
  * the post is still a post. The first live run rendered two of those as blank
  * lines inside the sample, which tells the model nothing and invites it to
  * describe a post it cannot see. Naming the shape is honest and is the most
@@ -656,7 +656,7 @@ function describeEmpty(p) {
  *
  * The marker is how a digest points at a specific post without spending its
  * reply budget on a 60-character permalink per item. The model writes `[7]`,
- * and the caller swaps that for the real link -- so the model chooses WHICH
+ * and the caller swaps that for the real link, so the model chooses WHICH
  * post it is talking about and code decides what a marker resolves to. A
  * number that indexes a list the tool returned cannot name a post the digest
  * never saw, which is the property that lets the link be rendered tappable at
@@ -690,7 +690,7 @@ function renderOne(p, now, chars, n) {
  * The post sample as one block of text.
  *
  * Returned as a plain string and fenced by the CALLER, because the fence is the
- * analyst's concept and lives in agent.js -- the same split mcp.js uses. Every
+ * analyst's concept and lives in agent.js (the same split mcp.js uses). Every
  * character of this is written by other people.
  *
  * The two groups are LABELLED rather than interleaved. A model handed one list

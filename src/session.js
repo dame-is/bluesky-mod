@@ -6,8 +6,8 @@
 // poll for eight hours failed with "Authentication Required", because nothing
 // here ever logged in again.
 //
-// So a dead session is now noticed two ways -- the library's 'expired' event,
-// and an authentication error out of any job -- and replaced: botAgent()
+// So a dead session is now noticed two ways (the library's 'expired' event,
+// and an authentication error out of any job) and replaced: botAgent()
 // resumes from the stored session if it still works, and logs in with the app
 // password if not. Retries back off from 30 seconds to 15 minutes,
 // because createSession is capped at 30 per 5 minutes and 300 a day, and a

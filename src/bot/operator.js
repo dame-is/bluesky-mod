@@ -37,8 +37,8 @@
 // model's call now, steered by the prompt below. That is the point of the mode.
 //
 // TWO WAVES (see tiers.js). The turn runs on the cheap model. Every write it
-// tries is first put to an evaluation model as a typed question -- "did the
-// owner ask for exactly this?" -- over a description CODE wrote, including
+// tries is first put to an evaluation model as a typed question ("did the
+// owner ask for exactly this?") over a description CODE wrote, including
 // where each target came from; an uncertain answer goes to the stronger model,
 // and a no comes back to the agent as "ask the owner". The stronger model also
 // takes the whole turn when the cheap one hands off, fails without acting, or
@@ -96,7 +96,7 @@ const num = (v, d) => (v == null || v === '' ? d : Number(v));
  * Tool-loop steps for one agent turn.
  *
  * Higher than the analyst's 12. "Block the hostile quoters" is scan, triage,
- * maybe triage again, review, approve, and a reply -- and each atmosphere read
+ * maybe triage again, review, approve, and a reply, and each atmosphere read
  * along the way is a step too.
  */
 export const OPERATOR_STEPS = num(process.env.MOD_OPERATOR_STEPS, 24);

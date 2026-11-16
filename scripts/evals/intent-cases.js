@@ -5,8 +5,8 @@
 // real DM: this repository is public and the bot's conversations are not.
 // Every handle is invented. Plan codes are shaped like real ones.
 //
-// Each case is the raw facts -- what the owner said, what the bot said last,
-// and the write the agent proposed -- and the runner turns them into the judge's
+// Each case is the raw facts (what the owner said, what the bot said last,
+// and the write the agent proposed), and the runner turns them into the judge's
 // input through the same functions production uses (actionText, accountPhrase,
 // planPhrase, intentState). So what is measured is what runs.
 //
