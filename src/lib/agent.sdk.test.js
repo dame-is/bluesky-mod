@@ -1,30 +1,24 @@
-// The test that would have caught it.
-//
-// Every other test in agent.test.js injects a fake `generate`, which means they
-// validate the call shape against themselves and will happily agree with a shape
-// the real SDK rejects. That is exactly what happened: moving the system prompt
-// into `messages` to carry a cache marker passed every other test and then
-// failed on every live turn with
-//
-//   Invalid prompt: System messages are not allowed in the prompt or messages
-//   fields. Use the instructions option instead.
-//
-// So this one calls the REAL generateText against a mock MODEL. It does not
-// check what the analyst says; it checks that the SDK accepts how we ask.
+// The other tests in agent.test.js inject a fake `generate`, so they check the
+// call shape only against themselves. These run the real generateText against
+// a mock model, to check that the SDK accepts how we ask (ai@7 rejects a system
+// message inside `messages`, for one) and that we read its steps correctly.
 
 import { describe, it, expect } from 'vitest';
 import { generateText } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { answer, systemPromptFor } from './agent.js';
 
-const model = new MockLanguageModelV4({
-  doGenerate: async () => ({
-    finishReason: 'stop',
-    usage: { inputTokens: 10, outputTokens: 3 },
-    content: [{ type: 'text', text: 'ok' }],
-    warnings: [],
-  }),
+const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } };
+const stop = { unified: 'stop', raw: undefined };
+
+const reply = (text) => ({
+  finishReason: stop,
+  usage,
+  content: [{ type: 'text', text }],
+  warnings: [],
 });
+
+const model = new MockLanguageModelV4({ doGenerate: async () => reply('ok') });
 
 const io = {
   preflight: async () => ({}),
@@ -47,18 +41,10 @@ describe('the real SDK accepts how we call it', () => {
     expect(out.text).toBe('ok');
   });
 
-  it('takes a cache-marked system message on an anthropic model', async () => {
-    // cacheHint only fires for anthropic/*, so the marked shape is only ever
-    // exercised on that path. Passing the mock model with an anthropic-looking
-    // id is the only way to reach it without a live call.
+  it('carries the cache marker to an anthropic model', async () => {
     const marked = new MockLanguageModelV4({
       modelId: 'anthropic/claude-opus-5',
-      doGenerate: async () => ({
-        finishReason: 'stop',
-        usage: { inputTokens: 1, outputTokens: 1 },
-        content: [{ type: 'text', text: 'ok' }],
-        warnings: [],
-      }),
+      doGenerate: async () => reply('ok'),
     });
     const out = await answer({
       generate: generateText,
@@ -69,6 +55,11 @@ describe('the real SDK accepts how we call it', () => {
       guidance: 'Always give posting frequency.',
     });
     expect(out.text).toBe('ok');
+    const [system] = marked.doGenerateCalls[0].prompt;
+    expect(system.role).toBe('system');
+    expect(system.providerOptions).toEqual({
+      anthropic: { cacheControl: { type: 'ephemeral' } },
+    });
   });
 
   it('takes the public surface too', async () => {
@@ -81,5 +72,51 @@ describe('the real SDK accepts how we call it', () => {
     });
     expect(out.text).toBe('ok');
     expect(systemPromptFor('post')).toContain('THIS REPLY IS PUBLIC');
+  });
+
+  it('reads the digest a real tool loop ran', async () => {
+    let calls = 0;
+    const looping = new MockLanguageModelV4({
+      doGenerate: async () => {
+        calls += 1;
+        if (calls > 1) return reply('done');
+        return {
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage,
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'c1',
+              toolName: 'network_pulse',
+              input: JSON.stringify({ source: 'circle', hours: 72 }),
+            },
+          ],
+          warnings: [],
+        };
+      },
+    });
+    const sample = [{ n: 1, url: 'https://bsky.app/profile/a.test/post/3x' }];
+    const pulse = async () => ({
+      slice: {},
+      window: {},
+      coverage: {},
+      totals: { topAuthors: [], topDomains: [{ domain: 'github.com' }] },
+      sample,
+      rendered: '',
+    });
+    const out = await answer({
+      generate: generateText,
+      model: looping,
+      message: 'what is my circle on about',
+      io: { ...io, pulse },
+    });
+    expect(out.text).toBe('done');
+    expect(out.pulses).toEqual([
+      {
+        args: { source: 'circle', hours: 72 },
+        focusTerms: ['github.com'],
+        sample,
+      },
+    ]);
   });
 });

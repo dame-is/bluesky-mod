@@ -1,74 +1,88 @@
-// The Atmosphere MCP server, as tools the analyst can call.
+// The Atmosphere MCP server, as a tool the analyst can call.
 //
-// The Atmosphere MCP server at aturi.to exposes 38 read tools over the atproto
-// network: author feeds, threads, post search, identity history, lexicon
-// activity, the atproto docs. Wiring it in is what turns the analyst
-// from "scores a DID" into something that can answer "what has this person been
-// posting about", which is a different and more useful question.
+// aturi.to publishes read tools over the atproto network: author feeds,
+// threads, post search, identity history, lexicon activity, the atproto docs.
+// They let the analyst answer "what has this person been posting about", not
+// only "what band are they in".
 //
-// WHO IS TRUSTED HERE, AND WHO IS NOT. The server is trusted to report what the
-// network says; the CONTENT it returns is not. Post text, bios and display
-// names are written by the people being analysed, and this is the change that
-// puts a lot more of that writing in front of the model than the handful of
-// handles it saw before. So every result goes back fenced, whole, as data.
+// The server is trusted to report what the network says. The content it
+// returns is not: post text, bios and display names are written by the people
+// being analysed, so every result goes back to the model fenced, whole, as
+// data.
 //
-// THE GUARD IS AN ALLOW-PATTERN, NOT A DENY-PATTERN. A denylist of write verbs
-// only protects against the writes someone thought of; this file does not
-// control what aturi.to publishes next, and a `create_record` added there next
-// month would walk straight into a system whose stated rule is that the analyst
-// can only look. So a tool is available only if its name begins with a verb that
-// reads. Everything else is dropped, loudly enough to see in the log.
+// A tool is exposed only if its name starts with a verb that reads. An
+// allow-pattern holds up when the server publishes something new, where a
+// denylist only covers the writes someone thought of. The client sends no
+// credentials, so the server cannot act as the bot either way; the pattern
+// keeps the analyst's rule, that it only looks, true whatever is published.
 //
-// Note `list_` is a READ here and a write in buildTools' guard. Both are right:
-// in MCP `list_records` enumerates, and in this codebase "listing someone" means
-// adding them to a modlist. The two namespaces keep their own vocabularies, and
-// conflating them is how you would end up allowing the wrong one.
+// `list_` is a read here: in MCP, `list_records` enumerates. In the bot's own
+// tool names "list" means adding someone to the block list, which is why
+// agent.test.js treats it as a write. Each guard keeps its own vocabulary.
 
-import { jsonSchema, dynamicTool, tool } from 'ai';
+import { tool } from 'ai';
 import { z } from 'zod';
 import { untrusted } from './agent.js';
 
-export const ATMOSPHERE_URL = 'https://aturi.to/api/mcp';
+const ATMOSPHERE_URL = 'https://aturi.to/api/mcp';
 
 /** A tool is exposed only if it starts with a verb that reads. */
 export const READ_VERB = /^(get|list|search|resolve|describe|read|sample)_/;
 
 /**
- * Per-call ceiling.
- *
- * Most calls answer in about a second, but `sample_jetstream` opens a live
- * firehose window and returns when it decides to. A tool loop that can spend
- * eight steps is a tool loop that can spend eight of those, and the person
- * waiting is watching a DM thread do nothing.
+ * Per-call ceiling. Most calls answer in about a second, but
+ * `sample_jetstream` holds a live firehose window open, and a tool loop can
+ * make several calls while the owner watches a DM thread do nothing.
  */
 const CALL_TIMEOUT_MS = 20_000;
 
-/** Streamable HTTP answers as SSE; plain JSON is also valid. Accept both. */
-function parseBody(text) {
-  const data = text
-    .split('\n')
-    .filter((l) => l.startsWith('data:'))
-    .map((l) => l.slice(5).trim())
-    .join('');
-  return JSON.parse(data || text);
+/**
+ * The JSON-RPC message answering request `id`. Streamable HTTP may answer with
+ * plain JSON or with an SSE stream, and a stream can carry notifications ahead
+ * of the response, so each SSE event is read on its own.
+ */
+function parseBody(text, id) {
+  const events = text
+    .split(/\r?\n\r?\n/)
+    .map((block) =>
+      block
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trim())
+        .join('\n'),
+    )
+    .filter(Boolean);
+  if (!events.length) return JSON.parse(text);
+  for (const data of events) {
+    let message;
+    try {
+      message = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    // An error about a request the server could not read carries a null id.
+    if (message?.id === id || (message?.error && message.id == null)) {
+      return message;
+    }
+  }
+  throw new Error('no response in the event stream');
 }
 
 /**
- * A client for a STATELESS MCP server.
- *
- * aturi.to returns no `Mcp-Session-Id` and accepts `tools/call` with no prior
- * handshake, so there is no session to keep, resume or expire, which is why
- * this is forty lines of JSON-RPC rather than a dependency. If the server ever
- * starts issuing session ids, this is the file that has to learn about them.
+ * A client for a stateless MCP server. aturi.to issues no `Mcp-Session-Id` and
+ * accepts `tools/call` with no handshake, so there is no session to keep, and
+ * a few lines of JSON-RPC do the job of a dependency. A server that issues
+ * session ids would need this to track them.
  */
 export function createAtmosphereClient({
   url = ATMOSPHERE_URL,
   fetchImpl = fetch,
   timeoutMs = CALL_TIMEOUT_MS,
 } = {}) {
-  let id = 0;
+  let nextId = 0;
 
   async function rpc(method, params) {
+    const id = (nextId += 1);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -78,13 +92,18 @@ export function createAtmosphereClient({
           'Content-Type': 'application/json',
           Accept: 'application/json, text/event-stream',
         },
-        body: JSON.stringify({ jsonrpc: '2.0', id: (id += 1), method, params }),
+        body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
         signal: controller.signal,
       });
       if (!res.ok) {
         throw new Error(`atmosphere ${method} failed: ${res.status}`);
       }
-      const body = parseBody(await res.text());
+      let body;
+      try {
+        body = parseBody(await res.text(), id);
+      } catch (err) {
+        throw new Error(`atmosphere ${method}: ${err.message}`);
+      }
       if (body.error) {
         throw new Error(
           `atmosphere ${method}: ${body.error.message || JSON.stringify(body.error)}`,
@@ -113,11 +132,9 @@ export function flatten(result) {
 }
 
 /**
- * A one-line summary for the catalogue.
- *
- * These descriptions are written as prose ("You have an account and want...")
- * and run to 435 characters. The catalogue only needs to be enough to pick from,
- * so it takes the first clause and stops.
+ * A one-line summary for the catalogue. The server's descriptions are prose
+ * ("You want an account's recent posts...") several hundred characters long,
+ * and the catalogue needs only enough to pick from.
  */
 function summarise(description) {
   const first = String(description || '')
@@ -128,20 +145,15 @@ function summarise(description) {
 }
 
 /**
- * ONE tool instead of thirty-eight.
+ * The allowed remote tools as ONE dispatcher tool. Tool definitions are
+ * resent on every step of the loop, and the server's dozens of schemas would
+ * cost thousands of tokens a step, including on turns that never touch the
+ * network. The dispatcher carries a catalogue of names and fetches a schema
+ * only on request, so an unfamiliar tool costs one extra step and every tool
+ * stays reachable.
  *
- * Measured: exposing all 38 as separate tools cost 7,346 tokens of definitions,
- * resent on every step of the loop. Real usage went from ~1,900 input tokens a
- * turn to ~15,800 the day it landed. The tools are worth having; paying for all
- * of their schemas on every step of every turn, including the turns that never
- * touch the network, is not.
- *
- * So the model gets a dispatcher carrying a catalogue of names, and fetches a
- * schema only for the tool it actually wants. An unfamiliar tool costs one extra
- * step; a familiar one costs none. Every tool stays reachable.
- *
- * `describe` is also the error path: a call with bad arguments comes back with
- * the schema rather than just a complaint, so the retry has what it needs.
+ * A failed call comes back with the tool's schema, so a retry after bad
+ * arguments has what it needs.
  */
 export function bridgeTools(listed, { call, log = () => {} }) {
   const allowed = new Map();
@@ -158,6 +170,7 @@ export function bridgeTools(listed, { call, log = () => {} }) {
   if (skipped.length) {
     log('Atmosphere tools withheld, not a read verb', { skipped });
   }
+  log('Atmosphere tools loaded', { count: allowed.size });
   if (!allowed.size) return {};
 
   const catalogue = [...allowed.values()]
@@ -197,15 +210,11 @@ export function bridgeTools(listed, { call, log = () => {} }) {
         if (wantSchema) return describe(t);
         try {
           const result = await call(name, args || {});
-          // Fenced WHOLE. The structural half (counts, URIs, timestamps) is
-          // harmless to read as data, and splitting it from the prose half so
-          // one could be trusted would mean deciding which fields are safe on
-          // a schema this file does not own.
+          // Fenced whole. Splitting the structural fields from the prose to
+          // trust one half would mean judging which fields are safe on a
+          // schema this file does not own.
           return untrusted(`atmosphere:${name}`, flatten(result));
         } catch (err) {
-          // Hand back the schema with the failure: a bad-arguments error that
-          // does not say what the arguments are costs another round trip to
-          // find out.
           return {
             error: `The ${name} lookup failed: ${err.message}`,
             ...describe(t),
@@ -217,11 +226,10 @@ export function bridgeTools(listed, { call, log = () => {} }) {
 }
 
 /**
- * Every allowed Atmosphere tool, ready to merge into the analyst's toolset.
- *
- * Returns an empty object rather than throwing when the server cannot be
- * reached: the gate's own tools are the ones that matter, and losing the
- * network's colour commentary must not stop the owner getting a band back.
+ * The Atmosphere dispatcher, ready to merge into the analyst's tools. Returns
+ * an empty object when the server cannot be reached: the gate's own tools
+ * answer every scoring question, and losing the network reads must not stop
+ * the owner getting a band back.
  */
 export async function loadAtmosphereTools({
   client = createAtmosphereClient(),
@@ -229,14 +237,12 @@ export async function loadAtmosphereTools({
 } = {}) {
   try {
     const listed = await client.listTools();
-    const tools = bridgeTools(listed?.tools, {
+    return bridgeTools(listed?.tools, {
       call: (name, args) => client.callTool(name, args),
       log,
     });
-    log('Atmosphere tools loaded', { count: Object.keys(tools).length });
-    return tools;
   } catch (err) {
-    log('Atmosphere unavailable — continuing with the gate tools only', {
+    log('Atmosphere unavailable, continuing with the gate tools only', {
       err: err.message,
     });
     return {};

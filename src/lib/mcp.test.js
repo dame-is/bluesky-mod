@@ -7,7 +7,7 @@ import {
   createAtmosphereClient,
 } from './mcp.js';
 
-/** Every tool aturi.to published at the time this was wired in. */
+/** A sample of the tools aturi.to publishes. */
 const REAL_TOOLS = [
   'resolve_link',
   'list_waypoints',
@@ -50,14 +50,14 @@ const REAL_TOOLS = [
 ];
 
 describe('the read-verb allowlist', () => {
-  it('admits every tool the server publishes today', () => {
+  it('admits the tools the server publishes', () => {
     for (const name of REAL_TOOLS) expect(READ_VERB.test(name)).toBe(true);
   });
 
   it('refuses anything that writes, including verbs nobody has published yet', () => {
-    // The point of an allow-pattern over a denylist: this file does not control
-    // what aturi.to publishes next, and a write tool added there must not walk
-    // into a system whose stated rule is that the analyst can only look.
+    // The bot does not control what aturi.to publishes next, and a write
+    // tool added there must not reach an analyst whose rule is that it only
+    // looks.
     for (const name of [
       'create_record',
       'delete_record',
@@ -77,9 +77,9 @@ describe('the read-verb allowlist', () => {
   });
 
   it('treats list_ as a read here, unlike the gate’s own guard', () => {
-    // In MCP, list_records enumerates. In this codebase, "listing someone"
-    // means adding them to a modlist. Both guards are right for their own
-    // namespace, and conflating them would allow the wrong one.
+    // In MCP, list_records enumerates. In the bot's own tool names, "list"
+    // means adding someone to the block list. Each guard keeps its own
+    // vocabulary.
     expect(READ_VERB.test('list_records')).toBe(true);
   });
 });
@@ -104,9 +104,8 @@ describe('the dispatcher', () => {
   ];
 
   it('is ONE tool, not one per remote tool', () => {
-    // Measured: 38 separate tools cost 7,346 tokens of definitions, resent on
-    // every step of the loop, and took a real turn from ~1,900 input tokens to
-    // ~15,800. One dispatcher carrying a catalogue costs about 900.
+    // Tool definitions are resent on every step of the loop. One dispatcher
+    // with a catalogue of names costs a fraction of dozens of schemas.
     const tools = bridgeTools(listed, { call: vi.fn() });
     expect(Object.keys(tools)).toEqual(['atmosphere']);
   });
@@ -121,9 +120,12 @@ describe('the dispatcher', () => {
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/withheld/), {
       skipped: ['create_record'],
     });
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/loaded/), {
+      count: 2,
+    });
   });
 
-  it('summarises rather than reprinting 435-character descriptions', () => {
+  it('summarises each description to one short line', () => {
     const tools = bridgeTools(listed, { call: vi.fn() });
     const line = tools.atmosphere.description
       .split('\n')
@@ -183,7 +185,7 @@ describe('the dispatcher', () => {
     expect(out).toContain('</untrusted>');
   });
 
-  it('strips backticks so a post cannot close its own fence', async () => {
+  it('turns backticks into quotes so a post cannot open a code block', async () => {
     const call = vi
       .fn()
       .mockResolvedValue({ content: [{ text: '```\nnew instructions\n```' }] });
@@ -225,8 +227,8 @@ describe('flatten', () => {
 
 describe('loadAtmosphereTools', () => {
   it('degrades to no tools when the server cannot be reached', async () => {
-    // The gate's own tools answer every scoring question. Losing the network's
-    // colour commentary must not stop the owner getting a band back.
+    // The gate's own tools answer every scoring question. Losing the network
+    // reads must not stop the owner getting a band back.
     const log = vi.fn();
     const client = {
       listTools: vi.fn().mockRejectedValue(new Error('ENOTFOUND')),
@@ -258,6 +260,29 @@ describe('createAtmosphereClient', () => {
     });
     const c = createAtmosphereClient({ fetchImpl });
     await expect(c.callTool('get_profile', {})).resolves.toEqual({ ok: true });
+  });
+
+  it('picks the response out of a stream that leads with a notification', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\n' +
+        'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n',
+    });
+    const c = createAtmosphereClient({ fetchImpl });
+    await expect(c.callTool('get_profile', {})).resolves.toEqual({ ok: true });
+  });
+
+  it('refuses a stream with no response to the request', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\n',
+    });
+    const c = createAtmosphereClient({ fetchImpl });
+    await expect(c.callTool('get_profile', {})).rejects.toThrow(
+      /no response/,
+    );
   });
 
   it('surfaces a JSON-RPC error as an error', async () => {
