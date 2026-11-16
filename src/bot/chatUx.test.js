@@ -13,9 +13,11 @@ const {
   takeDueSummaries,
   resetQuiet,
   confirmLine,
+  readPending,
   react,
   settle,
 } = await import('./chatUx.js');
+const { select } = await import('./db.js');
 
 const PLAN = {
   code: '1c2d3e4f',
@@ -59,6 +61,15 @@ describe('the post card', () => {
       'Reply with: author · likers · unknowns · everyone · hostile',
     );
     expect(text.length).toBeLessThan(400);
+  });
+
+  it('counts a direct reply once', () => {
+    // A direct reply to a first post links to it as parent and as root.
+    const text = renderCard({
+      ...PLAN,
+      engagements: { reply: 3, threadReply: 5 },
+    });
+    expect(text).toContain('34 accounts engaged: 5 replies.');
   });
 
   it('offers only what would do something', () => {
@@ -137,6 +148,16 @@ describe('confirmations and reactions', () => {
     expect(confirmLine([])).toBe('');
   });
 
+  it('treats a question with no readable time as expired', async () => {
+    const commands = ['list add @a.test'];
+    select.mockResolvedValueOnce([{ pending: { commands } }]);
+    expect(await readPending('c')).toBe(null);
+    select.mockResolvedValueOnce([
+      { pending: { commands, created_at: new Date().toISOString() } },
+    ]);
+    expect(await readPending('c')).toMatchObject({ commands });
+  });
+
   it('never throws over a reaction', async () => {
     const chat = {
       chat: {
@@ -183,8 +204,8 @@ describe('a card on a post mostly dealt with already', () => {
         likers: 0,
       },
     };
-    // Fifteen of sixteen are on the list: no likers, no unknowns, and
-    // "everyone" means the one CONNECTED account that is left.
+    // All but one CONNECTED account are on the list: no likers, no unknowns,
+    // and "everyone" means that one account.
     expect(cardChoices(plan).map((o) => o.key)).toEqual([
       'everyone',
       'hostile',

@@ -1,14 +1,9 @@
-// How a DM turn feels, as opposed to what it does to the list.
-//
-// Built from how the bot was actually used in its first weeks: almost half the
-// requests were "block" plus a shared post, often twenty in an evening, each
-// taking 8-15 seconds and leaving a receipt behind; a bare post was answered
-// from a numbered menu; and agent mode turned "yes" into a second full model
-// turn. So:
+// How a DM turn feels, as opposed to what it does to the list. The common
+// request is a quick "block" plus a shared post, often several in a row, so
+// that path costs no extra messages and no model call.
 //
 //   REACTIONS, NOT ACKS. 👀 on the owner's message when it is picked up, ✅ when
-//   something changed, ❌ when it failed. No "Thinking." message, and a plain
-//   block needs no reply at all.
+//   something changed, ❌ when it failed. A plain block needs no reply at all.
 //
 //   THE BURST SUMMARY. Quiet blocks are collected, and once a minute passes
 //   without another, one message lists them: who, how many were already on the
@@ -30,9 +25,9 @@ export const YES_REACTIONS = new Set(['👍', '✅', '👌']);
 export const NO_REACTIONS = new Set(['👎', '❌']);
 
 /** How long a stored question stays answerable. */
-export const PENDING_TTL_MS = 30 * 60_000;
+const PENDING_TTL_MS = 30 * 60_000;
 /** How long a burst has to go quiet before it is summarised. */
-export const QUIET_MS = 60_000;
+const QUIET_MS = 60_000;
 
 /**
  * React to a message. Never throws: a reaction that did not land is not a
@@ -50,7 +45,7 @@ export async function react(chat, convoId, messageId, value) {
   }
 }
 
-export async function unreact(chat, convoId, messageId, value) {
+async function unreact(chat, convoId, messageId, value) {
   const convo = chat?.chat?.bsky?.convo;
   if (!convo?.removeReaction || !messageId) return false;
   try {
@@ -102,7 +97,10 @@ export async function savePending(
   ]);
 }
 
-/** The live question for this convo, or null. */
+/**
+ * The live question for this convo, or null. A question whose age cannot be
+ * read counts as expired: a "yes" should never run something stale.
+ */
 export async function readPending(convoId, { now = Date.now() } = {}) {
   const rows = await select('dm_choice', {
     select: 'pending',
@@ -110,17 +108,17 @@ export async function readPending(convoId, { now = Date.now() } = {}) {
   }).catch(() => []);
   const p = rows?.[0]?.pending;
   if (!p?.commands?.length) return null;
-  if (now - Date.parse(p.created_at) > PENDING_TTL_MS) return null;
+  if (!(now - Date.parse(p.created_at) <= PENDING_TTL_MS)) return null;
   return p;
 }
 
 /**
  * Is a question from the conversation still waiting for the owner's answer?
  *
- * The timed loops ask this before saying anything that asks something. A digest
- * that stored its own question over one the agent had just asked meant a "yes"
- * typed a minute later ran the digest's bulk approve instead, and a 👍 on the
- * original question matched nothing and did nothing.
+ * The timed loops ask this before saying anything that asks something. There
+ * is one question per convo, so a digest that stored its own would make a
+ * "yes" run the digest's approve instead of what the owner was asked, and a 👍
+ * on the original question would match nothing.
  */
 export async function questionOpen(convoId, { now = Date.now() } = {}) {
   const p = await readPending(convoId, { now });
@@ -237,12 +235,16 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
     lines.push(`@${a.handle || a.did} (${facts.join(', ')}) wrote this.`);
   }
   const e = plan.engagements || {};
+  // A direct reply to a thread's first post links to it as both parent and
+  // root, so it is counted under `reply` and `threadReply`. On a first post
+  // every reply has it as root; on a post deeper in a thread none do. The
+  // larger count is the number of replies either way.
+  const replies = Math.max(e.reply || 0, e.threadReply || 0);
   const parts = [
     e.like && plural(e.like, 'like', 'likes'),
     e.repost && plural(e.repost, 'repost', 'reposts'),
     e.quote && plural(e.quote, 'quote', 'quotes'),
-    (e.reply || e.threadReply) &&
-      plural((e.reply || 0) + (e.threadReply || 0), 'reply', 'replies'),
+    replies && plural(replies, 'reply', 'replies'),
   ].filter(Boolean);
   if (plan.total) {
     lines.push(
@@ -273,8 +275,8 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
 export function cardChoices(plan) {
   const out = [];
   const a = plan.author;
-  // Counts of who an approval could still ADD, when the scan knows them: an
-  // engager already on the list is not a reason to offer "everyone".
+  // Counts of who an approval could still ADD: an engager already on the
+  // list is no reason to offer "everyone".
   const b = plan.fresh?.byBand || plan.byBand || {};
   const e = plan.fresh
     ? { ...plan.engagements, like: plan.fresh.likers }

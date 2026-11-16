@@ -28,12 +28,9 @@ vi.mock('./db.js', () => ({
   }),
 }));
 
-const { runTriage, recheckTriage, reviewTriage } = await import('./triage.js');
+const { runTriage, reviewTriage } = await import('./triage.js');
 
-const PLAN = {
-  id: 'plan-1',
-  totals: { uri: 'at://did:plc:a/app.bsky.feed.post/1' },
-};
+const PLAN = { id: 'plan-1' };
 const POSTS = {
   'at://did:plc:p1/app.bsky.feed.post/1': 'you are a worthless idiot',
   'at://did:plc:p2/app.bsky.feed.post/2': 'this policy is cowardly',
@@ -146,6 +143,23 @@ describe('triage in two waves', () => {
     expect(label('did:plc:p2').triage).toBe('neutral');
     expect(out.remaining).toBe(1);
     expect(out.counts.hostile).toBe(0);
+    expect(out.secondWave).toMatchObject({ read: 0, failed: 1 });
+  });
+
+  it('counts a flagged post the second wave answered without labelling as not read', async () => {
+    const generate = vi.fn(async (opts) => {
+      if (opts.model === 'strong/model') {
+        return { text: 'I would rather not say.', usage: {} };
+      }
+      return labeller({ idiot: 'hostile' })(opts);
+    });
+    const out = await runTriage(PLAN, {
+      generate,
+      model: 'cheap/model',
+      escalation: 'strong/model',
+    });
+    expect(label('did:plc:p1').triage).toBe(null);
+    expect(out.secondWave).toMatchObject({ read: 0, overturned: 0, failed: 1 });
   });
 
   it('is a single pass when there is no second model', async () => {
@@ -160,90 +174,6 @@ describe('triage in two waves', () => {
       triage_model: 'cheap/model',
     });
     expect(out.secondWave).toBeUndefined();
-  });
-});
-
-describe('re-checking labels a plan already has', () => {
-  const onList = (did, quote) => ({
-    plan_id: PLAN.id,
-    did,
-    band: 'UNKNOWN',
-    triage: 'hostile',
-    triage_quote: quote,
-    triage_model: 'cheap/model',
-    acted_at: 't',
-    approved_via: 'triage:hostile',
-  });
-
-  it('changes a label only when both readers dispute it, and adds or removes nobody', async () => {
-    db.decision = [
-      onList('did:plc:p1', 'you are a worthless idiot'),
-      onList('did:plc:p2', 'this policy is cowardly'),
-      onList('did:plc:p3', 'enjoy the camps'),
-    ];
-    // Reader one is strict, reader two is not; they agree about p1 and p2.
-    const generate = vi.fn(async (opts) =>
-      opts.model === 'strict/model'
-        ? labeller({ idiot: 'hostile', cowardly: 'arguing', camps: 'arguing' })(
-            opts,
-          )
-        : labeller({ idiot: 'hostile', cowardly: 'neutral', camps: 'hostile' })(
-            opts,
-          ),
-    );
-    const out = await recheckTriage(PLAN, {
-      generate,
-      readers: ['strict/model', 'loose/model'],
-    });
-    expect(out).toMatchObject({
-      checked: 3,
-      confirmed: 1,
-      disputed: { arguing: 1 },
-      split: 1,
-      failed: 0,
-    });
-    expect(label('did:plc:p1')).toMatchObject({
-      triage: 'hostile',
-      triage_model: 'strict/model+loose/model',
-    });
-    // Both readers disagree: the first reader's label, still on the list, and
-    // the log still says what it was added on.
-    expect(label('did:plc:p2')).toMatchObject({
-      triage: 'arguing',
-      acted_at: 't',
-      approved_via: 'triage:hostile',
-    });
-    // A split keeps its label and says so.
-    expect(label('did:plc:p3').triage).toBe('hostile');
-    expect(label('did:plc:p3').triage_model).toMatch(
-      /split model=arguing model=hostile/,
-    );
-
-    // Run again: nothing left to re-read, so nothing is paid for twice.
-    generate.mockClear();
-    const again = await recheckTriage(PLAN, {
-      generate,
-      readers: ['strict/model', 'loose/model'],
-    });
-    expect(again.checked).toBe(0);
-    expect(generate).not.toHaveBeenCalled();
-  });
-
-  it('leaves a row for next time when a reader does not answer', async () => {
-    db.decision = [onList('did:plc:p2', 'this policy is cowardly')];
-    const generate = vi.fn(async (opts) => {
-      if (opts.model === 'loose/model') throw new Error('503');
-      return labeller({ cowardly: 'arguing' })(opts);
-    });
-    const out = await recheckTriage(PLAN, {
-      generate,
-      readers: ['strict/model', 'loose/model'],
-    });
-    expect(out).toMatchObject({ checked: 0, failed: 1 });
-    expect(label('did:plc:p2')).toMatchObject({
-      triage: 'hostile',
-      triage_model: 'cheap/model',
-    });
   });
 });
 

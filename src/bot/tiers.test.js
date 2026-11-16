@@ -25,7 +25,7 @@ describe('the write check', () => {
       by: 'm/check',
       why: 'The owner asked for the hostile ones.',
     });
-    expect(out.usage.map((u) => u.kind)).toEqual(['judge']);
+    expect(out.usage.map((u) => u.kind)).toEqual(['check']);
   });
 
   it('refuses a no', async () => {

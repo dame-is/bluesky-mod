@@ -96,21 +96,19 @@ describe('the hourly digest', () => {
 });
 
 describe("alerts on the owner's own posts", () => {
-  const feed = (count) =>
+  const feed = (count, copies = 1) =>
     vi.fn(async () => ({
       ok: true,
       json: async () => ({
-        feed: [
-          {
-            post: {
-              uri: URI,
-              author: { did: OWNER_DID },
-              indexedAt: new Date(0).toISOString(),
-              quoteCount: count,
-              replyCount: 0,
-            },
+        feed: Array.from({ length: copies }, () => ({
+          post: {
+            uri: URI,
+            author: { did: OWNER_DID },
+            indexedAt: new Date(0).toISOString(),
+            quoteCount: count,
+            replyCount: 0,
           },
-        ],
+        })),
       }),
     }));
 
@@ -129,5 +127,15 @@ describe("alerts on the owner's own posts", () => {
       await ownPostAlerts({ fetchImpl: feed(60), now: 1000 + 50 * 60_000 }),
     ).toEqual([]);
     expect(alertText(alerts[0]).pending).toEqual([`watch ${URI}`]);
+  });
+
+  it('alerts once on a post that is in the feed twice', async () => {
+    // The owner reposting their own post puts it in the feed again.
+    await ownPostAlerts({ fetchImpl: feed(0, 2), now: 1000 });
+    const alerts = await ownPostAlerts({
+      fetchImpl: feed(30, 2),
+      now: 1000 + 20 * 60_000,
+    });
+    expect(alerts).toEqual([{ uri: URI, growth: 30, count: 30 }]);
   });
 });

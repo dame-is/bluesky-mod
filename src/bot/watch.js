@@ -1,19 +1,18 @@
-// Watching a post: pile-ons run for hours, and the only way to keep up used to
-// be sending the same post again, sometimes three times in a day for the same
-// triage.
+// Watching a post. Pile-ons run for hours, and a watch keeps up without the
+// owner sending the same post again.
 //
 // A watch is a plan that keeps growing. Every few minutes the post's quotes and
 // replies are harvested again; anyone new is scored, added to the watch's plan
-// with what they wrote, and read by the same two-wave triage as everything
-// else. Then, depending on what the owner asked for:
+// with what they wrote, and read by the same triage as everything else. Then,
+// depending on what the owner asked for:
 //
 //   ask   (the default) nothing is added. The hourly digest says what was found
 //         and a 👍 adds the hostile ones.
-//   auto  ("watch this and block the hostile ones") the accounts both waves
-//         call hostile are added as they are found, and the digest says who,
-//         with the way to take one back. CONNECTED and NOTABLE accounts are
-//         held for a 👍 even then: someone your circle follows is never
-//         blocked on a model's reading alone.
+//   auto  ("watch this and block the hostile ones") the accounts triage
+//         reads as hostile are added as they are found, and the digest says
+//         who, with the way to take one back. CONNECTED and NOTABLE accounts
+//         are held for a 👍 even then: someone close to the owner or widely
+//         followed is never blocked on a model's reading alone.
 //
 // Likes and reposts are not read: they carry no words to judge. The first scan
 // covers them, and "likers" / "unknowns" on the card are the tools for those.
@@ -22,6 +21,7 @@
 // and replies, so the bot can offer a watch before the owner has to ask.
 
 import { OWNER_DID, APPVIEW } from '../constants.js';
+import { fetchWithTimeout } from '../lib/atproto.js';
 import { resolveTarget } from '../lib/target.js';
 import { harvestPost } from '../lib/harvest.js';
 import { summarise } from '../lib/score.js';
@@ -38,7 +38,7 @@ import { runTriage, evidenceUriFor } from './triage.js';
 /** How often a watched post is read again. */
 export const WATCH_EVERY_MS = 5 * 60_000;
 /** How often a watch with news reports. */
-export const DIGEST_EVERY_MS = 60 * 60_000;
+const DIGEST_EVERY_MS = 60 * 60_000;
 /** Engagement worth reading on a watched post. */
 const READ_KINDS = ['quote', 'reply', 'threadReply'];
 /** Bands a watch never adds without a 👍, even in auto. */
@@ -197,7 +197,8 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     );
   }
 
-  // Reads whatever on the plan has words and no label yet: the newcomers.
+  // Triage reads whatever on the plan has words and no label yet: the
+  // newcomers, and anything from the baseline not read before.
   const hostileBefore = await countDecisions(plan, { label: 'hostile' });
   if (newcomers.length) {
     await runTriage(plan, { generate, model, log }).catch((err) =>
@@ -287,9 +288,7 @@ export async function digestFor(
   let pending = null;
   let describe = null;
   if (watch.mode === 'auto' && s.addedSinceDigest) {
-    lines.push(
-      `Added ${s.addedSinceDigest} (plan ${code}).`,
-    );
+    lines.push(`Added ${s.addedSinceDigest} (plan ${code}).`);
   }
   if (s.held) {
     lines.push(
@@ -343,9 +342,14 @@ export async function endExpired({ now = Date.now() } = {}) {
 // --- the owner's own posts ---------------------------------------------------
 
 /** New quotes and replies in an hour on one of the owner's posts, worth a DM. */
-export const ALERT_THRESHOLD = Number(process.env.MOD_ALERT_THRESHOLD) || 15;
+const ALERT_THRESHOLD = Math.max(
+  1,
+  Number(process.env.MOD_ALERT_THRESHOLD) || 15,
+);
 const ALERT_AGAIN_MS = 6 * 3_600_000;
 const BASELINE_MS = 60 * 60_000;
+/** How far back the owner's posts are checked. */
+const RECENT_MS = 48 * 3_600_000;
 
 /**
  * The owner's recent posts that are suddenly drawing quotes and replies.
@@ -358,7 +362,7 @@ const BASELINE_MS = 60 * 60_000;
  * @returns {Promise<Array<{ uri: string, growth: number, count: number }>>}
  */
 export async function ownPostAlerts({
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   now = Date.now(),
   threshold = ALERT_THRESHOLD,
 } = {}) {
@@ -367,14 +371,21 @@ export async function ownPostAlerts({
   );
   if (!res.ok) return [];
   const body = await res.json();
-  const recent = (body.feed || [])
-    .map((f) => f.post)
-    .filter(
-      (p) =>
-        p?.author?.did === OWNER_DID &&
-        now - Date.parse(p.indexedAt || p.record?.createdAt || 0) <
-          48 * 3_600_000,
-    );
+  // Keyed by URI: a post the owner reposted is in the feed twice, and would
+  // otherwise be alerted on twice.
+  const recent = [
+    ...new Map(
+      (body.feed || [])
+        .map((f) => f?.post)
+        .filter(
+          (p) =>
+            p?.author?.did === OWNER_DID &&
+            now - Date.parse(p.indexedAt || p.record?.createdAt || 0) <
+              RECENT_MS,
+        )
+        .map((p) => [p.uri, p]),
+    ).values(),
+  ];
   if (!recent.length) return [];
 
   const uris = recent.map((p) => p.uri);

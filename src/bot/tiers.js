@@ -84,8 +84,7 @@ Reply with YES or NO on the first line and one short sentence of why on the seco
  * Did the owner ask for this write?
  *
  * FAILS CLOSED. A check that cannot run, or answers neither yes nor no,
- * refuses the write, and the refusal tells the owner the `!` command that
- * does it directly, without a model.
+ * refuses the write.
  *
  * @param {object} input
  * @param {string} input.said     the owner's latest message, as composed for the agent
@@ -109,7 +108,7 @@ export async function checkIntent(
       messages: [{ role: 'user', content: state }],
       abortSignal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     });
-    usage.push({ kind: 'judge', model: nameOf(model), ...r.usage });
+    usage.push({ kind: 'check', model: nameOf(model), ...r.usage });
     const [head = '', because = ''] = String(r.text || '')
       .trim()
       .split('\n');
