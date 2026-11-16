@@ -9,8 +9,8 @@ export default defineConfig({
     env: {
       MOD_OWNER_DID: 'did:plc:owner0000000000000000000',
       DATABASE_PATH: ':memory:',
-      // The tests were written against the measured gateway setup; nothing
-      // here calls a real model.
+      // A provider with a key, so the paths that need a model are on.
+      // Nothing here calls a real model.
       MODEL_PROVIDER: 'gateway',
       AI_GATEWAY_API_KEY: 'test-key-not-real',
       // A second model, so the escalation paths are exercised.

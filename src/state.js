@@ -1,25 +1,35 @@
-// On-disk state: where the firehose got to, and what has already been answered.
+// On-disk state: where the Jetstream stream got to, and which mentions have
+// been answered.
 //
-// THE ANSWERED SET IS NOT AN OPTIMISATION. Jetstream replays from a cursor, and
-// this consumer reconnects on a timer, so the same trigger post arrives again
-// routinely. Without a record of what has been answered, every reconnect posts
-// the analysis a second time, publicly, under someone else's thread. One
-// duplicate public reply is worse than one missed one, which is why this file
-// exists and why the cursor is written BEFORE the reply rather than after.
+// Jetstream replays from a cursor and this process reconnects on a timer, so
+// the same mention arrives again as a matter of course. The answered set is
+// what stops a replay from posting a second public reply under someone else's
+// thread. A mention is marked before it is answered: one missed answer is
+// better than one duplicate public reply.
 
 import fs from 'fs';
 import path from 'path';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
-const cursorPath = path.resolve(config.stateDir, config.cursorFile);
-const answeredPath = path.resolve(config.stateDir, config.answeredFile);
+const cursorPath = path.resolve(config.dataDir, config.cursorFile);
+const answeredPath = path.resolve(config.dataDir, config.answeredFile);
 
 let answered = new Set();
 let lastCursor = null;
 
+/**
+ * Write through a temporary file and a rename, so a crash mid-write leaves the
+ * old file whole. A truncated answered set would forget what was answered.
+ */
+function writeAtomic(file, text) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+}
+
 export function loadState() {
-  fs.mkdirSync(config.stateDir, { recursive: true });
+  fs.mkdirSync(config.dataDir, { recursive: true });
   try {
     const raw = fs.readFileSync(cursorPath, 'utf8').trim();
     if (raw) lastCursor = raw;
@@ -44,19 +54,15 @@ export function getCursor() {
 }
 
 /**
- * Remember the firehose position.
- *
- * Unlike an indexing consumer, this one does NOT hold the cursor behind
- * un-durable work. An indexer can replay on restart because a replayed upsert
- * is free. Here a replayed event is a second public post, so the cursor moves
- * as soon as an event is seen and the answered set covers the replay that a
- * reconnect causes anyway.
+ * Remember the stream position as soon as an event is seen, not after the work
+ * it caused. Replaying an event here could mean a second public post, and the
+ * answered set covers the replay a reconnect causes anyway.
  */
 export function setCursor(timeUs) {
   if (timeUs == null) return;
   lastCursor = String(timeUs);
   try {
-    fs.writeFileSync(cursorPath, lastCursor);
+    writeAtomic(cursorPath, lastCursor);
   } catch (err) {
     logger.error('Could not save cursor', { err });
   }
@@ -70,11 +76,10 @@ export function markAnswered(uri) {
   answered.add(uri);
   if (answered.size > config.answeredKeep) {
     // Insertion-ordered, so the oldest go first.
-    const trimmed = [...answered].slice(-config.answeredKeep);
-    answered = new Set(trimmed);
+    answered = new Set([...answered].slice(-config.answeredKeep));
   }
   try {
-    fs.writeFileSync(answeredPath, JSON.stringify([...answered]));
+    writeAtomic(answeredPath, JSON.stringify([...answered]));
   } catch (err) {
     logger.error('Could not save the answered set', { err });
   }

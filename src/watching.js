@@ -1,9 +1,8 @@
 // The slow loops: watched posts, and the owner's own posts taking off.
 //
-// Both run in the consumer's one job queue like everything else, and only once
-// the DMs have been quiet for a minute (see index.js), so an evening of "block"
-// never waits behind a harvest. Everything they say goes to the convo it is
-// about, and anything they offer is stored as a question a thumbs-up answers.
+// Both run in the one job queue, and only once the DMs have been quiet for a
+// minute (index.js). Everything they say goes to the convo it is about, and
+// anything they offer is stored as a question a 👍 answers.
 
 import { generateText } from 'ai';
 
@@ -63,6 +62,7 @@ export async function say(
 
 /**
  * Read every watch that is due, send the digests that are, end the expired.
+ * `everyMs` is how often a watch is read again (MOD_WATCH_EVERY_MS).
  *
  * A digest waits while a question from the conversation is open in its convo:
  * the watch keeps reading, its counts keep adding up, and the update goes once
@@ -74,6 +74,7 @@ export async function tickWatches({
   agent,
   reference,
   model,
+  everyMs = WATCH_EVERY_MS,
   log = () => {},
   now = Date.now(),
 }) {
@@ -89,9 +90,10 @@ export async function tickWatches({
     if (d) await say(chat, w.convo_id, d);
   }
   for (const w of await liveWatches({ now })) {
+    // Half a minute of slack, so timer jitter does not skip a round.
     const due =
       !w.last_checked_at ||
-      now - Date.parse(w.last_checked_at) >= WATCH_EVERY_MS - 30_000;
+      now - Date.parse(w.last_checked_at) >= everyMs - 30_000;
     if (!due) continue;
     try {
       const { io } = await reference();
@@ -125,9 +127,9 @@ export async function tickWatches({
 /**
  * Offer a watch on any of the owner's posts that has suddenly taken off.
  *
- * Not while a question from the conversation is open: an alert always asks
- * something, and it is offered once, so it waits for the next tick rather than
- * going out without the 👍 that is the point of it.
+ * An alert is offered once, so it waits for the next tick while there is no
+ * convo to send it to, or while a question from the conversation is open
+ * (it would go out without the 👍 that is the point of it).
  */
 export async function tickAlerts({
   chat,
@@ -136,7 +138,7 @@ export async function tickAlerts({
   now = Date.now(),
 }) {
   const convoId = await convoFor();
-  if (convoId && (await questionOpen(convoId, { now }))) return 0;
+  if (!convoId || (await questionOpen(convoId, { now }))) return 0;
   const alerts = await ownPostAlerts({ now });
   if (!alerts.length) return 0;
   for (const a of alerts) {

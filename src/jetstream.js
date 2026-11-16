@@ -1,25 +1,20 @@
 // One filtered Jetstream subscription, reconnecting on its own.
 //
 // FILTERED TO THE ROSTER. Jetstream filters by `wantedCollections` and
-// `wantedDids` only, and `wantedDids` matches the record's AUTHOR, not its
-// subject. That is usually the awkward half of the API; here it is exactly
-// right, because the only posts this consumer may act on are the ones written
-// by accounts on the roster. The alternative (taking the whole post firehose
-// at ~62 events/s and ~3.3 GB/day to match subjects in process) would move
-// 3 GB a day to find a handful of posts we could have asked for by name.
+// `wantedDids`, and `wantedDids` matches a record's AUTHOR, not its subject.
+// Here that is exactly right: the only posts this bot acts on are written by
+// accounts on the roster. The alternative is the whole post firehose,
+// gigabytes a day, to find a handful of posts we could ask for by name.
 //
-// EVERY ANSWERED DID MUST BE HERE or that account's mentions never arrive at
-// all: the transport drops them before `classify` is ever asked. An allowlist
-// that widens the rule without widening the subscription looks exactly like an
-// allowlist that does not work, with nothing in the log to say why.
+// EVERY ANSWERED DID MUST BE HERE, or that account's mentions never arrive:
+// the transport drops them before `classify` sees them, with nothing in the
+// log to say why.
 //
-// It does mean the socket is idle almost all the time, which is why config
-// carries a forced reconnect interval: with no traffic, a dead connection and a
-// quiet one look identical, and the difference would otherwise be discovered by
-// the owner asking a question into the void.
+// The socket is idle almost all the time, and with no traffic a dead
+// connection looks like a quiet one. So config carries a forced reconnect
+// interval, and each reconnect resumes from the stored cursor.
 //
-// Uses Node 22's built-in WebSocket rather than `ws`, so the subscription
-// needs no dependency of its own.
+// Uses Node 22's built-in WebSocket, so the subscription needs no dependency.
 
 import { config } from './config.js';
 import { logger } from './logger.js';
@@ -29,9 +24,8 @@ function buildUrl() {
   const params = new URLSearchParams();
   params.append('wantedCollections', 'app.bsky.feed.post');
   // One parameter per DID, which is how Jetstream expects a repeated filter.
-  // Keep an eye on the length here if the roster ever grows: jetstream1.us-east
-  // sits behind a Cloudflare edge that 414s a long URL, which is why the
-  // default host is us-west.
+  // Some hosts sit behind an edge that rejects a long URL with a 414, which
+  // is why the default host is us-west. Mind the length if the roster grows.
   for (const did of config.roster.all) params.append('wantedDids', did);
   const cursor = getCursor();
   if (cursor) params.append('cursor', cursor);
@@ -54,6 +48,11 @@ export function connectJetstream({ onEvent }) {
     }
   }
 
+  function retry() {
+    setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, config.reconnectMaxMs);
+  }
+
   function connect() {
     if (closedByUs) return;
     const url = buildUrl();
@@ -62,13 +61,22 @@ export function connectJetstream({ onEvent }) {
       dids: config.roster.all.join(','),
       resumingFrom: getCursor() ?? '(live tail)',
     });
-    ws = new WebSocket(url);
+    try {
+      ws = new WebSocket(url);
+    } catch (err) {
+      // Thrown from a timer, this would end the reconnect loop for good.
+      logger.error('Could not open the Jetstream socket', {
+        err,
+        inMs: backoff,
+      });
+      retry();
+      return;
+    }
 
     ws.addEventListener('open', () => {
       backoff = config.reconnectBaseMs;
       logger.info('Connected to Jetstream', { host: config.jetstreamHost });
-      // Recycle the socket periodically. Resuming from the stored cursor means
-      // a cycle loses nothing, and it is the only way to notice a connection
+      // Recycle the socket on a timer: the only way to notice a connection
       // that died without a close frame on a stream this quiet.
       cycle = setTimeout(() => {
         logger.debug('Cycling the Jetstream connection for liveness');
@@ -87,9 +95,11 @@ export function connectJetstream({ onEvent }) {
         logger.debug('Unparseable frame', { err: err.message });
         return;
       }
-      Promise.resolve(onEvent(event)).catch((err) =>
-        logger.error('Event handler error', { err }),
-      );
+      // Through a promise, so a handler that throws, sync or async, is logged
+      // rather than escaping the listener.
+      Promise.resolve()
+        .then(() => onEvent(event))
+        .catch((err) => logger.error('Event handler error', { err }));
     });
 
     ws.addEventListener('error', (ev) => {
@@ -101,8 +111,7 @@ export function connectJetstream({ onEvent }) {
       cycle = null;
       if (closedByUs) return;
       logger.warn('Jetstream closed; reconnecting', { inMs: backoff });
-      setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, config.reconnectMaxMs);
+      retry();
     });
   }
 

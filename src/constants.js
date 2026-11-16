@@ -1,8 +1,7 @@
-// The few values everything else reads at import time.
+// Values other modules read at import time.
 //
-// The owner is whoever runs this bot: the account it answers, whose follows
-// decide who is PROTECTED. It comes from the environment rather than from a
-// constant so the same code serves anyone who runs it.
+// The owner is whoever runs this bot: the account it answers, and whose follows
+// decide who is PROTECTED.
 
 export const OWNER_DID = process.env.MOD_OWNER_DID || '';
 
@@ -21,11 +20,10 @@ export const CONSTELLATION_URL = (
 ).replace(/\/$/, '');
 
 /**
- * The owner's handle, for prompts and messages. Resolved from the DID at
- * startup (setOwnerHandle) because a handle can change and the DID cannot;
- * MOD_OWNER_HANDLE is only a starting value.
+ * The owner's handle, for prompts and messages. Read from the DID at startup
+ * (setOwnerHandle), because a handle can change and the DID cannot.
  */
-export let OWNER_HANDLE = process.env.MOD_OWNER_HANDLE || '';
+export let OWNER_HANDLE = '';
 
 export function setOwnerHandle(handle) {
   if (handle) OWNER_HANDLE = String(handle);

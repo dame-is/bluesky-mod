@@ -1,22 +1,18 @@
 // Getting the moderator session back when it dies.
 //
-// Once, a token refresh was refused. @atproto/api answers a refused refresh by
-// dropping the session, and every call after that goes out with no
-// credentials at all. The process stayed up and looked healthy while every DM
-// poll for eight hours failed with "Authentication Required", because nothing
-// here ever logged in again.
-//
-// So a dead session is now noticed two ways (the library's 'expired' event,
-// and an authentication error out of any job) and replaced: botAgent()
-// resumes from the stored session if it still works, and logs in with the app
-// password if not. Retries back off from 30 seconds to 15 minutes,
-// because createSession is capped at 30 per 5 minutes and 300 a day, and a
-// revoked app password must not burn through that.
+// @atproto/api answers a refused token refresh by dropping the session, and
+// every call after that goes out with no credentials while the process looks
+// healthy. So a dead session is noticed two ways (the library's 'expired'
+// event, and an authentication error out of any job) and replaced: botAgent()
+// resumes the stored session if it still works and logs in with the app
+// password if not. Retries back off from 30 seconds to 15 minutes, because
+// createSession is capped at 30 per 5 minutes and 300 a day, and a revoked app
+// password must not burn through that.
 
 const AUTH_ERROR =
   /Authentication Required|AuthMissing|ExpiredToken|InvalidToken|Token has expired|Token could not be verified|Bad token/i;
 
-/** Did this fail because the session is gone, rather than for any other reason? */
+/** Did this fail because the session is gone? */
 export function isAuthError(err) {
   if (!err) return false;
   if (err.status === 401) return true;

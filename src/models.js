@@ -1,11 +1,11 @@
 // Which company's models answer, chosen by environment.
 //
 // The rest of the code names models by plain string ids and hands them to the
-// AI SDK. The SDK resolves a string through one global provider, so choosing a
-// provider here is all it takes to move every call: nothing else in the code
-// knows or cares which company is on the other end.
+// AI SDK. The SDK resolves a string through one global provider, so choosing
+// one here moves every call, and nothing else knows which company answers.
 //
-//   MODEL_PROVIDER     gateway | openrouter | openai-compatible | anthropic | openai | none
+//   MODEL_PROVIDER  gateway | openrouter | openai-compatible | anthropic |
+//                   openai | none
 //
 // Unset, it is inferred from whichever key is present, in that order, and is
 // `none` when there is no key at all. With `none` the bot still works: typed
@@ -39,6 +39,17 @@ export function providerName(env = process.env) {
 }
 
 export const PROVIDER = providerName();
+
+/** Where each provider's key is read from, first choice first. */
+const KEYS = {
+  gateway: ['AI_GATEWAY_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY', 'MODEL_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY', 'MODEL_API_KEY'],
+  openai: ['OPENAI_API_KEY', 'MODEL_API_KEY'],
+};
+
+const keyFor = (name, env) =>
+  (KEYS[name] || []).map((k) => env[k]).find(Boolean);
 
 /** True when a model can be called at all. */
 export const modelsEnabled = (name = PROVIDER) => name !== 'none';
@@ -82,7 +93,7 @@ export function createProvider(name = PROVIDER, env = process.env) {
       return createOpenAICompatible({
         name: 'openrouter',
         baseURL: env.MODEL_BASE_URL || 'https://openrouter.ai/api/v1',
-        apiKey: env.OPENROUTER_API_KEY || env.MODEL_API_KEY,
+        apiKey: keyFor('openrouter', env),
       });
     case 'openai-compatible':
       if (!env.MODEL_BASE_URL) {
@@ -94,9 +105,9 @@ export function createProvider(name = PROVIDER, env = process.env) {
         apiKey: env.MODEL_API_KEY || undefined,
       });
     case 'anthropic':
-      return createAnthropic({ apiKey: env.ANTHROPIC_API_KEY || env.MODEL_API_KEY });
+      return createAnthropic({ apiKey: keyFor('anthropic', env) });
     case 'openai':
-      return createOpenAI({ apiKey: env.OPENAI_API_KEY || env.MODEL_API_KEY });
+      return createOpenAI({ apiKey: keyFor('openai', env) });
     case 'none':
       return null;
     default:
@@ -124,14 +135,9 @@ export function modelProblems(env = process.env) {
   }
   if (name === 'none') return [];
   const problems = [];
-  const key = {
-    gateway: 'AI_GATEWAY_API_KEY',
-    openrouter: env.OPENROUTER_API_KEY ? null : env.MODEL_API_KEY ? null : 'OPENROUTER_API_KEY',
-    anthropic: env.ANTHROPIC_API_KEY || env.MODEL_API_KEY ? null : 'ANTHROPIC_API_KEY',
-    openai: env.OPENAI_API_KEY || env.MODEL_API_KEY ? null : 'OPENAI_API_KEY',
-  }[name];
-  if (name === 'gateway' && !env.AI_GATEWAY_API_KEY) problems.push('AI_GATEWAY_API_KEY is not set');
-  else if (key && name !== 'gateway') problems.push(`${key} is not set`);
+  if (KEYS[name] && !keyFor(name, env)) {
+    problems.push(`${KEYS[name][0]} is not set`);
+  }
   if (name === 'openai-compatible' && !env.MODEL_BASE_URL) {
     problems.push('MODEL_BASE_URL is not set');
   }

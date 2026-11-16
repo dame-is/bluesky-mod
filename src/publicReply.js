@@ -1,13 +1,12 @@
 // Posting the analyst's answer as a public reply.
 //
-// NO FACETS, DELIBERATELY. A rich-text pass would turn any handle in the answer
-// into a mention facet, and a mention NOTIFIES. The people in a moderation
-// analysis are exactly the people who should not get a notification saying they
-// are in one, so handles go out as plain text and links go out unlinked. This
-// is the one place where the duller output is the correct output.
+// NO FACETS. A rich-text pass would turn any handle in the answer into a
+// mention facet, and a mention NOTIFIES. The people in a moderation analysis
+// should not get a notification saying they are in one, so handles go out as
+// plain text and links go out unlinked.
 //
-// Chunks are threaded as self-replies rather than posted side by side, so a
-// three-post answer reads in order and collapses into one unit in every client.
+// Chunks are threaded as self-replies, so a long answer reads in order and
+// collapses into one unit in every client.
 
 import { logger } from './logger.js';
 import { config } from './config.js';

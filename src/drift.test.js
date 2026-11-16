@@ -38,7 +38,7 @@ vi.mock('./lib/score.js', () => ({
   }),
 }));
 
-const { runDrift, renderBrief } = await import('./drift.js');
+const { runDrift, renderBrief, maybeRunDrift } = await import('./drift.js');
 
 const audit = (id, started_at, extra = {}) => ({
   id,
@@ -111,5 +111,14 @@ describe('the brief', () => {
     expect(renderBrief({ scored: 10, drifted: [], gone: [], added: 3 })).toBe(
       null,
     );
+  });
+});
+
+describe('sending the brief', () => {
+  it('waits for a convo to send it to before running', async () => {
+    const listRecords = vi.fn();
+    const agent = { com: { atproto: { repo: { listRecords } } } };
+    expect(await maybeRunDrift(agent, {}, null)).toBe(null);
+    expect(listRecords).not.toHaveBeenCalled();
   });
 });

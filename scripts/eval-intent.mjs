@@ -6,14 +6,15 @@
 // ALLOW is the error that matters: a write the owner did not ask for. A false
 // refusal costs one "go ahead?" message. The table keeps them apart.
 //
+// Each case goes through checkIntent, the function agent mode calls, so the
+// prompt, the timeout and the reading of the answer are the ones that run.
+//
 // Uses the model provider in .env (src/models.js). From the repo root:
 //   npm run eval:intent
 //   npm run eval:intent -- --models model-a,model-b
 //
 // With no --models, it tests MOD_CHECK_MODEL (which defaults to the agent
 // model). Run it again after changing the check prompt or the model.
-
-import { generateText } from 'ai';
 
 import {
   PROVIDER,
@@ -22,7 +23,7 @@ import {
   modelProblems,
 } from '../src/models.js';
 import { CASES } from './evals/intent-cases.js';
-import { intentState, CHECK_PROMPT } from '../src/bot/tiers.js';
+import { checkIntent } from '../src/bot/tiers.js';
 import { actionText, accountPhrase, planPhrase } from '../src/bot/operator.js';
 
 const arg = (name, def) => {
@@ -45,8 +46,8 @@ if (problems.length) {
 }
 installProvider();
 
-/** The check's input for one case, built the way production builds it. */
-function stateOf(c) {
+/** The check's input for one case, built the way agent mode builds it. */
+function inputOf(c) {
   const action = actionText(c.kind, {
     accounts: (c.accounts || []).map(accountPhrase),
     plan: c.plan ? planPhrase(c.plan) : undefined,
@@ -55,7 +56,7 @@ function stateOf(c) {
     bands: c.bands,
     label: c.label,
   });
-  return intentState({ said: c.said, earlier: c.earlier, action });
+  return { said: c.said, earlier: c.earlier, action };
 }
 
 async function pool(items, n, fn) {
@@ -84,7 +85,7 @@ function score(decisions) {
   return { right, falseAllow, falseRefuse };
 }
 
-const states = CASES.map(stateOf);
+const inputs = CASES.map(inputOf);
 console.log(
   `${CASES.length} cases: ${CASES.filter((c) => c.want).length} allow, ${CASES.filter((c) => !c.want).length} refuse\n`,
 );
@@ -94,30 +95,21 @@ for (const model of CANDIDATES) {
   let tout = 0;
   let failed = 0;
   const t0 = Date.now();
-  const answers = await pool(states, 6, async (state) => {
-    try {
-      const r = await generateText({
-        model,
-        instructions: CHECK_PROMPT,
-        messages: [{ role: 'user', content: state }],
-      });
-      tin += r.usage?.inputTokens || 0;
-      tout += r.usage?.outputTokens || 0;
-      const first = String(r.text || '')
-        .trim()
-        .split('\n')[0];
-      if (/^\W*yes\b/i.test(first)) return true;
-      if (/^\W*no\b/i.test(first)) return false;
-      return null;
-    } catch (err) {
-      failed += 1;
-      console.error(`${model} failed:`, err.message);
-      return null;
+  // An undecided or failed check refuses, as it does in agent mode.
+  const allowed = await pool(inputs, 6, async (input) => {
+    const r = await checkIntent(input, {
+      model,
+      log: (msg, fields) => console.error(`${model}: ${fields?.err ?? msg}`),
+    });
+    if (r.by === 'none') failed += 1;
+    for (const u of r.usage) {
+      tin += u.inputTokens || 0;
+      tout += u.outputTokens || 0;
     }
+    return r.allow;
   });
   const ms = Date.now() - t0;
-  // An unreadable or failed answer is a refusal, as it is in production.
-  const s = score(answers.map((x) => x === true));
+  const s = score(allowed);
   console.log(
     `${model.padEnd(40)} ${String(s.right).padStart(2)}/${CASES.length}  ` +
       `false allow ${String(s.falseAllow.length).padStart(2)}  ` +

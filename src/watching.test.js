@@ -100,7 +100,7 @@ describe('a timed message that asks something', () => {
     });
   });
 
-  it('replaces an earlier timed question, which is what it always did', async () => {
+  it('replaces an earlier timed question', async () => {
     await say(chat(), 'convo1', {
       ...DIGEST,
       pending: ['approve aaaa1111 hostile'],
@@ -109,6 +109,33 @@ describe('a timed message that asks something', () => {
     expect((await readPending('convo1')).commands).toEqual([
       'approve 1c2d3e4f hostile',
     ]);
+  });
+});
+
+describe('how often a watch is read', () => {
+  it('follows the interval it is given', async () => {
+    const now = Date.parse('2026-11-01T12:00:00Z');
+    const w = {
+      id: 'w1',
+      convo_id: 'convo1',
+      uri: 'at://p',
+      last_checked_at: '2026-11-01T11:58:00Z',
+    };
+    const tick = (everyMs) =>
+      tickWatches({
+        chat: chat(),
+        agent: {},
+        reference: async () => ({ io: { score: () => {} } }),
+        model: 'm',
+        everyMs,
+        now,
+      });
+    watch.liveWatches.mockResolvedValueOnce([w]).mockResolvedValueOnce([w]);
+    // Read two minutes ago: due on a one-minute interval, not a five.
+    await tick(60_000);
+    expect(watch.checkWatch).toHaveBeenCalledTimes(1);
+    await tick(5 * 60_000);
+    expect(watch.checkWatch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -145,6 +172,12 @@ describe('the loops wait for an answer', () => {
     expect(n).toBe(0);
     expect(watch.ownPostAlerts).not.toHaveBeenCalled();
     expect(c.sent).toEqual([]);
+  });
+
+  it('holds an alert while there is no convo to send it to', async () => {
+    const c = chat();
+    expect(await tickAlerts({ chat: c, convoFor: async () => null })).toBe(0);
+    expect(watch.ownPostAlerts).not.toHaveBeenCalled();
   });
 
   it('sends an alert when nothing is waiting', async () => {

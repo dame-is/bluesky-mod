@@ -2,11 +2,9 @@
 //
 // Three inputs feeding one work queue:
 //
-//   1. chat.bsky.convo.getLog on a 2s poll, the ONLY option for DMs. There is
-//      no push: chat.bsky.* conversations are not repository records. They
-//      live in the chat service (did:web:api.bsky.chat) with separate storage,
-//      so they never enter a repo, never hit the firehose, and never reach
-//      Jetstream.
+//   1. chat.bsky.convo.getLog on a 2s poll, the only way to read DMs. Chat
+//      lives in the chat service (did:web:api.bsky.chat), not in any repo,
+//      so it never reaches the firehose or Jetstream and there is no push.
 //   2. Jetstream, for public mentions: posts by accounts on the roster,
 //      filtered at the transport to their DIDs. Answered in the thread.
 //   3. Timers: the follow-graph snapshot, the weekly re-score of the list,
@@ -14,8 +12,7 @@
 //
 // ONE JOB AT A TIME. An answer is a 5-20s model call holding the snapshot in
 // memory, and this is meant to run on a small machine. Serialising also means
-// a burst of triggers cannot open eight concurrent harvests against the
-// AppView.
+// a burst of mentions cannot open many harvests against the AppView at once.
 
 import { generateText } from 'ai';
 
@@ -25,7 +22,6 @@ import {
   chunkForPost,
   ancestorsOf,
   threadHistoryFrom,
-  DEFAULT_MODEL,
 } from './lib/agent.js';
 import {
   createAtmosphereClient,
@@ -50,7 +46,7 @@ import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { isAuthError, createReconnector } from './session.js';
 
-const model = MODELS.agent || DEFAULT_MODEL;
+const model = MODELS.agent;
 
 let agent = null;
 let chat = null;
@@ -66,9 +62,9 @@ const stats = {
 };
 
 // --- the reference, held only while it is being used -------------------------
-// The vouch table is the largest thing this process ever holds. Keeping it
-// forever to answer a question every few days is the wrong trade on a small
-// machine; reloading it takes a second or two.
+// The vouch table is the largest thing this process holds, and can run to tens
+// of thousands of rows. Keeping it to answer a question every few days is the
+// wrong trade on a small machine; reloading it takes a second or two.
 let cached = null;
 let idleTimer = null;
 
@@ -108,13 +104,11 @@ async function reference() {
 }
 
 // --- the Atmosphere toolset, refreshed on a long TTL -------------------------
-// Small (a few dozen schemas, no rows), so it is held rather than released,
-// and refetched only in case the server publishes something new. A failure
-// here is not fatal: the bot's own tools answer every scoring question.
+// Small (a few dozen schemas, no rows), so it is held rather than released. A
+// failure is not fatal: the bot's own tools answer every scoring question.
 //
-// A FAILED LOAD IS REMEMBERED TOO. Otherwise, while the server is down, every
-// 2s DM poll asks again, waits up to 20s on a request that is going to fail,
-// and logs that it did.
+// A FAILED LOAD IS REMEMBERED TOO, for a few minutes. Otherwise every 2s DM
+// poll would wait up to 20s on a server that is down.
 const ATMOSPHERE_RETRY_MS = 5 * 60_000;
 let atmoTools = {};
 let atmoNextAt = 0;
@@ -134,7 +128,7 @@ async function atmosphereTools() {
   return atmoTools;
 }
 
-// --- the session, and getting it back -------------------------------------------
+// --- the session, and getting it back ----------------------------------------
 /**
  * Log in (resuming the stored session where possible) and swap the result in.
  * Everything reads `agent` and `chat` when it runs, so the next job uses it.
@@ -182,28 +176,26 @@ function enqueue(label, job) {
         pending -= 1;
       }
     })
-    .catch(() => {
-      pending -= 1;
-    });
+    // The count is already settled in `finally`; this only keeps one bad job
+    // from breaking the chain for every job after it.
+    .catch(() => {});
   return chain;
 }
 
 // --- the public path ---------------------------------------------------------
 
 /**
- * What the model is asked.
+ * What the model is asked: the asker's own text, plus the subject when it came
+ * from the thread rather than a pasted link, or "check this" names nothing the
+ * analyst can look up. The added line is built from the record by code, not
+ * copied from anyone's writing, so it is not untrusted input.
  *
- * The asker's own text, plus the subject when it came from the thread rather
- * than from a pasted link. Otherwise "check this" names nothing the analyst can
- * look up. The added line is derived by us from the record, not copied from
- * anyone's writing, so it is not untrusted input.
+ * "they", not "the owner": the asker is whoever on the roster mentioned the
+ * bot, and the model trusts this line about whose post it is.
  */
 function composeMessage(t) {
   if (!t.target || t.targetSource === 'link') return t.text;
   const verb = t.targetSource === 'quote' ? 'quoting' : 'replying to';
-  // "they", not "the owner". The asker is whoever is on the roster, and naming
-  // the wrong person in the one line the model is told to trust is a cheap way
-  // to get a confidently wrong answer about whose post this is.
   return `${t.text}\n\n[The post they are ${verb}: ${t.target}]`;
 }
 
@@ -217,14 +209,14 @@ async function readThreadHistory(t) {
     });
     return threadHistoryFrom(ancestorsOf(res.data.thread), {
       // The ASKER, not the owner. With a roster these differ, and labelling a
-      // guest's own posts as somebody else's turns their follow-up into a
-      // conversation the model thinks it was watching rather than having.
+      // guest's posts as someone else's makes their follow-up read like a
+      // conversation the model was watching rather than having.
       selfDid: t.author ?? config.ownerDid,
       botDid,
     });
   } catch (err) {
     // A thread we cannot read is still a question we can answer, just without
-    // context. Better a reply that misses the reference than silence.
+    // context.
     logger.warn('Could not read the thread for history', { err: err.message });
     return [];
   }
@@ -232,14 +224,14 @@ async function readThreadHistory(t) {
 
 async function answerPublicly(t) {
   const { io } = await reference();
-  const [history, extraTools, config] = await Promise.all([
+  const [history, extraTools, botConfig] = await Promise.all([
     readThreadHistory(t),
     atmosphereTools(),
     loadAgentConfig(),
   ]);
 
-  const activeModel = config?.model || model;
-  const limits = config?.limits || {};
+  const activeModel = botConfig?.model || model;
+  const limits = botConfig?.limits || {};
   const reply = await answer({
     generate: generateText,
     message: composeMessage(t),
@@ -248,8 +240,8 @@ async function answerPublicly(t) {
     model: activeModel,
     surface: 'post',
     extraTools,
-    voice: config?.style,
-    guidance: config?.guidance,
+    voice: botConfig?.style,
+    guidance: botConfig?.guidance,
     maxSteps: limits.maxSteps,
     reviewRows: limits.reviewRows,
   });
@@ -293,19 +285,13 @@ function onEvent(event) {
     logger.info('Public replies are off; ignoring a mention', { uri: t.uri });
     return;
   }
-  // Marked BEFORE the answer, not after. Jetstream replays from a cursor and
-  // this consumer recycles its connection on a timer, so the same trigger
-  // arrives again as a matter of course. One duplicate public reply under
-  // someone else's thread is worse than one missed answer the asker can see is
-  // missing and simply ask again.
+  // Marked BEFORE the answer, not after (state.js): a missed answer can be
+  // asked again, a duplicate public reply cannot be taken back.
   if (hasAnswered(t.uri)) {
     logger.debug('Already answered', { uri: t.uri });
     return;
   }
-  // Not in a dry run: a rehearsal must not leave a real trigger marked as
-  // handled, or turning DRY_RUN off would skip the very posts it just showed
-  // you. A dry run re-logging the same trigger on reconnect is the cheaper
-  // annoyance.
+  // A dry run posts nothing, so it marks nothing as answered.
   if (!config.dryRun) markAnswered(t.uri);
 
   stats.triggers += 1;
@@ -327,23 +313,16 @@ async function pollDms() {
   const res = await runDmPass({
     chat,
     writeAgent: agent,
-    // Lazy on purpose. A poll that finds nothing is almost every poll, and
-    // loading the snapshot on each one would both waste the read and keep the
-    // idle timer from ever firing, so the memory would never be released.
+    // Lazy: almost every poll finds nothing, and loading the snapshot on each
+    // one would keep the idle timer from ever releasing it.
     getIo: async () => (await reference()).io,
     extraTools: await atmosphereTools(),
     model,
     botDid,
-    // PASSED, not left to the default. runDmPass can build a roster from the
-    // environment on its own, but then this process would hold two rosters
-    // built independently, and a change to one could move the public boundary
-    // while the DM boundary kept the old answer.
+    // PASSED, not left to the default, so DMs and public mentions answer to
+    // one roster object and cannot drift apart.
     roster: config.roster,
     mode: config.dmMode,
-    operatorModel: config.operatorModel,
-    // Bursts of quiet blocks are summarised once they go quiet, which only a
-    // process that keeps polling can wait for.
-    persistent: true,
     log: (msg, fields) => logger.info(msg, fields),
   });
   if (res.answered) {
@@ -354,17 +333,16 @@ async function pollDms() {
 
 function scheduleDmPoll() {
   dmTimer = setInterval(() => {
-    // Skipped while anything is queued or in flight. The poll exists to notice
-    // a new message quickly, and noticing it 2s into a 15s answer changes
-    // nothing, while stacking 8 polls behind that answer would then fire them
-    // back to back against the chat service.
+    // Skipped while anything is queued or in flight. Noticing a message 2s
+    // into a 15s answer changes nothing, and polls stacked behind that answer
+    // would then fire back to back against the chat service.
     if (pending > 0 || shuttingDown) return;
     enqueue('dm', pollDms);
   }, config.dmPollMs);
   if (dmTimer.unref) dmTimer.unref();
 }
 
-// --- the slow jobs wait for a quiet minute ------------------------------------
+// --- the slow jobs wait for a quiet minute -----------------------------------
 const QUIET_FOR_MS = 60_000;
 
 /**
@@ -434,9 +412,8 @@ function scheduleDrift() {
     return;
   }
   const tick = () => {
-    // Queued like everything else, so a re-score of thousands of accounts
-    // cannot run alongside a model call. And only once the DMs are quiet: it
-    // is minutes of AppView calls, and the DM poll waits for all of them.
+    // Only once the DMs are quiet: a re-score is minutes of AppView calls, and
+    // the DM poll waits for all of them.
     if (!quiet()) return;
     enqueue('drift', async () => {
       const convoId = await ownerConvo(chat);
@@ -462,6 +439,7 @@ function scheduleWatching() {
           agent,
           reference,
           model,
+          everyMs: config.watchEveryMs,
           log: (msg, fields) => logger.info(msg, fields),
         }),
       );
@@ -520,17 +498,9 @@ async function start() {
     via: session.via,
   });
 
-  if (botDid === config.ownerDid) {
-    // The bot answering itself is a loop with a credit card attached.
-    throw new Error(
-      'MOD_IDENTIFIER and MOD_OWNER_DID are the same account; the bot would answer its own posts',
-    );
-  }
-
-  // Probe the chat service once at boot rather than discovering at 3am that the
-  // app password was created without "Allow access to your direct messages".
-  // That failure is silent by design: a plain app password is simply excluded
-  // from chat.bsky.*, so the loop finds nothing and reports success forever.
+  // Probe the chat service once at boot. An app password made without "Allow
+  // access to your direct messages" is simply excluded from chat.bsky.*, so
+  // the DM loop would find nothing and report success forever.
   try {
     await chat.chat.bsky.convo.getLog({});
     logger.info('Chat access confirmed');
@@ -552,10 +522,16 @@ async function start() {
     runSnapshot({ force: true });
   }
 
-  scheduleDmPoll();
   scheduleSnapshot();
-  scheduleDrift();
-  scheduleWatching();
+  // A dry run never posts or DMs. The DM loop, the re-score, watches and
+  // alerts all send DMs or write to the list, so they stay off.
+  if (config.dryRun) {
+    logger.info('DRY_RUN: DMs, the re-score, watches and alerts are off');
+  } else {
+    scheduleDmPoll();
+    scheduleDrift();
+    scheduleWatching();
+  }
   stream = connectJetstream({ onEvent });
 
   if (config.statsIntervalMs > 0) {
@@ -567,7 +543,7 @@ async function start() {
   // so a misconfigured URL shows up now rather than mid-answer.
   await atmosphereTools();
 
-  logger.info('Consumer started', {
+  logger.info('Bot started', {
     owner: config.ownerDid,
     answering: config.roster.all.length,
     writers: config.roster.allWriters.length,
@@ -579,9 +555,6 @@ async function start() {
     provider: config.provider,
     model: modelsEnabled() ? model : '(none: commands only)',
     dmMode: config.dmMode,
-    ...(config.dmMode === 'agent'
-      ? { operatorModel: config.operatorModel || '(same as analyst)' }
-      : {}),
     check: CHECK_MODEL,
     escalation: ESCALATION_MODEL,
     watchEveryMs: config.watchEveryMs,
@@ -601,9 +574,9 @@ async function shutdown(signal) {
   if (alertTimer) clearInterval(alertTimer);
   if (statsTimer) clearInterval(statsTimer);
   stream?.close();
-  // Let an in-flight answer finish rather than killing it mid-thread and
-  // leaving half a reply posted. Docker waits 10s by default before killing
-  // (compose.yaml raises it to 60s), systemd 90s.
+  // Let an in-flight answer finish rather than leave half a reply posted.
+  // Docker waits 10s by default before killing (compose.yaml sets 60s),
+  // systemd 90s.
   await Promise.race([chain, new Promise((r) => setTimeout(r, 45_000))]);
   closeDb();
   logStats();

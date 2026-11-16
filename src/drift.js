@@ -1,21 +1,13 @@
 // Re-score the list against today's graph, and say what moved.
 //
-// The system's founding argument is that a bulk sweep knows the graph around
-// one post at one moment and nothing about how those accounts relate to the
-// owner. That argument does not stop being true after the sweep. Someone
-// blocked months ago as a stranger may have three vouches now, and until this
-// existed nothing checked: the audit was something the owner had to run by
-// hand.
-//
-// So this runs the audit on a timer and DMs only the DELTAS. A weekly message
-// saying "6 accounts on your list are no longer strangers" is a list that
-// corrects itself. A weekly message restating thousands of unchanged rows is a
-// message that stops being read, which is the same failure as a batch nobody
-// reviews.
+// A bulk sweep knows the graph around one post at one moment. Someone blocked
+// months ago as a stranger may have three vouches now, so this re-scores the
+// list on a timer and DMs only the DELTAS. A weekly message restating
+// thousands of unchanged rows is one that stops being read, which is the same
+// failure as a batch nobody reviews.
 //
 // Scoring a list of several thousand accounts takes hundreds of AppView
-// requests, so this runs in the background on its own timer instead of in
-// the path of a DM.
+// requests, so this runs in the background instead of in the path of a DM.
 
 import crypto from 'node:crypto';
 
@@ -28,7 +20,7 @@ import { chunkForDm } from './lib/agent.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
-/** "1 are gone" is the sort of thing that makes a machine sound like a machine. */
+/** "1 are gone" makes a machine sound like a machine. */
 const plural = (n, one, many) =>
   `${n.toLocaleString()} ${n === 1 ? one : many}`;
 
@@ -64,40 +56,27 @@ async function listMembers(agent) {
   return [...new Set(subjects)];
 }
 
-/** The most recent audit of this list that finished and scored something. */
-export async function latestAudit(list = listUri()) {
-  const rows = await select('audit', {
-    select: 'id,list_uri,started_at,finished_at,total,scored',
-    eq: { list_uri: list },
+/**
+ * The band each account had at the last audit of this list that FINISHED and
+ * scored something. A run writes its row before it scores anything, so one
+ * killed partway would otherwise become the baseline, and the next brief would
+ * call every account "added since the last audit".
+ */
+async function previousBands() {
+  const [last] = await select('audit', {
+    select: 'id',
+    eq: { list_uri: listUri() },
     where: { finished_at: 'not.is.null', total: 'gt.0' },
     order: 'started_at.desc',
     limit: 1,
   });
-  return rows?.[0] ?? null;
-}
-
-/**
- * The band each account had at the last audit.
- *
- * The last one that FINISHED and scored something, of this list. Runs that
- * scored nothing are skipped (an empty one would shadow a real baseline), and
- * so are runs that never finished. A run writes its row before it scores
- * anything, so one killed partway (a restart, an AppView error) used to become
- * the baseline, and the next brief called thousands of accounts "added since
- * the last audit".
- */
-async function previousBands() {
-  const last = await latestAudit();
-  if (!last) return { auditId: null, bands: new Map() };
+  if (!last) return new Map();
   const items = await selectAll('audit_item', {
     select: 'did,band',
     eq: { audit_id: last.id },
     order: 'did.asc',
   });
-  return {
-    auditId: last.id,
-    bands: new Map(items.map((i) => [i.did, i.band])),
-  };
+  return new Map(items.map((i) => [i.did, i.band]));
 }
 
 /**
@@ -112,7 +91,7 @@ export async function runDrift(agent) {
 
   const { ref, thresholds, takenAt } = await loadReference();
   const scorer = createScorer({ ...ref, thresholds });
-  const { bands: before } = await previousBands();
+  const before = await previousBands();
 
   const auditId = crypto.randomUUID();
   await upsert('audit', [
@@ -150,11 +129,7 @@ export async function runDrift(agent) {
 
       const was = before.get(did);
       if (was === undefined) added += 1;
-      else if (
-        was !== a.band &&
-        NOT_A_STRANGER.has(a.band) &&
-        was === 'UNKNOWN'
-      ) {
+      else if (was === 'UNKNOWN' && NOT_A_STRANGER.has(a.band)) {
         // The one that matters: a stranger who is not one any more.
         drifted.push({
           did,
@@ -234,18 +209,22 @@ export function renderBrief({ scored, drifted, gone, added }) {
 }
 
 /**
- * Run if it is due, and tell the owner if anything moved.
+ * Run if it is due, and tell the owner if anything moved. Silence is the
+ * correct output most weeks.
  *
- * Silence is the correct output most weeks. A brief that arrives every week
- * saying nothing changed is one that stops being read.
+ * The brief is recorded before it is sent, and a failed record stops the run,
+ * so a week's brief goes out at most once.
  */
 export async function maybeRunDrift(agent, chat, convoId) {
-  const rows = await select('brief', {
-    select: 'for_date,sent_at',
+  // Nowhere to send it: wait for the next check rather than spend the week's
+  // run on a brief nobody receives.
+  if (!convoId) return null;
+  const [latest] = await select('brief', {
+    select: 'for_date',
     order: 'for_date.desc',
     limit: 1,
-  }).catch(() => []);
-  const last = rows?.[0]?.for_date ? Date.parse(rows[0].for_date) : 0;
+  });
+  const last = latest?.for_date ? Date.parse(latest.for_date) : 0;
   const dueAfter = config.driftEveryHours * 3600_000;
   if (Date.now() - last < dueAfter) return null;
 
@@ -259,9 +238,9 @@ export async function maybeRunDrift(agent, chat, convoId) {
       body: body ?? 'No drift.',
       sent_at: body ? new Date().toISOString() : null,
     },
-  ]).catch(() => {});
+  ]);
 
-  if (body && chat && convoId) {
+  if (body) {
     for (const chunk of chunkForDm(body)) {
       await chat.chat.bsky.convo.sendMessage({
         convoId,

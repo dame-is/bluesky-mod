@@ -1,7 +1,8 @@
 // One-time setup for the bot account. Run it after filling in .env:
 //
-//   npm run setup                       (or: docker compose run --rm bot npm run setup)
-//   npm run setup -- --name "quiet"     to choose the list's name
+//   npm run setup
+//   npm run setup -- --name "quiet"       to choose the list's name
+//   docker compose run --rm bot npm run setup
 //
 // It logs in as the bot and then:
 //
@@ -20,6 +21,8 @@ import { openDb, closeDb } from '../src/bot/db.js';
 const args = process.argv.slice(2);
 const nameAt = args.indexOf('--name');
 const listName = nameAt >= 0 && args[nameAt + 1] ? args[nameAt + 1] : 'list';
+
+const MODLIST = 'app.bsky.graph.defs#modlist';
 
 const say = (line = '') => console.log(line);
 const fail = (line) => {
@@ -75,6 +78,7 @@ async function main() {
 
   // 3. The list.
   const existing = process.env.MOD_LIST_URI;
+  let listUri = existing;
   if (existing) {
     const m = /^at:\/\/(did:[^/]+)\/app\.bsky\.graph\.list\/([^/]+)$/.exec(existing);
     if (!m) return fail(`MOD_LIST_URI is not a list URI: ${existing}`);
@@ -87,14 +91,20 @@ async function main() {
       .getRecord({ repo: did, collection: 'app.bsky.graph.list', rkey: m[2] })
       .catch(() => null);
     if (!rec) return fail(`MOD_LIST_URI names a list that does not exist: ${existing}`);
-    say(`List: "${rec.data.value.name}" (${rec.data.value.purpose.split('#')[1]}) is ready.`);
+    if (rec.data.value?.purpose !== MODLIST) {
+      return fail(
+        'MOD_LIST_URI is not a moderation list, and only a moderation list can be subscribed to as a block. ' +
+          'Leave MOD_LIST_URI empty and run setup again to create one.',
+      );
+    }
+    say(`List: "${rec.data.value.name}" is ready.`);
   } else {
     const created = await agent.com.atproto.repo.createRecord({
       repo: did,
       collection: 'app.bsky.graph.list',
       record: {
         $type: 'app.bsky.graph.list',
-        purpose: 'app.bsky.graph.defs#modlist',
+        purpose: MODLIST,
         name: listName,
         createdAt: new Date().toISOString(),
       },
@@ -104,14 +114,15 @@ async function main() {
     say('Add this line to .env, then start the bot:');
     say('');
     say(`  MOD_LIST_URI=${created.data.uri}`);
+    listUri = created.data.uri;
   }
 
-  const rkey = (process.env.MOD_LIST_URI || '').split('/').pop();
+  const rkey = listUri.split('/').pop();
   const handle = agent.session?.handle;
   say('');
   say('Last steps, from your own account:');
   say(`  - Open the bot's profile (https://bsky.app/profile/${handle}), go to Lists, open the list and choose Subscribe > Block (or Mute).`);
-  if (rkey) say(`    Direct link: https://bsky.app/profile/${handle}/lists/${rkey}`);
+  say(`    Direct link: https://bsky.app/profile/${handle}/lists/${rkey}`);
   say('  - Send the bot a DM saying "help".');
 }
 

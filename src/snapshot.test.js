@@ -1,13 +1,18 @@
-// Starting a snapshot: the protected set is swapped without ever being empty,
-// and a failure part way through leaves the old one and no new snapshot.
+// The snapshot's steps: when one is started, finalised or left alone, and how
+// the protected set is swapped without ever being empty.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const db = { circle: [], protected: [], writes: [] };
+const db = { circle: [], protected: [], writes: [], takenAt: null, counts: {} };
 const fail = { protectedUpsert: false };
 
 vi.mock('./bot/db.js', () => ({
-  select: vi.fn(async () => []),
+  // Only the newest snapshot's timestamp is ever read back here.
+  select: vi.fn(async (table, { select } = {}) =>
+    table === 'circle' && select === 'taken_at' && db.takenAt
+      ? [{ taken_at: db.takenAt }]
+      : [],
+  ),
   selectAll: vi.fn(async (table, { eq = {} } = {}) =>
     (db[table] || []).filter((r) =>
       Object.entries(eq).every(([k, v]) => r[k] === v),
@@ -45,7 +50,7 @@ vi.mock('./bot/db.js', () => ({
   }),
   update: vi.fn(async () => {}),
   rpc: vi.fn(async () => 0),
-  count: vi.fn(async () => 0),
+  count: vi.fn(async (table) => db.counts[table] ?? 0),
 }));
 
 vi.mock('./lib/atproto.js', () => ({
@@ -63,6 +68,8 @@ beforeEach(() => {
   fail.protectedUpsert = false;
   db.circle = [];
   db.writes = [];
+  db.takenAt = null;
+  db.counts = {};
   db.protected = [
     { did: 'did:plc:friend', reason: 'you follow them', source: 'derived' },
     { did: 'did:plc:unfollowed', reason: 'you follow them', source: 'derived' },
@@ -89,5 +96,54 @@ describe('starting a snapshot', () => {
     expect(db.protected.map((r) => r.did)).toContain('did:plc:friend');
     // And no circle rows, so the next step starts the snapshot again.
     expect(db.circle).toEqual([]);
+  });
+
+  it('keeps an entry added by hand as one, even for someone the owner follows', async () => {
+    db.protected.push({
+      did: 'did:plc:newfriend',
+      reason: 'added by hand',
+      source: 'manual',
+    });
+    await snapshotStep({ restart: true });
+    expect(
+      db.protected.find((r) => r.did === 'did:plc:newfriend'),
+    ).toMatchObject({ source: 'manual', reason: 'added by hand' });
+  });
+});
+
+describe('a snapshot already there', () => {
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString();
+
+  it('is left alone while it is complete and fresh', async () => {
+    db.takenAt = daysAgo(2);
+    db.counts.vouch = 10;
+    expect((await snapshotStep()).state).toBe('idle');
+    expect(db.writes).toEqual([]);
+  });
+
+  it('is rebuilt once it is older than the maximum age', async () => {
+    db.takenAt = daysAgo(8);
+    db.counts.vouch = 10;
+    await snapshotStep();
+    expect(db.writes).toContain('circle');
+  });
+
+  it('is finalised, not rebuilt, while edges wait to be aggregated', async () => {
+    db.takenAt = daysAgo(2);
+    db.counts.circle_follow = 40;
+    expect((await snapshotStep()).state).toBe('finalised');
+    expect(db.writes).toEqual([]);
+  });
+
+  it('is finalised again while it is fresh, even with no vouches', async () => {
+    db.takenAt = daysAgo(0.1);
+    expect((await snapshotStep()).state).toBe('finalised');
+    expect(db.writes).toEqual([]);
+  });
+
+  it('is rebuilt after a day when it came to no vouches', async () => {
+    db.takenAt = daysAgo(2);
+    await snapshotStep();
+    expect(db.writes).toContain('circle');
   });
 });
