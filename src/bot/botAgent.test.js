@@ -1,7 +1,7 @@
-// The guard that matters here is the account-identity check. A DID and an app
-// password from two different accounts is a plausible copy-paste mistake, login
-// succeeds because the password is valid for SOMEONE, and every write afterwards
-// lands in a repo nobody meant to touch.
+// The guard that matters here is the account check. A DID and an app password
+// from two different accounts is an easy copy-paste mistake: login succeeds,
+// because the password is valid for someone, and every write afterwards lands
+// in a repo nobody meant to touch.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -80,8 +80,7 @@ describe('botAgent', () => {
   });
 
   it('resumes a stored session instead of spending a createSession', async () => {
-    // The whole reason this file exists: createSession is capped at 300/day,
-    // and logging in every ten minutes alone would spend 144 of them.
+    // createSession is capped at 300 a day per account; a refresh is not.
     sessionRow = { did: BOT, refreshJwt: 'r' };
     const { via } = await botAgent();
     expect(via).toBe('resume');
@@ -98,27 +97,28 @@ describe('botAgent', () => {
     await expect(botAgent()).rejects.toThrow(/belong to different accounts/);
   });
 
-  it('refuses a resumed session for a different account too', async () => {
-    // A stored session written under an earlier misconfiguration would
-    // otherwise sail past the check that only runs on fresh logins.
+  it('never resumes a stored session for a different account', async () => {
+    // Left over from a misconfigured run. Resuming it would act as the wrong
+    // account, or fail the account check even after the password is fixed.
     sessionRow = { did: OTHER, refreshJwt: 'r' };
-    await expect(botAgent()).rejects.toThrow(/belong to different accounts/);
+    const { agent, via } = await botAgent();
+    expect(via).toBe('login');
+    expect(agent.session.did).toBe(BOT);
   });
 
   it('accepts a handle identifier, and cannot check it', async () => {
-    // Stated so the tradeoff is visible: a handle still works, it just gives up
-    // the mismatch guard, which is the argument for storing the DID.
+    // A handle still works; it gives up the account check, which is why
+    // src/config.js asks for the DID.
     process.env.MOD_IDENTIFIER = 'bot.example.com';
     loginAs = OTHER;
     const { agent } = await botAgent();
     expect(agent.session.did).toBe(OTHER);
   });
 
-  it('authenticates at the PDS that actually holds the account', async () => {
-    // atproto has no central login. A moderator account can live on its own
-    // PDS, and createSession against bsky.social for an account it has never
-    // heard of answers "Invalid identifier or password". That reads as a bad
-    // app password and sends you to rotate a working one.
+  it('authenticates at the PDS that holds the account', async () => {
+    // atproto has no central login. bsky.social answers "Invalid identifier
+    // or password" for an account it does not host, which reads as a bad app
+    // password.
     const { agent } = await botAgent();
     expect(agent.opts.service).toBe('https://pds.example.com');
   });

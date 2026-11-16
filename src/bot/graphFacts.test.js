@@ -5,9 +5,11 @@ const constellation = {
   getManyToMany: vi.fn(),
 };
 vi.mock('../lib/constellation.js', () => constellation);
-vi.mock('../lib/atproto.js', () => ({
+const atproto = {
   resolvePds: vi.fn(async () => 'https://pds.test'),
-}));
+  fetchWithTimeout: vi.fn(),
+};
+vi.mock('../lib/atproto.js', () => atproto);
 
 const facts = await import('./graphFacts.js');
 
@@ -20,36 +22,20 @@ const listitem = (did, rkey, list = LIST) => ({
   },
   otherSubject: list,
 });
+const page = (records, cursor = null) => ({
+  ok: true,
+  json: async () => ({ records, cursor }),
+});
+const record = (rkey, subject, list = LIST) => ({
+  uri: `at://did:plc:bot/app.bsky.graph.listitem/${rkey}`,
+  value: { list, subject },
+});
 
 beforeEach(() => {
   facts.resetGraphFacts();
   constellation.getBacklinks.mockReset();
   constellation.getManyToMany.mockReset();
-});
-
-describe('who blocks the owner', () => {
-  it('asks for fifty accounts at a time, filtered by account', async () => {
-    constellation.getBacklinks.mockImplementation(async (_t, _s, { dids }) => ({
-      records: dids.filter((d) => d.endsWith('7')).map((did) => ({ did })),
-    }));
-    const dids = Array.from({ length: 60 }, (_, i) => `did:plc:x${i}`);
-    const out = await facts.whoBlocks(dids);
-    expect(constellation.getBacklinks).toHaveBeenCalledTimes(2);
-    expect(constellation.getBacklinks.mock.calls[0][2].dids).toHaveLength(50);
-    expect([...out].sort()).toEqual([
-      'did:plc:x17',
-      'did:plc:x27',
-      'did:plc:x37',
-      'did:plc:x47',
-      'did:plc:x57',
-      'did:plc:x7',
-    ]);
-  });
-
-  it('says it could not tell rather than "nobody"', async () => {
-    constellation.getBacklinks.mockResolvedValue(null);
-    expect(await facts.whoBlocks(['did:plc:a'])).toBe(null);
-  });
+  atproto.fetchWithTimeout.mockReset();
 });
 
 describe('membership for a write', () => {
@@ -86,38 +72,30 @@ describe('membership for a write', () => {
 
   it('walks the repo when Constellation cannot say', async () => {
     constellation.getManyToMany.mockResolvedValue(null);
-    const fetchImpl = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        records: [
-          {
-            uri: 'at://did:plc:bot/app.bsky.graph.listitem/r1',
-            value: { list: LIST, subject: 'did:plc:a' },
-          },
-          {
-            uri: 'at://did:plc:bot/app.bsky.graph.listitem/r2',
-            value: { list: LIST, subject: 'did:plc:a' },
-          },
-          {
-            uri: 'at://did:plc:bot/app.bsky.graph.listitem/r3',
-            value: { list: 'other', subject: 'did:plc:a' },
-          },
-        ],
-      }),
-    }));
-    const listed = await facts.readListed(LIST, { fetchImpl });
+    atproto.fetchWithTimeout.mockResolvedValue(
+      page([
+        record('r1', 'did:plc:a'),
+        record('r2', 'did:plc:a'),
+        record('r3', 'did:plc:a', 'other'),
+      ]),
+    );
     // Duplicates are kept: taking someone off means deleting every copy.
-    expect(listed.get('did:plc:a')).toEqual(['r1', 'r2']);
+    expect(await facts.rkeysForWrite(LIST, 'did:plc:a')).toEqual(['r1', 'r2']);
   });
 
   it('can be told not to walk, for a caller that will walk once for many', async () => {
     constellation.getManyToMany.mockResolvedValue(null);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     expect(await facts.rkeysForWrite(LIST, 'did:plc:a', { walk: false })).toBe(
       null,
     );
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
+    expect(atproto.fetchWithTimeout).not.toHaveBeenCalled();
+  });
+
+  it('says it could not tell when the list runs past the page cap', async () => {
+    // A partial walk would call everyone past the cut "not listed".
+    const fetchImpl = vi.fn(async () => page([record('r1', 'did:plc:a')], 'more'));
+    expect(await facts.readListed(LIST, { fetchImpl, maxPages: 2 })).toBe(null);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -126,5 +104,32 @@ describe('the held copy, for reading many at once', () => {
     expect(facts.isListed(LIST, 'did:plc:a')).toBe(null);
     expect(facts.blocksMe('did:plc:a')).toBe(null);
     expect(facts.listedView(LIST).has('did:plc:a')).toBe(false);
+  });
+
+  it('holds the list and who blocks the owner after one load', async () => {
+    atproto.fetchWithTimeout.mockResolvedValue(page([record('r1', 'did:plc:a')]));
+    constellation.getBacklinks.mockResolvedValue({
+      records: [{ did: 'did:plc:b' }],
+      cursor: null,
+    });
+    await Promise.all([
+      facts.graphFacts({ list: LIST }),
+      facts.graphFacts({ list: LIST }),
+    ]);
+    expect(atproto.fetchWithTimeout).toHaveBeenCalledTimes(1);
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
+    expect(facts.isListed(LIST, 'did:plc:c')).toBe(false);
+    expect(facts.blocksMe('did:plc:b')).toBe(true);
+    expect(facts.blocksMe('did:plc:c')).toBe(false);
+  });
+
+  it('leaves blocks unknown when there are more blockers than it reads', async () => {
+    atproto.fetchWithTimeout.mockResolvedValue(page([]));
+    constellation.getBacklinks.mockResolvedValue({
+      records: [{ did: 'did:plc:b' }],
+      cursor: 'more',
+    });
+    await facts.graphFacts({ list: LIST });
+    expect(facts.blocksMe('did:plc:b')).toBe(null);
   });
 });

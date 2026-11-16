@@ -1,12 +1,10 @@
-// The scoring reference, loaded once and shared by everything that scores.
+// The scoring reference, shared by everything that scores.
 //
-// DMs, public replies, plans and the drift audit all need the same thing: the
-// newest finalised snapshot, turned into the lookups `createScorer` wants.
-// When that was copied into each caller, the copies drifted: one scored
-// against the default thresholds and the others against tuned ones, so the
-// analyst could report a different band than a preflight for the same account
-// on the same day. Bands the analyst cannot change are only worth something
-// if they are the same bands.
+// DMs, public replies, plans and the drift audit all score against the newest
+// finalised snapshot and the same thresholds, loaded here and nowhere else,
+// so the analyst and a preflight never report different bands for the same
+// account on the same day. Bands the analyst cannot change are only worth
+// something if they are the same bands.
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
 import {
@@ -28,10 +26,9 @@ import { graphFacts, listedView, blockersView } from './graphFacts.js';
 /**
  * The newest finalised snapshot, as scorer-shaped lookups.
  *
- * Throws rather than scoring against nothing. Scoring against an empty vouch
- * table puts every account in UNKNOWN and waves the whole batch through: the
- * exact failure this system exists to prevent, wearing the costume of a
- * successful run.
+ * Throws rather than scoring against nothing. An empty vouch table puts every
+ * account in UNKNOWN and waves the whole batch through, which is the failure
+ * this system exists to prevent, reported as a successful run.
  *
  * @returns {Promise<{ takenAt: string, ref: object, thresholds: object }>}
  */
@@ -61,9 +58,9 @@ export async function loadReference() {
       order: 'did.asc',
     }),
     selectAll('protected', { select: 'did,reason', order: 'did.asc' }),
-    // Who is already on the list and who already blocks the owner, loaded beside
-    // the vouches rather than after them. Held for half an hour; see
-    // graphFacts.js. A failure leaves both unknown rather than empty-and-wrong.
+    // Who is already on the list and who already blocks the owner, loaded
+    // beside the vouches and held for half an hour (graphFacts.js). A failure
+    // leaves both unknown rather than empty and wrong.
     graphFacts({ list }).catch(() => null),
   ]);
 
@@ -87,10 +84,9 @@ export async function loadReference() {
 /**
  * The read-only backends the analyst's tools call.
  *
- * Every one is a SELECT or a public AppView read. There is deliberately no
- * backend here that blocks, mutes, lists or approves: the analyst's entire
- * surface is looking, and `buildTools` in agent.js can only expose what this
- * object offers.
+ * Every one is a SELECT or a public AppView read. There is no backend here
+ * that blocks, mutes, lists or approves: the analyst only looks, and
+ * `buildTools` in agent.js can only expose what this object offers.
  *
  * Built once per reference load and shared across turns, so a conversation does
  * not re-read the vouch table for every message.
@@ -114,9 +110,9 @@ export function makeIo({ ref, takenAt, pulseBudgetMs = 25_000 }) {
     /** Score many accounts at once. For a watch, which meets them in batches. */
     score: (dids) => scorer.score(dids),
     async lookUp(actor) {
-      // Resolve first: score() keys its result by the exact string it is handed,
-      // so a handle would come back as an unresolved account rather than as the
-      // person it names.
+      // Resolve first: score() keys its result by the exact string it is
+      // handed, so a handle would come back as an unresolved account rather
+      // than as the person it names.
       const did = await resolveActor(actor);
       const scored = await scorer.score([did]);
       return [...scored.values()][0] ?? null;
@@ -124,12 +120,9 @@ export function makeIo({ ref, takenAt, pulseBudgetMs = 25_000 }) {
     /**
      * What a slice of the network is talking about.
      *
-     * The circle comes from the SNAPSHOT rather than from a live getFollows,
-     * so a digest is built from the same set of accounts the bands were
-     * computed against.
-     *
-     * The slow path here is a fan-out over every account the owner follows:
-     * a couple of hundred accounts measured at about 9 seconds.
+     * The circle comes from the snapshot rather than a live getFollows, so a
+     * digest reads the same accounts the bands were computed against. Reading
+     * every one of their feeds is slow, hence the time budget.
      */
     pulse: (opts = {}) =>
       pulse({

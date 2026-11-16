@@ -20,7 +20,7 @@ describe('loadAgentConfig', () => {
     const out = await loadAgentConfig({
       readFile: reading(JSON.stringify({ style: 'plain', guidance: 'be brief' })),
     });
-    expect(out).toMatchObject({ style: 'plain', guidance: 'be brief', source: 'file' });
+    expect(out).toMatchObject({ style: 'plain', guidance: 'be brief' });
   });
 
   it('treats a missing file as no config, not an error', async () => {
@@ -34,6 +34,17 @@ describe('loadAgentConfig', () => {
     const broken = reading('{"style": "plain",');
     expect(await loadAgentConfig({ readFile: broken, log })).toMatchObject({ style: 'plain' });
     await loadAgentConfig({ readFile: broken, log });
+    expect(logged).toHaveLength(1);
+  });
+
+  it('keeps the last good copy when the file cannot be read, and says so', async () => {
+    const logged = [];
+    const log = (msg) => logged.push(msg);
+    await loadAgentConfig({ readFile: reading('{"style":"plain"}'), log });
+    const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
+    expect(await loadAgentConfig({ readFile: reading(denied), log })).toMatchObject({
+      style: 'plain',
+    });
     expect(logged).toHaveLength(1);
   });
 

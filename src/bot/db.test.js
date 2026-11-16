@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { openDb, closeDb, select, selectAll, upsert, update, del, count, rpc } from './db.js';
 
@@ -36,7 +39,7 @@ describe('db', () => {
     expect(await count('decision', { eq: { already_listed: true } })).toBe(1);
   });
 
-  it('understands the PostgREST filters the code uses', async () => {
+  it('understands the filter strings callers use', async () => {
     await upsert('plan', [{ id: 'p' }]);
     await upsert('decision', [
       { plan_id: 'p', did: 'did:plc:a', band: 'UNKNOWN', acted_at: '2026-01-02T00:00:00.000Z', approved_via: 'agent:triage:hostile' },
@@ -53,7 +56,7 @@ describe('db', () => {
     expect(await dids({ where: { approved_via: 'like.*triage:hostile*' } })).toEqual(['did:plc:a']);
   });
 
-  it('sorts nulls the way Postgres does', async () => {
+  it('sorts null as larger than any value', async () => {
     await upsert('plan', [{ id: 'p' }]);
     await upsert('decision', [
       { plan_id: 'p', did: 'a', band: 'X', acted_at: '2026-01-01' },
@@ -106,5 +109,18 @@ describe('db', () => {
     const [c] = await select('dm_choice', {});
     expect(c.pending).toEqual({ commands: ['block @x'] });
     expect(c.options).toEqual([]);
+  });
+
+  it('creates the file readable by its owner only', () => {
+    closeDb();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-db-'));
+    const file = path.join(dir, 'state', 'bot.db');
+    try {
+      openDb(file);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    } finally {
+      closeDb();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

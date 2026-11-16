@@ -1,23 +1,20 @@
 // How the bot is steered: its voice, report templates and limits, read from
 // an optional JSON file (MOD_CONFIG_FILE, default ./config/bot.json).
 //
-// WHY A FILE THE BOT CANNOT WRITE. The bot holds an app password. If that ever
-// leaks, the attacker gets the bot and should not also get the ability to
-// rewrite the instructions the bot runs under. Mount the file read-only (the
-// compose file does) and the configuration stays read-only to the thing being
-// configured.
+// The bot never writes this file. Whoever takes over the bot should not also
+// get to rewrite the instructions it runs under, so compose.yaml mounts the
+// file read-only.
 //
-// WHAT THE FILE CAN AND CANNOT DO. `style` replaces the voice block; `guidance`
-// is appended after the rules as standing instructions. Neither can remove what
-// the bands mean, the untrusted-input handling, or the length budgets. Those
-// are earlier in the same prompt string and stay in version control, because
-// they are the claims that keep the decision log replayable and the reply
-// well-formed. See systemPromptFor in src/lib/agent.js.
+// `style` replaces the voice block and `guidance` is appended after the rules
+// as standing instructions. Neither can remove what the bands mean, the
+// untrusted-input handling or the length budgets. Those come earlier in the
+// same prompt and stay in version control, because they keep the decision log
+// replayable and the reply well-formed (systemPromptFor in src/lib/agent.js).
 //
-// A FILE THAT STOPS PARSING KEEPS THE LAST GOOD COPY. An edit that breaks the
-// JSON should not drop the bot back to defaults mid-conversation; a silent
-// change of register is exactly the kind of thing nobody notices for a week.
-// The failure is logged once per change of the file.
+// A file that stops parsing, or cannot be read, keeps the last good copy. A
+// broken edit should not drop the bot back to its defaults mid-conversation,
+// since a silent change of register is easy to miss for a week. Each distinct
+// failure is logged once.
 //
 // Every field is optional:
 //
@@ -36,14 +33,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /** Long enough to be a voice, short enough not to be a second system prompt. */
-export const MAX_FIELD_CHARS = 2000;
+const MAX_FIELD_CHARS = 2000;
 
 /**
  * The numeric knobs, and the range each is allowed.
  *
- * CLAMPED, not merely defaulted. Unlike voice, these have a bill attached: a
- * typo in maxSteps is a runaway loop, not an awkward sentence. The file can
- * move them within a range someone chose; it cannot set maxSteps to 400.
+ * Clamped, not just defaulted. Unlike voice, these have a bill attached: a
+ * typo in maxSteps is a runaway loop rather than an awkward sentence. The file
+ * can move them within these ranges and no further.
  */
 export const LIMITS = {
   /** Conversation turns kept as history. */
@@ -60,13 +57,14 @@ export const LIMITS = {
  * What a post sent with no words means: the card (counts, and words to answer
  * with) or a block of whoever wrote it, through the quick lane.
  */
-export const BARE_POST = ['card', 'author'];
+const BARE_POST = ['card', 'author'];
 const barePostOf = (v) => (BARE_POST.includes(v) ? v : 'card');
 
 /**
  * A model id, loosely: `provider/model` for a gateway, a bare name for a
- * direct provider or a local server (`llama3.1:8b`). A malformed value would
- * break every turn, so it is dropped instead.
+ * direct provider or a local server (`name:tag`). A malformed value is
+ * dropped: falling back to the default model is recoverable, and a 400 on
+ * every turn is not.
  */
 const MODEL_SHAPE = /^[a-z0-9][a-z0-9._:/-]{0,120}$/i;
 
@@ -88,7 +86,7 @@ const clip = (v, max = MAX_FIELD_CHARS) =>
     .slice(0, max);
 
 /** Where the file is looked for. */
-export function configPath(env = process.env) {
+function configPath(env = process.env) {
   return env.MOD_CONFIG_FILE || path.join(process.cwd(), 'config', 'bot.json');
 }
 
@@ -105,12 +103,9 @@ export function parseConfig(value) {
     openers: clip(value.openers),
     report: clip(value.report, 4000),
     postReport: clip(value.postReport, 4000),
-    // An unusable model string is dropped rather than carried: falling back to
-    // the configured default is recoverable, and a 400 on every turn is not.
     model: MODEL_SHAPE.test(model) ? model : '',
     limits: value.limits ? clampLimits(value.limits) : null,
     barePost: barePostOf(value.barePost),
-    source: 'file',
   };
   const has =
     out.style ||
@@ -126,6 +121,14 @@ export function parseConfig(value) {
 
 let lastGood = null;
 let lastError = null;
+
+/** Log a failure once, until a different one happens or the file reads. */
+function warnOnce(log, msg, { file, err }) {
+  const text = String(err?.message || err);
+  if (text === lastError) return;
+  lastError = text;
+  log(msg, { file, err: text });
+}
 
 /**
  * The effective configuration: the file if it reads, the last good copy if it
@@ -145,25 +148,25 @@ export async function loadAgentConfig({
     // No file is the normal state, not an error.
     if (err?.code === 'ENOENT') {
       lastGood = null;
+      lastError = null;
       return null;
     }
+    warnOnce(log, 'The config file cannot be read; keeping the last good copy', {
+      file,
+      err,
+    });
     return lastGood;
   }
   try {
     const parsed = parseConfig(JSON.parse(text));
     lastGood = parsed;
     lastError = null;
-    if (parsed) parsed.updated_at = null;
     return parsed;
   } catch (err) {
-    const msg = String(err?.message || err);
-    if (msg !== lastError) {
-      lastError = msg;
-      log('The config file does not parse; keeping the last good copy', {
-        file,
-        err: msg,
-      });
-    }
+    warnOnce(log, 'The config file does not parse; keeping the last good copy', {
+      file,
+      err,
+    });
     return lastGood;
   }
 }

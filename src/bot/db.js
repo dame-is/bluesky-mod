@@ -1,7 +1,14 @@
 // The bot's state, in one SQLite file, through node:sqlite.
 //
-// The verbs and the filter grammar are PostgREST's, because the rest of the
-// code was written against PostgREST and these few verbs are all it needs:
+// A file rather than a database server, so running the bot needs nothing but
+// Node. Point DATABASE_PATH (or DATA_DIR) at a volume that survives restarts.
+// Losing it loses the decision log, which nothing rebuilds; the snapshot
+// rebuilds itself.
+//
+// The file holds the moderation log (who was added, why, and what they wrote)
+// and the bot's refresh token, so it is created readable by its owner only.
+//
+// Callers use a few verbs, with filters written as strings:
 //
 //   select('decision', { eq: { plan_id }, where: { band: 'neq.UNKNOWN' } })
 //
@@ -9,13 +16,8 @@
 //   eq.X  neq.X  gt.X  gte.X  lt.X  lte.X  like.*x*  in.(a,b)  is.null
 //   not.is.null  is.true  is.false
 //
-// A file rather than a database server so that running a bot needs nothing
-// but Node. Point DATABASE_PATH at a volume that survives restarts; losing it
-// loses the decision log and the snapshot (the snapshot rebuilds itself, the
-// log does not).
-//
-// Server-side only, and it holds the moderation log: who was added, why, and
-// what they wrote. Keep the file somewhere only this process can read.
+// Table and column names are checked against the schema before they reach
+// SQL, and every value is a bound parameter.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -49,7 +51,12 @@ function databasePath() {
  */
 export function openDb(file = databasePath()) {
   if (db) return db;
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ':memory:') {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // Created empty with mode 0600 before SQLite opens it. SQLite gives the
+    // -wal and -shm files the same mode as the database.
+    if (!fs.existsSync(file)) fs.closeSync(fs.openSync(file, 'a', 0o600));
+  }
   db = new DatabaseSync(file);
   db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 5000;');
   db.exec(fs.readFileSync(SCHEMA_FILE, 'utf8'));
@@ -156,7 +163,7 @@ function parseList(raw) {
 
 const OPS = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
-/** One PostgREST filter value -> [sql, params]. */
+/** One filter string -> [sql, params]. */
 function condition(t, tableName, col, filter) {
   const c = column(t, tableName, col);
   const type = t.columns.get(col);
@@ -170,16 +177,10 @@ function condition(t, tableName, col, filter) {
   const rest = s.slice(dot + 1);
   if (op in OPS) return [`${c} ${OPS[op]} ?`, [operand(type, rest)]];
   if (op === 'like') return [`${c} like ?`, [rest.replace(/\*/g, '%')]];
-  if (op === 'ilike') return [`lower(${c}) like lower(?)`, [rest.replace(/\*/g, '%')]];
   if (op === 'in') {
     const values = parseList(rest);
     if (!values.length) return ['0', []];
     return [`${c} in (${values.map(() => '?').join(',')})`, values.map((v) => operand(type, v))];
-  }
-  if (op === 'not' && rest.startsWith('in.')) {
-    const values = parseList(rest.slice(3));
-    if (!values.length) return ['1', []];
-    return [`${c} not in (${values.map(() => '?').join(',')})`, values.map((v) => operand(type, v))];
   }
   throw new Error(`db: filter ${s} on ${tableName}.${col} is not supported`);
 }
@@ -208,10 +209,8 @@ function whereClause(tableName, opts = {}) {
 }
 
 /**
- * `order: 'trust.desc,did.asc'`. Nulls sort as Postgres sorts them (last when
- * ascending, first when descending) unless `.nullsfirst`/`.nullslast` says so,
- * because SQLite's default is the opposite and the callers were written
- * against Postgres.
+ * `order: 'trust.desc,did.asc'`. Null sorts as larger than any value: last
+ * ascending, first descending.
  */
 function orderClause(t, tableName, order) {
   if (!order) return '';
@@ -220,14 +219,7 @@ function orderClause(t, tableName, order) {
     .map((term) => {
       const [col, ...mods] = term.trim().split('.');
       const desc = mods.includes('desc');
-      const nulls = mods.includes('nullsfirst')
-        ? 'nulls first'
-        : mods.includes('nullslast')
-          ? 'nulls last'
-          : desc
-            ? 'nulls first'
-            : 'nulls last';
-      return `${column(t, tableName, col)} ${desc ? 'desc' : 'asc'} ${nulls}`;
+      return `${column(t, tableName, col)} ${desc ? 'desc nulls first' : 'asc nulls last'}`;
     });
   return ` order by ${terms.join(', ')}`;
 }
@@ -256,12 +248,11 @@ export async function select(tableName, opts = {}) {
 }
 
 /**
- * Every matching row. `order` is required so that a read of a large table
- * always comes back in a defined order, the same contract callers had when
- * this paged through a server with a row cap.
+ * Every matching row, with no limit. `order` is required so that a read of a
+ * large table always comes back in a defined order.
  */
 export async function selectAll(tableName, opts = {}) {
-  const { order, pageSize: _p, maxPages: _m, ...rest } = opts;
+  const { order, ...rest } = opts;
   if (!order) {
     throw new Error(`selectAll(${tableName}) needs an order`);
   }
@@ -271,12 +262,16 @@ export async function selectAll(tableName, opts = {}) {
 /**
  * Insert rows, updating the given columns when the primary key already
  * exists. Columns a row does not mention are left alone on update and take
- * their default on insert, as with PostgREST's merge-duplicates.
+ * their default on insert.
  */
 export async function upsert(tableName, rows) {
   if (!rows?.length) return 0;
   const t = table(tableName);
   const conn = openDb();
+  // Rows of one batch usually share a shape, so each statement is prepared
+  // once. A snapshot writes tens of thousands of edges, and this runs on the
+  // thread that answers DMs.
+  const statements = new Map();
   conn.exec('begin');
   try {
     for (const input of rows) {
@@ -295,7 +290,8 @@ export async function upsert(tableName, rows) {
       const sql = `insert into "${tableName}" (${cols.map((c) => `"${c}"`).join(', ')}) values (${cols
         .map(() => '?')
         .join(', ')})${conflict}`;
-      conn.prepare(sql).run(...cols.map((c) => toDb(t.columns.get(c), row[c])));
+      if (!statements.has(sql)) statements.set(sql, conn.prepare(sql));
+      statements.get(sql).run(...cols.map((c) => toDb(t.columns.get(c), row[c])));
     }
     conn.exec('commit');
   } catch (err) {

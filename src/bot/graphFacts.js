@@ -1,43 +1,34 @@
 // What the network already says about an account before the bot says anything
 // about it: is it on the moderation list, and does it already block the owner.
 //
-// BOTH WERE MISSING. The scorer has always had an `alreadyListed` field, but
-// loadReference never passed it the list, so every lookup and every scan said
-// "not on the list" about everyone, and the agent repeated it ("was not on the
-// list before"). Nothing looked at blocks at all, though a block is a public
-// record, and a well-known account can have thousands of them.
+// Reads of many accounts at once (a scan, a lookup) use a held copy of the
+// list, walked from the bot's repo: a list of several thousand accounts is a
+// few dozen pages and a few seconds. A write does not trust that copy, because
+// the list can be edited from any client signed in as the bot. A write asks
+// Constellation about the one account, in one request, and adds what this
+// process wrote in the last few minutes, which Constellation may not have
+// indexed yet.
 //
-// THE LIST COMES FROM THE OWNER'S REPO, walked once and held: a list of
-// several thousand accounts is a few dozen pages and a few seconds. It is for
-// reading many accounts at once (a scan, a lookup). A WRITE does not trust it,
-// because someone can be removed behind its back from any Bluesky client: a
-// write asks Constellation about the one account, in one request, and adds
-// what this process wrote in the last few minutes, which Constellation may not
-// have indexed yet.
+// Blocks come from Constellation. A block lives in the blocker's repo with the
+// blocked DID as its subject, so "who blocks the owner" is a backlink query,
+// paged 1,000 at a time.
 //
-// BLOCKS COME FROM CONSTELLATION. A block lives in the blocker's repo with the
-// blocked DID as its subject, so "who blocks the owner" is a backlink query:
-// repeated `did=` filters answer it for fifty accounts in one request, and
-// paging at 1,000 answers it for everyone.
-//
-// UNKNOWN IS NOT "NO". Every reader returns null when it could not find out, and
-// the callers say so rather than reporting a clean record.
+// Unknown is not "no". Every reader returns null when it could not find out,
+// and callers say so rather than reporting a clean record.
 
 import { OWNER_DID } from '../constants.js';
-import { resolvePds } from '../lib/atproto.js';
+import { fetchWithTimeout, resolvePds } from '../lib/atproto.js';
 import { getBacklinks, getManyToMany } from '../lib/constellation.js';
 
 const BLOCK_SOURCE = 'app.bsky.graph.block:subject';
 const LISTITEM_SOURCE = 'app.bsky.graph.listitem:subject';
 
 /** How long a walked copy of the list, and the blockers, are trusted for reads. */
-export const FACTS_TTL_MS = 30 * 60_000;
+const FACTS_TTL_MS = 30 * 60_000;
 /** A failed load is retried sooner than a good one is refreshed. */
 const RETRY_MS = 2 * 60_000;
 /** How long this process remembers its own writes over Constellation's lag. */
 const OWN_WRITES_MS = 10 * 60_000;
-/** Accounts per filtered backlink request. */
-const CHECK_BATCH = 50;
 
 const ownerOf = (uri) =>
   /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''))?.[1] ?? null;
@@ -45,12 +36,11 @@ const ownerOf = (uri) =>
 /**
  * The listitem rkeys for `did` on `list`, from Constellation.
  *
- * Filtered by `otherSubject`: a popular account is on hundreds of lists, and the
- * first page of an unfiltered answer once marked five CONNECTED accounts "off
- * the list". Only records in the list owner's repo count. null means could not
- * tell, never "not listed".
+ * Filtered by `otherSubject`: a popular account is on hundreds of lists, and
+ * an unfiltered first page can miss this one entirely. Only records in the
+ * list owner's repo count. null means could not tell, never "not listed".
  */
-export async function listitemRkeys(list, did, { maxPages = 5 } = {}) {
+async function listitemRkeys(list, did, { maxPages = 5 } = {}) {
   const owner = ownerOf(list);
   const rkeys = [];
   let cursor;
@@ -78,15 +68,18 @@ export async function listitemRkeys(list, did, { maxPages = 5 } = {}) {
 }
 
 /**
- * Everyone on `list`, with each one's listitem rkeys, from the owner's repo.
+ * Everyone on `list`, with each one's listitem rkeys, from the repo that owns
+ * the list.
  *
- * A public read against the owner's PDS, so it needs no session. Duplicates are
- * kept: an account added by two plans has two listitems, and taking them off
- * the list means deleting both.
+ * A public read against that repo's PDS, so it needs no session. Duplicates
+ * are kept: an account added by two plans has two listitems, and taking them
+ * off the list means deleting both. null when the walk stops at `maxPages`
+ * with more to read, since a partial list would call everyone past the cut
+ * "not listed".
  */
 export async function readListed(
   list,
-  { fetchImpl = fetch, maxPages = 400 } = {},
+  { fetchImpl = fetchWithTimeout, maxPages = 400 } = {},
 ) {
   const owner = ownerOf(list);
   if (!owner) return null;
@@ -114,13 +107,16 @@ export async function readListed(
       ]);
     }
     cursor = body.cursor;
-    if (!cursor || !(body.records || []).length) break;
+    if (!cursor || !(body.records || []).length) return listed;
   }
-  return listed;
+  return null;
 }
 
-/** Everyone who blocks `target`. null means could not tell. */
-export async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
+/**
+ * Everyone who blocks `target`. null means could not tell, including when
+ * there are more than `maxPages` pages of them.
+ */
+async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
   const out = new Set();
   let cursor;
   for (let page = 0; page < maxPages; page += 1) {
@@ -133,26 +129,7 @@ export async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
     cursor = res.cursor;
     if (!cursor) return out;
   }
-  return out;
-}
-
-/**
- * Which of these accounts block `target`, asked now rather than read from the
- * held copy. One request per fifty. null means could not tell.
- */
-export async function whoBlocks(dids, target = OWNER_DID) {
-  const unique = [...new Set((dids || []).filter(Boolean))];
-  const out = new Set();
-  for (let i = 0; i < unique.length; i += CHECK_BATCH) {
-    const batch = unique.slice(i, i + CHECK_BATCH);
-    const res = await getBacklinks(target, BLOCK_SOURCE, {
-      limit: 100,
-      dids: batch,
-    });
-    if (!res) return null;
-    for (const r of res.records || []) if (r?.did) out.add(r.did);
-  }
-  return out;
+  return null;
 }
 
 // --- the held copy -----------------------------------------------------------
@@ -169,13 +146,10 @@ function recent(map, did, now) {
 }
 
 /**
- * The held list and blockers, reloaded when stale.
- *
- * `wait: false` hands back whatever is held, stale or not, and refreshes in the
- * background: a DM turn should not pay 2.7 seconds because half an hour passed.
- * The first load is always waited for.
+ * The held list and blockers, reloaded when stale. Concurrent callers share
+ * one load.
  */
-export async function graphFacts({ list, wait = true, now = Date.now } = {}) {
+export async function graphFacts({ list, now = Date.now } = {}) {
   const fresh =
     held &&
     held.list === list &&
@@ -194,7 +168,6 @@ export async function graphFacts({ list, wait = true, now = Date.now } = {}) {
       loading = null;
     });
   }
-  if (!wait && held && held.list === list) return held;
   return loading;
 }
 
@@ -260,11 +233,9 @@ export async function rkeysForWrite(
     rkeys = listed ? listed.get(did) || [] : null;
   }
   if (rkeys === null) return null;
-  if (recent(ownRemovals, did, now)) {
-    const removedAt = ownRemovals.get(did);
-    // Anything Constellation still shows was deleted after it indexed it.
-    if (typeof removedAt === 'number') rkeys = [];
-  }
+  // Anything Constellation still shows after a recent removal was deleted
+  // after it was indexed.
+  if (recent(ownRemovals, did, now)) rkeys = [];
   const own = ownAdds.get(did);
   if (
     own &&

@@ -1,9 +1,8 @@
 -- The bot's state, in one SQLite file.
 --
 -- Declared types matter to src/bot/db.js: JSON columns are parsed on the way
--- out and BOOLEAN columns come back as true/false, so a row reads the same as
--- it would from Postgres. Timestamps are ISO-8601 text in UTC, which sorts and
--- compares correctly as text.
+-- out and BOOLEAN columns come back as true/false. Timestamps are ISO-8601
+-- text in UTC, which sorts and compares correctly as text.
 --
 -- Every statement is idempotent, so this runs on every start.
 
@@ -50,11 +49,9 @@ create table if not exists protected (
 -- until a plan is approved, by band, by label or by name.
 create table if not exists plan (
   id text primary key,
-  harvest_id text,
   created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   approved_at text,
   approved_bands JSON,
-  thresholds JSON,
   totals JSON,
   note text
 );
@@ -93,8 +90,7 @@ create table if not exists audit (
   started_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   finished_at text,
   total integer,
-  scored integer not null default 0,
-  cursor text
+  scored integer not null default 0
 );
 
 create table if not exists audit_item (
@@ -106,8 +102,6 @@ create table if not exists audit_item (
   vouches integer,
   followers integer,
   protected_reason text,
-  decision text,
-  decided_at text,
   primary key (audit_id, did)
 );
 create index if not exists audit_item_band_idx on audit_item (audit_id, band);
@@ -120,11 +114,10 @@ create table if not exists brief (
   sent_at text
 );
 
--- The moderator account's session, resumed rather than re-created.
+-- The moderator account's session, resumed rather than re-created. It holds a
+-- refresh token, which is a bearer credential for the bot account.
 create table if not exists bot_session (
   id integer primary key default 1 check (id = 1),
-  did text,
-  handle text,
   session JSON not null,
   refreshed_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -141,7 +134,6 @@ create table if not exists dm_cursor (
 create table if not exists dm_choice (
   convo_id text primary key,
   options JSON not null default '[]',
-  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   last_post text,
   last_post_at text,
   pending JSON
@@ -179,13 +171,13 @@ create table if not exists post_alert (
   alerted_at text
 );
 
--- One row per model call, for the spend line.
+-- Tokens spent on model calls, by kind and model. Nothing in the bot reads
+-- it; it is there for whoever pays for the calls.
 create table if not exists llm_usage (
   id integer primary key autoincrement,
   at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   kind text not null,
   model text,
   input_tokens integer,
-  output_tokens integer,
-  cost_usd real
+  output_tokens integer
 );
