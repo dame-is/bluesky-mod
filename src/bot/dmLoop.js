@@ -1133,54 +1133,60 @@ async function answerAsAgent({
       }, AGENT_ACK_AFTER_MS);
   if (timer?.unref) timer.unref();
 
-  // Notes steer writes, and they can hold what the owner would tell nobody
-  // else, so a read-only guest's turn goes without them.
-  const [io, history, remembered, notes] = await Promise.all([
-    getIo(),
-    readHistory(chat, entry, { botDid, limits }),
-    lastPost(entry.convoId),
-    canWrite ? listNotes().catch(() => []) : [],
-  ]);
+  // The timer is cleared however the turn ends, and an ack already on its
+  // way goes before anything else is sent, a failure's reply included.
+  let reply;
+  try {
+    // Notes steer writes, and they can hold what the owner would tell nobody
+    // else, so a read-only guest's turn goes without them.
+    const [io, history, remembered, notes] = await Promise.all([
+      getIo(),
+      readHistory(chat, entry, { botDid, limits }),
+      lastPost(entry.convoId),
+      canWrite ? listNotes().catch(() => []) : [],
+    ]);
 
-  // History is read as text, so a post shared three messages ago is gone from
-  // it. Name the last one here, as derived fact from the sender's own
-  // messages, so "add the quoters too" has something to point at.
-  let message = composeMessage(entry.message);
-  if (remembered && !message.includes(remembered)) {
-    message += `\n\n[The post last sent in this conversation: ${remembered}]`;
+    // History is read as text, so a post shared three messages ago is gone
+    // from it. Name the last one here, as derived fact from the sender's own
+    // messages, so "add the quoters too" has something to point at.
+    let message = composeMessage(entry.message);
+    if (remembered && !message.includes(remembered)) {
+      message += `\n\n[The post last sent in this conversation: ${remembered}]`;
+    }
+
+    reply = await operate({
+      generate,
+      message,
+      io,
+      history,
+      model,
+      triageModel,
+      extraTools,
+      canWrite,
+      writeAgent,
+      asker:
+        sender === roster.owner
+          ? 'the owner, who owns the list'
+          : `${sender}, a ${canWrite ? 'guest who may change the list' : 'read-only guest'}`,
+      voice: config?.style,
+      guidance: config?.guidance,
+      raw: entry.message.text,
+      reviewRows: limits.reviewRows,
+      escalate,
+      notes: notesBlock(notes, { owner: roster.owner }),
+      convoId: entry.convoId,
+      sendProgress: async (text) => {
+        clearTimeout(timer);
+        await spoke;
+        spoke = send(text).catch(() => {});
+        await spoke;
+      },
+      log,
+    });
+  } finally {
+    clearTimeout(timer);
+    await spoke;
   }
-
-  const reply = await operate({
-    generate,
-    message,
-    io,
-    history,
-    model,
-    triageModel,
-    extraTools,
-    canWrite,
-    writeAgent,
-    asker:
-      sender === roster.owner
-        ? 'the owner, who owns the list'
-        : `${sender}, a ${canWrite ? 'guest who may change the list' : 'read-only guest'}`,
-    voice: config?.style,
-    guidance: config?.guidance,
-    raw: entry.message.text,
-    reviewRows: limits.reviewRows,
-    escalate,
-    notes: notesBlock(notes, { owner: roster.owner }),
-    convoId: entry.convoId,
-    sendProgress: async (text) => {
-      clearTimeout(timer);
-      await spoke;
-      spoke = send(text).catch(() => {});
-      await spoke;
-    },
-    log,
-  });
-  clearTimeout(timer);
-  await spoke;
 
   // A DM renders no markdown, and some models write it anyway. Emphasis and
   // headings are removed; anything else is left as written.

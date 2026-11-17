@@ -423,6 +423,26 @@ describe('before the first snapshot', () => {
     // Nothing loaded the snapshot for "help".
     expect(getIo).toHaveBeenCalledTimes(2);
   });
+
+  it('sends no "reading up" after an agent turn that failed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { chat, sent } = chatWith([
+        msg('m1', 'what is going on with my mentions?'),
+      ]);
+      // No 👀, so the turn would say it is working after a few seconds.
+      chat.chat.bsky.convo.addReaction = async () => {
+        throw new Error('reactions down');
+      };
+      await pass(chat, { getIo, mode: 'agent' });
+      const during = sent.map((s) => s.text);
+      expect(during).toEqual([`That failed: ${NOT_BUILT}`.slice(0, 213)]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sent.map((s) => s.text)).toEqual(during);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("an attached post's author is written by DID", () => {
