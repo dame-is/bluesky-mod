@@ -1547,6 +1547,7 @@ async function standingCommand({
   msgLinks,
   mode,
   hasModel,
+  owner,
   send,
   log,
 }) {
@@ -1560,9 +1561,12 @@ async function standingCommand({
     }
     const out =
       memo.action === 'recall'
-        ? { ok: true, message: recallText(await listNotes()) }
+        ? { ok: true, message: recallText(await listNotes(), { owner }) }
         : memo.action === 'remember'
-          ? await remember(memo.text, { author: entry.message?.sender?.did })
+          ? await remember(memo.text, {
+              author: entry.message?.sender?.did,
+              owner,
+            })
           : await forget(memo);
     await send(out.message);
     log('Memory', { action: memo.action, ok: out.ok });
@@ -1637,6 +1641,7 @@ async function withoutModel({
   msgLinks,
   mentions,
   canWrite,
+  owner,
   config,
   send,
   writeAgent,
@@ -1663,6 +1668,7 @@ async function withoutModel({
       msgLinks,
       mode: 'agent',
       hasModel: Boolean(model) && modelsEnabled(),
+      owner,
       send,
       log,
     });
@@ -2276,6 +2282,7 @@ export async function runDmPass({
           msgLinks,
           mentions,
           canWrite,
+          owner: roster.owner,
           config,
           send,
           writeAgent,
@@ -2335,6 +2342,7 @@ export async function runDmPass({
           msgLinks,
           mode,
           hasModel: Boolean(activeModel) && modelsEnabled(),
+          owner: roster.owner,
           send,
           log,
         });

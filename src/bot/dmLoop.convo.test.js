@@ -1063,6 +1063,22 @@ describe('memory and watch commands outside the agent', () => {
     ]);
   });
 
+  it("agent mode: reads notes with the roster's owner as the owner", async () => {
+    const generate = vi.fn();
+    const NOTE = 'never block people who only liked';
+    let { chat, sent } = chatWith([
+      msg('m1', `!remember: ${NOTE}`, { from: WRITER }),
+    ]);
+    await pass(chat, { generate, mode: 'agent' });
+    ({ chat, sent } = chatWith([msg('m2', `!remember: ${NOTE}`)]));
+    await pass(chat, { generate, mode: 'agent' });
+    expect(sent.at(-1).text).toMatch(/^I had that one from a writer/);
+    ({ chat, sent } = chatWith([msg('m3', '!what do you remember')]));
+    await pass(chat, { generate, mode: 'agent' });
+    expect(sent.at(-1).text).toContain(`1. ${NOTE}`);
+    expect(sent.at(-1).text).not.toContain('from writer');
+  });
+
   it('classic: "watch this" starts a watch that reports', async () => {
     const generate = vi.fn();
     const { chat, sent } = chatWith([
