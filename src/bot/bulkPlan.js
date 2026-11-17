@@ -1433,7 +1433,7 @@ export async function undoPlan(
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
-    select: 'did,band,acted_at,action,approved_via,undone_at',
+    select: 'did,band,acted_at,action,approved_via,undone_at,already_listed',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
@@ -1519,6 +1519,19 @@ export async function undoPlan(
     await closeAdds([...held], reason, { plan: plan.id });
     for (const did of held) byDid.delete(did);
   }
+  // A typed block of someone already listed wrote nothing, so while another
+  // plan's add still holds them, undoing it closes only its own row.
+  const wroteNothing = live
+    .filter((r) => r.already_listed && byDid.has(r.did))
+    .map((r) => r.did);
+  const holders = wroteNothing.length
+    ? await addsElsewhere(plan, wroteNothing)
+    : new Map();
+  const placed = wroteNothing.filter((did) => holders.has(did));
+  if (placed.length) {
+    await closeAdds(placed, reason, { plan: plan.id });
+    for (const did of placed) byDid.delete(did);
+  }
 
   // Batched by account, so every copy of one account (two plans added them)
   // comes off in the same applyWrites, and its rows are closed only once all
@@ -1552,7 +1565,8 @@ export async function undoPlan(
   }
 
   const kept = held.size;
-  const remaining = live.length - removed - alreadyOff - kept;
+  const remaining =
+    live.length - removed - alreadyOff - kept - placed.length;
   return {
     ok: true,
     removed,
@@ -1564,6 +1578,9 @@ export async function undoPlan(
       (alreadyOff ? ` ${alreadyOff} had already come off another way.` : '') +
       (kept
         ? ` ${kept === 1 ? '1 stays' : `${kept} stay`} on the list, since you also added them by name.`
+        : '') +
+      (placed.length
+        ? ` ${placed.length === 1 ? '1 stays' : `${placed.length} stay`} on the list, since an earlier change put them there.`
         : '') +
       (remaining
         ? ` ${remaining} left, send "undo ${shortCode(plan.id)}" again.`

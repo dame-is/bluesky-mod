@@ -719,6 +719,46 @@ describe('undo', () => {
     });
   });
 
+  it('leaves an account a batch listed when the undone plan is a block that wrote nothing', async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:x', '2026-10-01T10:00:00Z', {
+        approved_via: 'band',
+      }),
+      // "block @x", answered "was already on the list".
+      added(PLAN_B, 'did:plc:x', '2026-10-01T11:00:00Z', {
+        approved_via: 'command',
+        already_listed: true,
+      }),
+    ];
+    constellation.set('did:plc:x', ['rk-x']);
+    repo.set('rk-x', 'did:plc:x');
+
+    const out = await undoPlan(bot(), { id: PLAN_B });
+
+    expect(out).toMatchObject({ removed: 0, remaining: 0 });
+    expect(out.message).toMatch(/1 stays on the list, since an earlier change put them there/);
+    expect([...repo.values()]).toEqual(['did:plc:x']);
+    expect(row(PLAN_A, 'did:plc:x').undone_at).toBe(null);
+    expect(row(PLAN_B, 'did:plc:x').undone_at).toBeTruthy();
+  });
+
+  it('takes off an account a block that wrote nothing is the only record of', async () => {
+    // Listed outside the log; the owner names this block's code on purpose.
+    db.decision = [
+      added(PLAN_B, 'did:plc:x', '2026-10-01T11:00:00Z', {
+        approved_via: 'command',
+        already_listed: true,
+      }),
+    ];
+    constellation.set('did:plc:x', ['rk-x']);
+    repo.set('rk-x', 'did:plc:x');
+
+    const out = await undoPlan(bot(), { id: PLAN_B });
+
+    expect(out).toMatchObject({ removed: 1 });
+    expect([...repo.values()]).toEqual([]);
+  });
+
   it("does not stamp a typed block undone when a band plan's duplicate comes off", async () => {
     db.decision = [
       added(PLAN_A, 'did:plc:y', '2026-10-01T10:00:00Z', {
