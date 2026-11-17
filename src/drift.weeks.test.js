@@ -158,6 +158,50 @@ describe('an account with no earlier audit', () => {
   });
 });
 
+describe('an account also blocked by name once it was on the list', () => {
+  /** A plan's add at UNKNOWN, then a typed block that found them listed. */
+  async function addedThenTyped({ undone = false } = {}) {
+    await upsert('plan', [
+      { id: 'plan-scan', created_at: '2026-10-01T00:00:00.000Z' },
+      { id: 'plan-typed', created_at: '2026-10-02T00:00:00.000Z' },
+    ]);
+    await upsert('decision', [
+      {
+        plan_id: 'plan-scan',
+        did: A,
+        band: 'UNKNOWN',
+        action: 'list_add',
+        acted_at: '2026-10-01T00:00:00.000Z',
+        undone_at: undone ? '2026-10-03T00:00:00.000Z' : null,
+      },
+      {
+        plan_id: 'plan-typed',
+        did: A,
+        band: 'CONNECTED',
+        action: 'list_add',
+        acted_at: '2026-10-02T00:00:00.000Z',
+        already_listed: true,
+      },
+    ]);
+  }
+
+  it('is compared with the band the plan added them under', async () => {
+    members.push(A);
+    await addedThenTyped();
+    bands.set(A, 'CONNECTED');
+    expect(await checkAt('2026-11-01T12:00:00Z')).toContain(
+      `@${A.slice(8)} is now CONNECTED`,
+    );
+  });
+
+  it('is compared with the typed block once that plan is undone', async () => {
+    members.push(A);
+    await addedThenTyped({ undone: true });
+    bands.set(A, 'CONNECTED');
+    expect(await checkAt('2026-11-01T12:00:00Z')).toBe(null);
+  });
+});
+
 describe('a member that becomes PROTECTED', () => {
   it('is reported from any band, once', async () => {
     vi.setSystemTime(new Date('2026-11-01T09:00:00Z'));

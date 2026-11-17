@@ -105,11 +105,17 @@ async function previousBands() {
 /**
  * The band each of these accounts was added under, from the newest add of it
  * that still stands. An add typed with no score is logged as UNSCORED.
+ *
+ * A typed block of someone already on the list wrote nothing, so its band is
+ * not the one they were added under. It counts only when it is the account's
+ * last live add, which is when the plan that wrote them was undone and the
+ * typed block kept them on the list. Filtered here because the column is
+ * null on ordinary rows.
  */
 async function bandsAtAdd(dids) {
   if (!dids.length) return new Map();
   const rows = await selectAll('decision', {
-    select: 'did,band,acted_at',
+    select: 'did,band,acted_at,already_listed',
     eq: { action: 'list_add' },
     where: {
       did: { in: dids },
@@ -119,7 +125,12 @@ async function bandsAtAdd(dids) {
     order: 'acted_at.desc',
   });
   const out = new Map();
-  for (const r of rows) if (!out.has(r.did)) out.set(r.did, r.band);
+  const typed = new Map();
+  for (const r of rows) {
+    const into = r.already_listed ? typed : out;
+    if (!into.has(r.did)) into.set(r.did, r.band);
+  }
+  for (const [did, band] of typed) if (!out.has(did)) out.set(did, band);
   return out;
 }
 

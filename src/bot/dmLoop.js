@@ -650,7 +650,12 @@ export async function runCommand(
     // sees what was done and not why.
     const lines = h.rows.map((r) => {
       const when = new Date(r.acted_at).toLocaleString();
-      const verb = r.action === 'list_remove' ? 'removed' : 'added';
+      const verb =
+        r.action === 'list_remove'
+          ? 'removed'
+          : r.already_listed
+            ? 'asked again, already on the list'
+            : 'added';
       const note =
         canWrite && r.plan?.note ? `, "${oneQuotable(r.plan.note)}"` : '';
       const undone = r.undone_at ? ' (undone)' : '';

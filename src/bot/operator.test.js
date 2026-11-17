@@ -209,6 +209,31 @@ describe('who gets the write tools', () => {
     expect(JSON.stringify(await writer.history.execute({}))).toContain('my ex');
   });
 
+  it('history says a block that found the account listed added nobody', async () => {
+    const row = (already_listed) => ({
+      acted_at: '2026-01-01T00:00:00.000Z',
+      did: 'did:plc:x',
+      action: 'list_add',
+      band: 'UNKNOWN',
+      code: '3f9a2c1b',
+      already_listed,
+    });
+    const tools = buildActionTools(
+      ctxFor(),
+      fakeDeps({
+        historyFor: vi.fn(async () => ({
+          total: 2,
+          rows: [row(true), row(false)],
+        })),
+      }),
+    );
+    const { rows } = await tools.history.execute({});
+    expect(rows.map((r) => r.change)).toEqual([
+      'asked again, already on the list',
+      'added',
+    ]);
+  });
+
   it('a writer with no session gets none either', () => {
     const tools = buildActionTools(ctxFor({ writeAgent: null }), fakeDeps());
     for (const name of WRITES) expect(tools).not.toHaveProperty(name);

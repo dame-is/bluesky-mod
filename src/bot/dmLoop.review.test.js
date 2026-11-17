@@ -479,3 +479,30 @@ describe('history for a sender who may not write', () => {
     expect(out.text).toContain(WORDS);
   });
 });
+
+describe('history of a block that found the account already listed', () => {
+  it('says it was asked again, not that it was added', async () => {
+    const id = 'abcdef13-0000-4000-8000-000000000000';
+    const now = new Date().toISOString();
+    await db.upsert('plan', [{ id, created_at: now, note: 'block @x.test' }]);
+    await db.upsert('decision', [
+      {
+        plan_id: id,
+        did: 'did:plc:x0000000000',
+        band: 'UNKNOWN',
+        action: 'list_add',
+        acted_at: now,
+        acted_seq: 1,
+        approved_via: 'command',
+        already_listed: true,
+      },
+    ]);
+    const out = await runCommand(parseCommand('history'), agent, {
+      canWrite: true,
+    });
+    expect(out.text).toMatch(
+      /· asked again, already on the list · UNKNOWN · command · abcdef13/,
+    );
+    expect(out.text).not.toMatch(/· added ·/);
+  });
+});

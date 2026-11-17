@@ -1113,7 +1113,12 @@ export function buildActionTools(ctx, deps = DEPS) {
             rows: h.rows.map((r) => ({
               when: r.acted_at,
               did: r.did,
-              change: r.action === 'list_remove' ? 'removed' : 'added',
+              change:
+                r.action === 'list_remove'
+                  ? 'removed'
+                  : r.already_listed
+                    ? 'asked again, already on the list'
+                    : 'added',
               band: r.band,
               via: r.approved_via,
               code: r.code,
