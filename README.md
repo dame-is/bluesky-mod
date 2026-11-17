@@ -86,6 +86,8 @@ How much it keeps is up to you: `MOD_SCORING=simple` skips the friends-of-friend
 
 The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off). A post the analyst reads can try to steer those lookups. Lookups by URL or host are refused, but looking up a handle still reaches the host it names.
 
+The bot also asks Spacedust, a public service at microcosm.blue, for replies, quotes and mentions aimed at your account as they happen, which tells that service whose account the bot watches (`MOD_STREAM=false` turns it off, and the bot polls instead).
+
 ## Settings
 
 The settings most people change are in [.env.example](.env.example), commented. Voice, standing instructions and limits can go in an optional `config/bot.json` (see [config/bot.example.json](config/bot.example.json)), mounted read-only so the bot can't rewrite its own instructions.

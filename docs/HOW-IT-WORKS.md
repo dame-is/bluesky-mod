@@ -232,6 +232,30 @@ Bluesky rate-limits writes per account and per PDS, and a create costs more than
 
 Logging in is capped separately (`createSession`), which is why the bot stores and resumes its session instead of logging in each time.
 
+## Where the data comes from
+
+Each source answers the question it is fastest at, and nothing depends on one that has no fallback.
+
+| Source | Answers | Instead of |
+| --- | --- | --- |
+| AppView (`public.api.bsky.app`) | Profiles, follow relationships and post text, 25 or 30 accounts a call | |
+| [Constellation](https://constellation.microcosm.blue) | Who liked, reposted, replied to or quoted a post; who is on a list; who blocks you | The AppView's `getLikes`, which answers as a viewer (below) |
+| [Spacedust](https://spacedust.microcosm.blue) | Replies, quotes and mentions aimed at you, as they happen | Polling your posts' counts every ten minutes |
+| Jetstream | Your own new follows and curation-list members, within seconds | Waiting for the weekly snapshot |
+| [Slingshot](https://slingshot.microcosm.blue) | A handle's DID and an account's PDS when the AppView or the PLC directory is down | Failing the lookup |
+
+**Scoring is read in parallel.** Scoring a scan reads every engager's profile and whether you follow them, in batches of 25 and 30. Those batches used to go one after another; six now run at once. Measured on real posts with about a thousand engagers, a scan went from about 5 ms an account to about 2 ms, so a 6,000-account sweep scores in about 12 seconds rather than 30. The write-time follow check and triage's post reads run the same way. A harvest pages up to three Constellation sources at once; that matters less, since the likes are one long cursor and Constellation answers a thousand records in under a second.
+
+**The stream.** Jetstream can only filter by who wrote a record, so following the replies other people write about you would mean reading the whole network. Spacedust filters by what a link points at: the bot asks for links whose subject is your account or anything in it, and receives each reply, quote and mention about 21 seconds after it is written (the delay drops interactions undone at once). Only the link arrives, not the text. It is held in memory for six hours (`src/ownerActivity.js`) and used three ways:
+
+- **Alerts** on a post taking off are counted from the stream every two minutes, with no requests at all. While the stream has not covered the last hour (just after a start, or after an outage), they fall back to polling your posts on the AppView.
+- **Watches** skip their read of the post when the stream saw nothing new on it since the last one. The stream also asks for each watched post by its URI, so this works for other people's posts too. A watch still reads the post in full at least every 30 minutes.
+- **The shield** counts who is replying to and quoting you (see Shield, below).
+
+Spacedust has no replay: links written while the connection is down are never sent. So the stream is treated as a fast signal and never as the record. The window counts from when the connection opened, a reconnect of under 30 seconds (the routine quarter-hourly one) does not break it, and anything that needs the whole picture still asks Constellation. `MOD_STREAM=false` turns the stream off, and everything falls back to polling.
+
+**What was looked at and not used.** Slingshot serves single records from any PDS, fast. Post text is read 25 hydrated posts a call from the AppView, which a one-record cache cannot beat; and measured against real pile-ons, the only posts the AppView left out were from suspended accounts (about one in 200). Jetstream could keep the friends-of-friends vouch counts current between weekly snapshots by following every account you follow, but a deleted follow on Jetstream does not say who was unfollowed, so counts could only go up until the next snapshot, and the subscription has to be sent after connecting rather than in the URL once it names thousands of accounts. It may be worth doing; it is not done yet.
+
 ## Why Constellation and not the AppView
 
 Collecting who engaged with a post reads [Constellation](https://constellation.microcosm.blue), a public backlink index, rather than `getLikes`/`getRepostedBy`. The AppView answers as a viewer: it hides accounts you have already blocked, so using it to decide who to block hides the people you already acted on and changes its answer as you work through a list. Constellation indexes the firehose and answers the same for everyone. It also finds engagement from lexicons outside `app.bsky`. Such engagement is counted as "other": a collection's name is chosen by whoever wrote the record, so it is treated as attacker-controlled and never shown.
