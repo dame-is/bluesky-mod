@@ -37,7 +37,7 @@ curl -fsSL https://get.docker.com | sh
 ```bash
 git clone https://github.com/dame-is/bluesky-mod.git
 cd bluesky-mod
-cp .env.example .env
+cp .env.example .env && chmod 600 .env
 nano .env
 ```
 
@@ -100,11 +100,22 @@ Everything that matters lives in one SQLite file in the `data` volume. The follo
 ```bash
 F=backup-$(date +%F).db
 docker compose exec bot node -e "new (require('node:sqlite').DatabaseSync)('/app/data/bluesky-mod.db').exec(\"vacuum into '/app/data/$F'\")"
-docker compose cp bot:/app/data/$F ./$F && chmod 600 ./$F
+docker compose cp bot:/app/data/$F ~/$F && chmod 600 ~/$F
 docker compose exec bot rm /app/data/$F
 ```
 
-then move the copy somewhere off the server. It holds the bot's session token, so keep it as private as `.env`.
+then move the copy somewhere off the server. It holds the bot's session token, so keep it as private as `.env`, and out of the checkout, where `git add` could pick it up.
+
+To restore one, stop the bot, put the copy in place of the database, and clear the bot's place in the DM log before starting it again:
+
+```bash
+docker compose stop bot
+docker compose run --rm -T bot sh -c 'umask 077; rm -f /app/data/bluesky-mod.db-wal /app/data/bluesky-mod.db-shm && cat > /app/data/bluesky-mod.db' < ~/backup-YYYY-MM-DD.db
+docker compose run --rm bot node -e "new (require('node:sqlite').DatabaseSync)('/app/data/bluesky-mod.db').exec('delete from dm_cursor')"
+docker compose up -d
+```
+
+Without the `delete from dm_cursor` step, the bot answers every DM sent since the backup as if it were new. With no place stored, it starts from the end of the log.
 
 ### Voice and limits
 
@@ -114,8 +125,8 @@ Copy `config/bot.example.json` to `config/bot.json` and edit it. The bot reads i
 
 The bot is one long-running process that needs to keep a small file between restarts. Anywhere that gives you both will do.
 
-- **Fly.io, Railway, Render and similar.** Deploy the Dockerfile, set the variables from `.env.example` in the host's settings, and attach a persistent volume at `/app/data`. Run exactly one instance, and turn off anything that scales to zero or starts a second copy during deploys: two copies polling the same DMs will both answer. Run setup once with the host's "run a command" feature (`npm run setup`).
-- **A machine at home** (a spare laptop, a Raspberry Pi). Docker works the same way. Without Docker, install Node 22.13 or newer, create a `bluesky-mod` user that owns the checkout's `data` directory, and use a systemd unit like this one:
+- **Fly.io, Railway, Render and similar.** Deploy the Dockerfile, set the variables from `.env.example` in the host's settings, and attach a persistent volume at `/app/data`. Railway mounts volumes as root while the image runs as the `node` user, so set `RAILWAY_RUN_UID=0` on the service there, or the bot cannot create its database. Run exactly one instance, and turn off anything that scales to zero or starts a second copy during deploys: two copies polling the same DMs will both answer. Run setup once with the host's "run a command" feature (`npm run setup`).
+- **A machine at home** (a spare laptop, a Raspberry Pi). Docker works the same way. Without Docker, install Node 22.13 or newer, create a `bluesky-mod` user, run setup, then give that user the checkout's `data` directory and the database setup made in it (`chown -R bluesky-mod data`), and use a systemd unit like this one:
 
   ```ini
   # /etc/systemd/system/bluesky-mod.service

@@ -48,7 +48,7 @@ You need a server that stays on (a small VPS is plenty), Docker, and two Bluesky
 ```bash
 git clone https://github.com/dame-is/bluesky-mod.git
 cd bluesky-mod
-cp .env.example .env
+cp .env.example .env && chmod 600 .env
 # fill in MOD_OWNER_DID, MOD_IDENTIFIER, MOD_APP_PASSWORD (and a model key if you want one)
 
 docker compose run --rm bot npm run setup -- --name "a plain name"
@@ -70,7 +70,7 @@ Node 22.13 or newer (for the built-in SQLite).
 
 ```bash
 npm ci --omit=dev
-cp .env.example .env   # and fill it in
+cp .env.example .env && chmod 600 .env   # and fill it in
 npm run setup -- --name "a plain name"
 # paste the MOD_LIST_URI line it prints into .env
 npm start
@@ -95,7 +95,7 @@ On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepse
 
 ## What it stores
 
-One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log.
+One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
 
 The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off).
 
