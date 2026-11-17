@@ -120,15 +120,46 @@ export function distanceFrom({ inCircle, vouches, inNeighbourhood }) {
   return 3;
 }
 
-async function getJson(url, fetchImpl, signal) {
-  try {
-    const res = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
-      signal,
-    });
-    return res.ok ? await res.json() : null;
-  } catch {
-    return null;
+/** Pauses before asking the AppView again: two more tries after the first. */
+const RETRY_DELAYS_MS = [1000, 3000];
+
+/**
+ * The array under `field` in an AppView answer, or a throw.
+ *
+ * A failed request is not an empty answer. Read as one, a rate limit would
+ * turn every account in the batch into an unfollowed stranger with no
+ * profile: UNKNOWN in a plan, and "gone" in the weekly re-score. So a 408, a
+ * 429, a 5xx, a timeout or a dropped connection is asked again after a pause,
+ * and a request that still fails throws, so nothing is scored from it.
+ */
+async function getList(url, field, { fetchImpl, signal, delays, what }) {
+  for (let attempt = 0; ; attempt += 1) {
+    let why;
+    let retryable = true;
+    try {
+      const res = await fetchImpl(url, {
+        headers: { Accept: 'application/json' },
+        signal,
+      });
+      if (res.ok) {
+        const list = (await res.json())?.[field];
+        if (Array.isArray(list)) return list;
+        why = 'an answer with no list in it';
+      } else {
+        why = `HTTP ${res.status}`;
+        retryable =
+          res.status === 408 || res.status === 429 || res.status >= 500;
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      why = 'no answer';
+    }
+    if (!retryable || attempt >= delays.length) {
+      throw new Error(
+        `could not read ${what} from Bluesky (${why}), so nothing was scored. Try again in a minute`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, delays[attempt]));
   }
 }
 
@@ -149,7 +180,11 @@ async function getJson(url, fetchImpl, signal) {
  */
 export function createScorer(
   ref,
-  { fetchImpl = fetchWithTimeout, appview = APPVIEW } = {},
+  {
+    fetchImpl = fetchWithTimeout,
+    appview = APPVIEW,
+    retryDelaysMs = RETRY_DELAYS_MS,
+  } = {},
 ) {
   const {
     vouches = new Map(),
@@ -168,12 +203,12 @@ export function createScorer(
         .slice(i, i + PROFILE_BATCH)
         .map((d) => `actors=${encodeURIComponent(d)}`)
         .join('&');
-      const body = await getJson(
+      const found = await getList(
         `${appview}/xrpc/app.bsky.actor.getProfiles?${q}`,
-        fetchImpl,
-        signal,
+        'profiles',
+        { fetchImpl, signal, delays: retryDelaysMs, what: 'profiles' },
       );
-      for (const p of body?.profiles || []) out.set(p.did, p);
+      for (const p of found) if (p?.did) out.set(p.did, p);
     }
     return out;
   }
@@ -189,12 +224,17 @@ export function createScorer(
     for (let i = 0; i < dids.length; i += REL_BATCH) {
       const batch = dids.slice(i, i + REL_BATCH);
       const q = batch.map((d) => `others=${encodeURIComponent(d)}`).join('&');
-      const body = await getJson(
+      const found = await getList(
         `${appview}/xrpc/app.bsky.graph.getRelationships?actor=${encodeURIComponent(OWNER_DID)}&${q}`,
-        fetchImpl,
-        signal,
+        'relationships',
+        {
+          fetchImpl,
+          signal,
+          delays: retryDelaysMs,
+          what: 'who you follow',
+        },
       );
-      for (const r of body?.relationships || []) {
+      for (const r of found) {
         if (!r?.did) continue;
         out.set(r.did, {
           youFollow: Boolean(r.following),
@@ -208,6 +248,10 @@ export function createScorer(
   return {
     /**
      * Score a list of DIDs.
+     *
+     * Throws when the AppView cannot be read for any batch, rather than
+     * scoring part of the list from defaults. `missing` on a result means the
+     * profiles answer came back and left that account out.
      *
      * @returns {Promise<Map<string, object>>} did -> { band, trust, distance, ... }
      */
@@ -301,6 +345,9 @@ export function summarise(harvest, scores, { excludeSelf = null } = {}) {
     uri: harvest.uri,
     harvestedAt: harvest.harvestedAt,
     truncated: harvest.truncated,
+    // Engagement kinds the harvest could not read, with how many records
+    // each held, so a reply can say what is missing as well as that it is.
+    unread: harvest.unread ?? [],
     totals: {
       ...harvest.totals,
       participants: rows.length,

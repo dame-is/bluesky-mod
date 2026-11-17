@@ -9,6 +9,7 @@
 // moves through these states, and reports which one it is in:
 //
 //   collecting  circle members still need their follow lists read
+//   waiting     every member left failed a moment ago; a later check asks again
 //   finalising  all members read; aggregate the staged edges into vouch counts
 //   finalised   the vouch counts for this snapshot are written
 //   idle        the current snapshot is complete and fresh enough
@@ -51,6 +52,22 @@ const BUDGET_MS = 25_000;
  * all; without a ceiling, one unreachable host holds a snapshot open forever.
  */
 const MAX_ATTEMPTS = 3;
+
+/**
+ * How long a member whose read failed is left before it is asked again.
+ *
+ * Attempts are spaced in time, not counted per step. Steps run a quarter of a
+ * second apart, so one minute of errors from the AppView would otherwise use
+ * up every attempt of every member it touched and write them all off.
+ */
+const RETRY_GAP_MS = 10 * 60_000;
+
+/**
+ * When each member of the snapshot being built last failed, in this process.
+ * A restart forgets it, which costs at most an early retry; the attempts
+ * themselves are counted in the database.
+ */
+const lastFailed = { takenAt: null, at: new Map() };
 
 async function currentSnapshot() {
   const rows = await select('circle', {
@@ -188,19 +205,42 @@ export async function snapshotStep({
     takenAt = started.takenAt;
   }
 
+  if (lastFailed.takenAt !== takenAt) {
+    lastFailed.takenAt = takenAt;
+    lastFailed.at = new Map();
+  }
+  // Fewest attempts first, so members not yet tried are not stuck behind
+  // ones waiting out their pause.
   const pendingRows = await select('circle', {
     select: 'did,attempts',
     eq: { taken_at: takenAt },
     is: { follows_indexed_at: 'null' },
+    order: 'attempts.asc',
     limit: 500,
   });
+  const now = Date.now();
+  const sinceFailed = (did) => now - (lastFailed.at.get(did) ?? -Infinity);
+  const due = pendingRows.filter((r) => sinceFailed(r.did) >= RETRY_GAP_MS);
 
-  if (pendingRows.length) {
-    const attemptsByDid = new Map(
-      pendingRows.map((r) => [r.did, r.attempts ?? 0]),
-    );
+  if (pendingRows.length && !due.length) {
+    // Everyone left failed a moment ago. Asking again now would spend their
+    // attempts on the same outage, so stop and let a later check come back.
+    return {
+      state: 'waiting',
+      snapshot: takenAt,
+      started,
+      remaining: pendingRows.length,
+      retryInMs: Math.max(
+        0,
+        RETRY_GAP_MS - Math.max(...pendingRows.map((r) => sinceFailed(r.did))),
+      ),
+    };
+  }
+
+  if (due.length) {
+    const attemptsByDid = new Map(due.map((r) => [r.did, r.attempts ?? 0]));
     const result = await indexCircleFollows({
-      pending: pendingRows.map((r) => r.did),
+      pending: due.map((r) => r.did),
       budgetMs,
       writeEdges: (edges) =>
         upsert(
@@ -221,8 +261,9 @@ export async function snapshotStep({
 
     // A member that cannot be read contributes nothing and must not hold the
     // snapshot open. Permanent failures are closed out at once, transient ones
-    // after MAX_ATTEMPTS.
+    // after MAX_ATTEMPTS, each at least RETRY_GAP_MS after the last.
     for (const { member, permanent } of result.unreadable) {
+      lastFailed.at.set(member, Date.now());
       const attempts = (attemptsByDid.get(member) ?? 0) + 1;
       if (permanent || attempts >= MAX_ATTEMPTS) {
         await update(
@@ -262,8 +303,10 @@ export async function snapshotStep({
     };
   }
 
-  // Everything read. finalise_snapshot refuses to run on partial data, so a
-  // success here means the vouch table is a complete count of this snapshot.
+  // Every member read or written off. finalise_snapshot refuses to run while
+  // any is pending, and no follow list cut short by a failed page is staged,
+  // so a count here is low only by the members written off (counted below)
+  // and by follows past the 1,500 each member is read to.
   const written = await rpc('finalise_snapshot', { snapshot: takenAt });
   const gaps = await count('circle', {
     eq: { taken_at: takenAt },

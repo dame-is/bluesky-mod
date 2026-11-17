@@ -25,10 +25,16 @@ const LISTITEM_SOURCE = 'app.bsky.graph.listitem:subject';
 
 /** How long a walked copy of the list, and the blockers, are trusted for reads. */
 const FACTS_TTL_MS = 30 * 60_000;
-/** A failed load is retried sooner than a good one is refreshed. */
+/**
+ * A failed load is retried sooner than a good one is refreshed. One that only
+ * ran into a page cap is kept for the full FACTS_TTL_MS: walking it again
+ * gives the same answer, and costs hundreds of requests on the job queue.
+ */
 const RETRY_MS = 2 * 60_000;
 /** How long this process remembers its own writes over Constellation's lag. */
 const OWN_WRITES_MS = 10 * 60_000;
+/** listRecords pages one walk of the list reads: 40,000 listitems. */
+const LIST_MAX_PAGES = 400;
 
 const ownerOf = (uri) =>
   /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''))?.[1] ?? null;
@@ -68,19 +74,11 @@ async function listitemRkeys(list, did, { maxPages = 5 } = {}) {
 }
 
 /**
- * Everyone on `list`, with each one's listitem rkeys, from the repo that owns
- * the list.
- *
- * A public read against that repo's PDS, so it needs no session. Duplicates
- * are kept: an account added by two plans has two listitems, and taking them
- * off the list means deleting both. null when the walk stops at `maxPages`
- * with more to read, since a partial list would call everyone past the cut
- * "not listed".
+ * Walk the listitems of `list` in the repo that owns it, up to `maxPages`.
+ * `complete` is false when the walk stopped at the cap with more to read.
+ * Throws when a page cannot be read; null when the URI names no owner.
  */
-export async function readListed(
-  list,
-  { fetchImpl = fetchWithTimeout, maxPages = 400 } = {},
-) {
+async function walkListed(list, { fetchImpl, maxPages }) {
   const owner = ownerOf(list);
   if (!owner) return null;
   const pds = await resolvePds(owner);
@@ -107,14 +105,34 @@ export async function readListed(
       ]);
     }
     cursor = body.cursor;
-    if (!cursor || !(body.records || []).length) return listed;
+    if (!cursor || !(body.records || []).length) {
+      return { listed, complete: true };
+    }
   }
-  return null;
+  return { listed, complete: false };
 }
 
 /**
- * Everyone who blocks `target`. null means could not tell, including when
- * there are more than `maxPages` pages of them.
+ * Everyone on `list`, with each one's listitem rkeys, from the repo that owns
+ * the list.
+ *
+ * A public read against that repo's PDS, so it needs no session. Duplicates
+ * are kept: an account added by two plans has two listitems, and taking them
+ * off the list means deleting both. null when the walk stops at `maxPages`
+ * with more to read, since a partial list would call everyone past the cut
+ * "not listed".
+ */
+export async function readListed(
+  list,
+  { fetchImpl = fetchWithTimeout, maxPages = LIST_MAX_PAGES } = {},
+) {
+  const walk = await walkListed(list, { fetchImpl, maxPages });
+  return walk?.complete ? walk.listed : null;
+}
+
+/**
+ * Everyone who blocks `target`. null when there are more than `maxPages`
+ * pages of them; a throw when Constellation does not answer.
  */
 async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
   const out = new Set();
@@ -124,7 +142,7 @@ async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
       limit: 1000,
       cursor,
     });
-    if (!res) return null;
+    if (!res) throw new Error('Constellation did not answer about blocks');
     for (const r of res.records || []) if (r?.did) out.add(r.did);
     cursor = res.cursor;
     if (!cursor) return out;
@@ -148,21 +166,39 @@ function recent(map, did, now) {
 /**
  * The held list and blockers, reloaded when stale. Concurrent callers share
  * one load.
+ *
+ * A list longer than the walk reads is held as far as it got, with
+ * `complete: false`: an account it saw is listed, and one it did not reach is
+ * unknown rather than unlisted.
  */
 export async function graphFacts({ list, now = Date.now } = {}) {
   const fresh =
     held &&
     held.list === list &&
-    now() - held.loadedAt <
-      (held.listed && held.blockers ? FACTS_TTL_MS : RETRY_MS);
+    now() - held.loadedAt < (held.failed ? RETRY_MS : FACTS_TTL_MS);
   if (fresh) return held;
   if (!loading) {
     loading = (async () => {
-      const [listed, blockers] = await Promise.all([
-        readListed(list).catch(() => null),
-        readBlockers(OWNER_DID).catch(() => null),
+      let failed = false;
+      const failure = () => {
+        failed = true;
+        return null;
+      };
+      const [walk, blockers] = await Promise.all([
+        walkListed(list, {
+          fetchImpl: fetchWithTimeout,
+          maxPages: LIST_MAX_PAGES,
+        }).catch(failure),
+        readBlockers(OWNER_DID).catch(failure),
       ]);
-      held = { list, listed, blockers, loadedAt: now() };
+      held = {
+        list,
+        listed: walk?.listed ?? null,
+        complete: Boolean(walk?.complete),
+        blockers,
+        failed,
+        loadedAt: now(),
+      };
       return held;
     })().finally(() => {
       loading = null;
@@ -179,7 +215,8 @@ export function isListed(list, did, { now = Date.now() } = {}) {
   if (recent(ownAdds, did, now)) return true;
   if (recent(ownRemovals, did, now)) return false;
   if (!held || held.list !== list || !held.listed) return null;
-  return held.listed.has(did);
+  if (held.listed.has(did)) return true;
+  return held.complete ? false : null;
 }
 
 /** Does `did` block the owner, as far as the held copy knows? null if unknown. */

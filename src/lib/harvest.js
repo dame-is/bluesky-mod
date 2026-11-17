@@ -38,13 +38,26 @@ const PAGE = 100;
 const MAX_PAGES = 60;
 
 /**
+ * How many sources outside Bluesky's own kinds one harvest pages.
+ *
+ * Each source costs at least one request, made one after another, and anyone
+ * can add sources to a post: one record holding the post's URI at a thousand
+ * paths is a thousand sources. Bluesky's own kinds are a handful of exact
+ * paths and are always paged; the rest are paged by count up to this cap. A
+ * source past it is not read, and the harvest says it is not everyone.
+ */
+const MAX_OTHER_SOURCES = 10;
+
+/**
  * Map a Constellation source onto an engagement kind.
  *
- * Bluesky's own verbs get names; anything else keeps its NSID, so an
- * unrecognised lexicon shows up as itself in the breakdown. `reply` (parent)
- * is someone answering the post itself. `threadReply` (root) is anyone in the
- * thread the post starts, including people who never addressed its author, so
- * a direct reply to a thread's first post counts under both.
+ * Bluesky's own verbs get names, matched on exact paths. Anything else is
+ * `other`: its collection name is chosen by whoever wrote the record, so it
+ * stays out of the breakdown, which reaches replies and models unfenced.
+ * `reply` (parent) is someone answering the post itself. `threadReply` (root)
+ * is anyone in the thread the post starts, including people who never
+ * addressed its author, so a direct reply to a thread's first post counts
+ * under both. A quote is a record embed, alone or beside media.
  */
 function engagementKind({ collection, path }) {
   const p = path.startsWith('.') ? path.slice(1) : path;
@@ -55,10 +68,12 @@ function engagementKind({ collection, path }) {
   if (collection === 'app.bsky.feed.post') {
     if (p === 'reply.parent.uri') return 'reply';
     if (p === 'reply.root.uri') return 'threadReply';
-    if (p.startsWith('embed.record')) return 'quote';
+    if (p === 'embed.record.uri' || p === 'embed.record.record.uri') {
+      return 'quote';
+    }
   }
   if (collection === 'app.bsky.feed.threadgate' && p === 'post') return 'gate';
-  return collection;
+  return 'other';
 }
 
 /**
@@ -90,10 +105,11 @@ function primaryKind(engagements) {
  * Page one source (up to MAX_PAGES) and hand back its rows.
  *
  * A source that fails outright comes back empty with `failed: true` rather
- * than throwing, because one dead lexicon should not cost you the likes. One
- * that fails part way comes back `truncated`, never complete: a partial read
- * that passes for a whole one would silence every "not everyone" warning
- * downstream. A failed page is asked for once more before that.
+ * than throwing, because one dead lexicon should not cost you the likes; the
+ * harvest lists it in `unread` and calls itself truncated. One that fails part
+ * way comes back `truncated`, never complete: a partial read that passes for a
+ * whole one would silence every "not everyone" warning downstream. A failed
+ * page is asked for once more before that.
  */
 async function drainSource(uri, source, { signal, maxPages = MAX_PAGES } = {}) {
   const rows = [];
@@ -133,7 +149,13 @@ async function drainSource(uri, source, { signal, maxPages = MAX_PAGES } = {}) {
  *                        collection: string}>, total: number}>,
  *   totals: { participants: number, engagements: Record<string, number>, records: number },
  *   truncated: boolean,
+ *   unread: Array<{kind: string, count: number}>,
  * }>}
+ *
+ * `truncated` is true when anything was left out: a source cut at the page
+ * cap, a source that never answered, or a source past MAX_OTHER_SOURCES.
+ * `unread` names the kinds of the last two, with Constellation's count of
+ * their records.
  */
 export async function harvestPost(uri, opts = {}) {
   const { signal, maxPages, onProgress, only = null } = opts;
@@ -145,10 +167,18 @@ export async function harvestPost(uri, opts = {}) {
     );
   }
 
-  // Only sources with something in them are paged.
-  const live = flat.filter(
+  // Only sources with something in them are paged: Bluesky's own kinds, then
+  // the largest of the rest, which `flat` already lists first.
+  const wanted = flat.filter(
     (s) => s.count > 0 && (!only || only.includes(engagementKind(s))),
   );
+  const known = wanted.filter((s) => engagementKind(s) !== 'other');
+  const others = wanted.filter((s) => engagementKind(s) === 'other');
+  const live = [...known, ...others.slice(0, MAX_OTHER_SOURCES)];
+  const unreadByKind = new Map();
+  const unread = (kind, count) =>
+    unreadByKind.set(kind, (unreadByKind.get(kind) || 0) + count);
+  for (const s of others.slice(MAX_OTHER_SOURCES)) unread('other', s.count);
   const sources = [];
   const byDid = new Map();
   let records = 0;
@@ -178,6 +208,7 @@ export async function harvestPost(uri, opts = {}) {
       });
     }
     sources.push({ ...src, kind, truncated, failed });
+    if (failed) unread(kind, src.count);
     done += 1;
   }
   onProgress?.({ done, total: live.length, source: null });
@@ -209,6 +240,7 @@ export async function harvestPost(uri, opts = {}) {
     sources,
     participants,
     totals: { participants: participants.length, engagements, records },
-    truncated: sources.some((s) => s.truncated),
+    truncated: sources.some((s) => s.truncated) || unreadByKind.size > 0,
+    unread: [...unreadByKind].map(([kind, count]) => ({ kind, count })),
   };
 }

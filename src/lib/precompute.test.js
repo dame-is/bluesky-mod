@@ -89,6 +89,21 @@ describe('permanently unreadable members', () => {
     expect(out.permanent).toBe(false);
   }, 10_000);
 
+  it.each([500, 401, 403, 404, 408])(
+    'does not mark a %i as permanent, since it may answer next time',
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const reading = followsOf('did:plc:flaky', { fetchImpl: status(code) });
+        await vi.runAllTimersAsync();
+        const out = await reading;
+        expect(out.permanent).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('reports the failure and its permanence up to the caller', async () => {
     const out = await indexCircleFollows({
       pending: ['did:plc:gone', 'did:plc:busy'],
@@ -161,6 +176,57 @@ describe('indexCircleFollows', () => {
     });
     expect(done).toEqual([]);
     expect(out.indexed).toBe(0);
+  });
+
+  it('leaves a member pending when a later page fails, rather than keeping a cut-short list', async () => {
+    // Marked done with the first 200 follows, this member would understate
+    // vouches for everyone deeper in their list for the life of the snapshot.
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const fetchImpl = vi.fn(async () => {
+        n += 1;
+        if (n <= 2) {
+          return {
+            ok: true,
+            json: async () => page([`did:plc:t${n}`], `c${n}`),
+          };
+        }
+        return { ok: false, status: 503, json: async () => ({}) };
+      });
+      const written = [];
+      const done = [];
+      const running = indexCircleFollows({
+        pending: ['did:plc:m1'],
+        fetchImpl,
+        writeEdges: async (rows) => written.push(...rows),
+        markDone: async (m) => done.push(m),
+      });
+      await vi.runAllTimersAsync();
+      const out = await running;
+      expect(written).toEqual([]);
+      expect(done).toEqual([]);
+      expect(out.partial).toEqual([]);
+      expect(out.unreadable).toEqual([
+        { member: 'did:plc:m1', permanent: false },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps and marks a member cut short by the page cap', async () => {
+    const written = [];
+    const done = [];
+    const out = await indexCircleFollows({
+      pending: ['did:plc:m1'],
+      fetchImpl: fakeFetch([page(['did:plc:a'], 'always-more')]),
+      writeEdges: async (rows) => written.push(...rows),
+      markDone: async (m) => done.push(m),
+    });
+    expect(out.partial).toEqual(['did:plc:m1']);
+    expect(done).toEqual(['did:plc:m1']);
+    expect(written).toHaveLength(1);
   });
 
   it('deduplicates a follow list before writing edges', async () => {

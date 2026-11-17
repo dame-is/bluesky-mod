@@ -31,14 +31,22 @@ vi.mock('./bot/reference.js', () => ({
   loadReference: vi.fn(async () => ({ ref: {}, thresholds: {}, takenAt: 't' })),
 }));
 
+const scoring = { fail: false };
 vi.mock('./lib/score.js', () => ({
   createScorer: () => ({
-    score: async (dids) =>
-      new Map(dids.map((did) => [did, { band: 'UNKNOWN', handle: did }])),
+    score: async (dids) => {
+      if (scoring.fail) {
+        throw new Error(
+          'could not read profiles from Bluesky (HTTP 429), so nothing was scored. Try again in a minute',
+        );
+      }
+      return new Map(dids.map((did) => [did, { band: 'UNKNOWN', handle: did }]));
+    },
   }),
 }));
 
 const { runDrift, renderBrief, maybeRunDrift } = await import('./drift.js');
+const { upsert } = await import('./bot/db.js');
 
 const audit = (id, started_at, extra = {}) => ({
   id,
@@ -69,9 +77,37 @@ function agentWith(subjects) {
   };
 }
 
+/** A repo whose listitems come one per page, `pages` pages long. */
+function agentWithPages(pages) {
+  return {
+    com: {
+      atproto: {
+        repo: {
+          listRecords: async ({ cursor }) => {
+            const n = cursor ? Number(cursor) : 0;
+            return {
+              data: {
+                records: [
+                  {
+                    uri: `at://did:plc:bot/app.bsky.graph.listitem/r${n}`,
+                    value: { list: LIST, subject: `did:plc:m${n}` },
+                  },
+                ],
+                cursor: n + 1 < pages ? String(n + 1) : undefined,
+              },
+            };
+          },
+        },
+      },
+    },
+  };
+}
+
 beforeEach(() => {
   db.audit = [];
   db.audit_item = [];
+  scoring.fail = false;
+  upsert.mockClear();
 });
 
 describe('the baseline a re-score is compared with', () => {
@@ -120,5 +156,39 @@ describe('sending the brief', () => {
     const agent = { com: { atproto: { repo: { listRecords } } } };
     expect(await maybeRunDrift(agent, {}, null)).toBe(null);
     expect(listRecords).not.toHaveBeenCalled();
+  });
+});
+
+describe('a re-score the AppView cannot answer', () => {
+  it('is left unfinished, so it is neither a brief nor next week\'s baseline', async () => {
+    scoring.fail = true;
+    await expect(
+      runDrift(agentWith(['did:plc:a', 'did:plc:b'])),
+    ).rejects.toThrow(/nothing was scored/);
+    const auditRows = upsert.mock.calls
+      .filter(([table]) => table === 'audit')
+      .flatMap(([, rows]) => rows);
+    expect(auditRows.some((r) => r.finished_at)).toBe(false);
+    expect(upsert.mock.calls.some(([table]) => table === 'audit_item')).toBe(
+      false,
+    );
+  });
+
+  it('sends nothing and records no brief, so the next check runs it again', async () => {
+    scoring.fail = true;
+    const sendMessage = vi.fn();
+    const chat = { chat: { bsky: { convo: { sendMessage } } } };
+    await expect(
+      maybeRunDrift(agentWith(['did:plc:a']), chat, 'convo1'),
+    ).rejects.toThrow();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(upsert.mock.calls.some(([table]) => table === 'brief')).toBe(false);
+  });
+});
+
+describe('a list longer than 40,000 accounts', () => {
+  it('is re-scored past the first 400 pages', async () => {
+    const out = await runDrift(agentWithPages(450));
+    expect(out.scored).toBe(450);
   });
 });

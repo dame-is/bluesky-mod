@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   trustScore,
   assignBand,
   distanceFrom,
   summarise,
+  createScorer,
   DEFAULT_THRESHOLDS,
 } from './score.js';
 import { referenceFrom } from './precompute.js';
@@ -159,9 +160,110 @@ describe('summarise', () => {
     expect(s.totals.byBand.CONNECTED).toBe(1);
   });
 
+  it('carries the kinds the harvest could not read', () => {
+    const s = summarise(
+      { ...harvest, truncated: true, unread: [{ kind: 'like', count: 900 }] },
+      scores,
+    );
+    expect(s.truncated).toBe(true);
+    expect(s.unread).toEqual([{ kind: 'like', count: 900 }]);
+  });
+
   it('treats an unscored participant as UNKNOWN rather than dropping them', () => {
     const s = summarise(harvest, new Map(), { excludeSelf: 'did:plc:me' });
     expect(s.rows).toHaveLength(3);
     expect(s.totals.byBand.UNKNOWN).toBe(3);
+  });
+});
+
+describe('createScorer against the AppView', () => {
+  const FRIEND = 'did:plc:friend';
+  const BIG = 'did:plc:big';
+  const GONE = 'did:plc:gone';
+
+  /** An AppView whose answers are scripted per endpoint, in order. */
+  function appview({ profiles = [], relationships = [] } = {}) {
+    const script = { getProfiles: profiles, getRelationships: relationships };
+    const healthy = {
+      getProfiles: () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          profiles: [
+            { did: FRIEND, handle: 'friend.test', followersCount: 300 },
+            { did: BIG, handle: 'big.test', followersCount: 50_000 },
+          ],
+        }),
+      }),
+      getRelationships: () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          relationships: [
+            { did: FRIEND, following: 'at://me/follow/1' },
+            { did: BIG },
+          ],
+        }),
+      }),
+    };
+    return vi.fn(async (url) => {
+      const name = /xrpc\/app\.bsky\.\w+\.(\w+)/.exec(url)[1];
+      const next = script[name].shift() ?? 'ok';
+      if (next === 'ok') return healthy[name]();
+      if (next === 'throw') throw new TypeError('fetch failed');
+      return { ok: false, status: next, json: async () => ({}) };
+    });
+  }
+  const scorerWith = (fetchImpl) =>
+    createScorer({}, { fetchImpl, retryDelaysMs: [0, 0] });
+
+  it('scores live accounts from a healthy answer', async () => {
+    const scores = await scorerWith(appview()).score([FRIEND, BIG, GONE]);
+    expect(scores.get(FRIEND)).toMatchObject({
+      band: 'PROTECTED',
+      missing: false,
+    });
+    expect(scores.get(BIG)).toMatchObject({ band: 'NOTABLE', missing: false });
+    // Left out of a profiles answer that did come back: really gone.
+    expect(scores.get(GONE).missing).toBe(true);
+  });
+
+  it('asks again after a rate limit or a server error', async () => {
+    const fetchImpl = appview({
+      profiles: [429, 503],
+      relationships: ['throw'],
+    });
+    const scores = await scorerWith(fetchImpl).score([FRIEND, BIG]);
+    expect(scores.get(FRIEND).band).toBe('PROTECTED');
+    expect(scores.get(BIG)).toMatchObject({ band: 'NOTABLE', missing: false });
+  });
+
+  it('throws rather than scoring a failed profiles batch as strangers with no profile', async () => {
+    // Read as an empty answer, a 429 would make a 50,000-follower account
+    // UNKNOWN and every account in the batch "gone".
+    const fetchImpl = appview({ profiles: [429, 429, 429] });
+    await expect(scorerWith(fetchImpl).score([FRIEND, BIG])).rejects.toThrow(
+      /429.*nothing was scored/,
+    );
+  });
+
+  it('throws rather than reading a failed follow check as "you do not follow them"', async () => {
+    // The friend is followed since the snapshot, so only the live
+    // relationship protects them.
+    const fetchImpl = appview({ relationships: [500, 502, 504] });
+    await expect(scorerWith(fetchImpl).score([FRIEND])).rejects.toThrow(
+      /nothing was scored/,
+    );
+  });
+
+  it('does not retry an answer that will not change', async () => {
+    const fetchImpl = appview({ profiles: [400] });
+    await expect(scorerWith(fetchImpl).score([FRIEND])).rejects.toThrow(
+      /400/,
+    );
+    const profileCalls = fetchImpl.mock.calls.filter(([u]) =>
+      u.includes('getProfiles'),
+    );
+    expect(profileCalls).toHaveLength(1);
   });
 });

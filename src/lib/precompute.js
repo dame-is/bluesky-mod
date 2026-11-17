@@ -43,9 +43,10 @@ const CONCURRENCY = 8;
  * Fetch JSON, separating a failure that will never succeed from one that
  * might.
  *
- * An account that is deactivated or taken down answers 400 from getFollows and
- * always will, and retrying it forever would hold the snapshot open. A 429 or
- * a 5xx is worth coming back for.
+ * An account that is deactivated, taken down or gone answers 400 from
+ * getFollows and always will, and retrying it forever would hold the snapshot
+ * open. Every other failure (a 429, any 5xx, a 401 or 403 from something in
+ * between, a 404 or a 408) is worth coming back for.
  *
  * @returns {{ body: object|null, permanent: boolean }}
  */
@@ -57,9 +58,7 @@ async function getJson(url, fetchImpl, signal, tries = 3) {
         signal,
       });
       if (res.ok) return { body: await res.json(), permanent: false };
-      if (![429, 502, 503, 504].includes(res.status)) {
-        return { body: null, permanent: true };
-      }
+      if (res.status === 400) return { body: null, permanent: true };
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
     }
@@ -74,6 +73,9 @@ async function getJson(url, fetchImpl, signal, tries = 3) {
  * Reads the AppView rather than the PDS: `getFollows` needs no auth and no PLC
  * lookup to find the host. The AppView filters by viewer, which rules it out
  * for harvesting, but these calls are unauthenticated and so have no viewer.
+ *
+ * `failed` is set when a page could not be read, the first or a later one.
+ * `complete: false` without it means the page cap or the deadline cut it.
  */
 export async function followsOf(
   did,
@@ -97,7 +99,15 @@ export async function followsOf(
       `${appview}/xrpc/app.bsky.graph.getFollows?actor=${encodeURIComponent(did)}&limit=${PAGE}` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
     const { body, permanent } = await getJson(url, fetchImpl, signal);
-    if (!body) return { dids: out, complete: false, aborted: false, permanent };
+    if (!body) {
+      return {
+        dids: out,
+        complete: false,
+        aborted: false,
+        permanent,
+        failed: true,
+      };
+    }
     for (const f of body.follows || []) if (f?.did) out.push(f.did);
     cursor = body.cursor;
     if (!cursor)
@@ -158,8 +168,9 @@ export async function readCircle({
  * runs the same against the database and against a Map in a test. Stops when
  * the time budget is spent and reports what is left.
  *
- * `partial` lists members whose follow list was cut short, by the page cap or
- * by a page that kept failing. Their edges are kept and they are marked done.
+ * `partial` lists members whose follow list was cut short by the page cap.
+ * Their edges are kept and they are marked done. A member with a page that
+ * kept failing is reported in `unreadable` instead, with nothing written.
  *
  * @param {object} opts
  * @param {string[]} opts.pending           circle members with no follow list yet
@@ -195,11 +206,10 @@ export async function indexCircleFollows({
       }
       const member = queue.shift();
       if (!member) return;
-      const { dids, complete, aborted, permanent } = await followsOf(member, {
-        fetchImpl,
-        signal,
-        deadline,
-      });
+      const { dids, complete, aborted, permanent, failed } = await followsOf(
+        member,
+        { fetchImpl, signal, deadline },
+      );
       if (aborted) {
         // Out of budget mid-member. Write and mark nothing: a follow list cut
         // short by the clock would understate this member's vouches for the
@@ -207,10 +217,13 @@ export async function indexCircleFollows({
         stopped = true;
         return;
       }
-      if (!complete && dids.length === 0) {
-        // Could not read them at all. Reporting whether the failure is
-        // permanent lets the caller stop asking about an account that will
-        // answer 400 forever; a transient one is left for the next step.
+      if (failed) {
+        // A page could not be read, the first or a later one. Write and mark
+        // nothing, for the same reason as the clock: a follow list cut short
+        // by a failed page would understate this member's vouches for the
+        // life of the snapshot. Reporting whether the failure is permanent
+        // lets the caller stop asking about an account that will answer 400
+        // forever; a transient one is left for a later step.
         unreadable.push({ member, permanent });
         continue;
       }

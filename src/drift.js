@@ -32,13 +32,20 @@ const NOT_A_STRANGER = new Set([
   'NOTABLE',
 ]);
 
+/**
+ * listRecords pages to read before stopping: half a million listitems. A list
+ * is re-scored in full up to there, since an account past a cut would never be
+ * audited at all, and a cut is logged.
+ */
+const MAX_LIST_PAGES = 5000;
+
 /** Every subject currently on the list, read from the repo that owns it. */
 async function listMembers(agent) {
   const uri = listUri();
   const owner = /^at:\/\/(did:[^/]+)\//.exec(uri)?.[1];
   const subjects = [];
   let cursor;
-  for (let page = 0; page < 400; page += 1) {
+  for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
     const res = await agent.com.atproto.repo.listRecords({
       repo: owner,
       collection: 'app.bsky.graph.listitem',
@@ -51,8 +58,14 @@ async function listMembers(agent) {
       }
     }
     cursor = res.data.cursor;
-    if (!cursor || !(res.data.records || []).length) break;
+    if (!cursor || !(res.data.records || []).length) {
+      return [...new Set(subjects)];
+    }
   }
+  logger.warn('The re-score read only part of the list', {
+    pages: MAX_LIST_PAGES,
+    accounts: new Set(subjects).size,
+  });
   return [...new Set(subjects)];
 }
 
@@ -111,6 +124,9 @@ export async function runDrift(agent) {
 
   for (let i = 0; i < members.length; i += 200) {
     const batch = members.slice(i, i + 200);
+    // Throws when the AppView cannot be read, which leaves this audit with no
+    // finished_at: no brief goes out, it is never a baseline, and the next
+    // check runs it again.
     const scores = await scorer.score(batch);
     const rows = [];
     for (const did of batch) {
@@ -139,8 +155,9 @@ export async function runDrift(agent) {
           vouches: a.vouches,
         });
       }
-      // `missing` means the AppView has no profile: deactivated, taken down, or
-      // deleted. Dead weight on a list, and worth saying so.
+      // `missing` means the AppView answered and has no profile for them:
+      // deactivated, taken down, or deleted. Dead weight on a list, and worth
+      // saying so.
       if (a.missing) gone.push({ did, handle: a.handle });
     }
     await upsert('audit_item', rows);

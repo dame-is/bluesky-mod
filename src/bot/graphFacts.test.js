@@ -133,3 +133,60 @@ describe('the held copy, for reading many at once', () => {
     expect(facts.blocksMe('did:plc:b')).toBe(null);
   });
 });
+
+describe('a list longer than the held copy reads', () => {
+  const walkNeverEnds = () =>
+    atproto.fetchWithTimeout.mockImplementation(async () =>
+      page([record('r1', 'did:plc:a')], 'more'),
+    );
+
+  it('still knows who it saw, and calls the rest unknown rather than unlisted', async () => {
+    walkNeverEnds();
+    constellation.getBacklinks.mockResolvedValue({ records: [], cursor: null });
+    await facts.graphFacts({ list: LIST });
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
+    expect(facts.isListed(LIST, 'did:plc:z')).toBe(null);
+    expect(facts.listedView(LIST).has('did:plc:a')).toBe(true);
+  });
+
+  it('is kept for the full half hour, not walked again every two minutes', async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    walkNeverEnds();
+    constellation.getBacklinks.mockResolvedValue({ records: [], cursor: null });
+    await facts.graphFacts({ list: LIST, now });
+    const walked = atproto.fetchWithTimeout.mock.calls.length;
+    t += 5 * 60_000;
+    await facts.graphFacts({ list: LIST, now });
+    expect(atproto.fetchWithTimeout.mock.calls.length).toBe(walked);
+  });
+
+  it('keeps a blockers count too big to read for the full half hour as well', async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    atproto.fetchWithTimeout.mockResolvedValue(page([]));
+    constellation.getBacklinks.mockResolvedValue({
+      records: [{ did: 'did:plc:b' }],
+      cursor: 'more',
+    });
+    await facts.graphFacts({ list: LIST, now });
+    const asked = constellation.getBacklinks.mock.calls.length;
+    t += 5 * 60_000;
+    await facts.graphFacts({ list: LIST, now });
+    expect(constellation.getBacklinks.mock.calls.length).toBe(asked);
+    expect(facts.blocksMe('did:plc:b')).toBe(null);
+  });
+
+  it('tries a load that failed again after two minutes', async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    atproto.fetchWithTimeout.mockResolvedValue({ ok: false, status: 502 });
+    constellation.getBacklinks.mockResolvedValue({ records: [], cursor: null });
+    await facts.graphFacts({ list: LIST, now });
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(null);
+    atproto.fetchWithTimeout.mockResolvedValue(page([record('r1', 'did:plc:a')]));
+    t += 3 * 60_000;
+    await facts.graphFacts({ list: LIST, now });
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
+  });
+});
