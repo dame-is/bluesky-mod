@@ -44,6 +44,7 @@ import { isAuthError, createReconnector } from './session.js';
 import { acquireLease, HEARTBEAT_MS } from './lease.js';
 import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
 import { diskSpace, isLow, describe as describeDisk } from './disk.js';
+import { pruneData } from './retention.js';
 
 const model = MODELS.agent;
 
@@ -480,6 +481,27 @@ function scheduleDiskCheck() {
   if (diskTimer.unref) diskTimer.unref();
 }
 
+// --- retention ---------------------------------------------------------------
+// What the database keeps (MOD_KEEP_*), cleared a few minutes after start and
+// then once a day.
+let retentionTimer = null;
+const RETENTION_EVERY_MS = 24 * 60 * 60_000;
+const RETENTION_FIRST_MS = 5 * 60_000;
+
+function scheduleRetention() {
+  const run = () =>
+    enqueue('retention', async () => {
+      const res = await pruneData();
+      if (res.audits || res.plans) logger.info('Cleared old data', res);
+    });
+  retentionTimer = setTimeout(function again() {
+    run();
+    retentionTimer = setTimeout(again, RETENTION_EVERY_MS);
+    if (retentionTimer.unref) retentionTimer.unref();
+  }, RETENTION_FIRST_MS);
+  if (retentionTimer.unref) retentionTimer.unref();
+}
+
 // --- stats -------------------------------------------------------------------
 function logStats() {
   logger.info('stats', {
@@ -594,6 +616,7 @@ async function start() {
 
   scheduleSnapshot();
   scheduleDiskCheck();
+  scheduleRetention();
 
   const protect = ownerGraphHandler({
     ownerDid: config.ownerDid,
@@ -659,6 +682,7 @@ async function shutdown(signal) {
   if (alertTimer) clearInterval(alertTimer);
   if (statsTimer) clearInterval(statsTimer);
   if (diskTimer) clearInterval(diskTimer);
+  if (retentionTimer) clearTimeout(retentionTimer);
   stream?.close();
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),

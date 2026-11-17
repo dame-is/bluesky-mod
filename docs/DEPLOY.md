@@ -100,8 +100,17 @@ Nearly all of the file is the follow-graph snapshot: one row for every account a
 | About 2,000 | About 550 MB | About 1 GB |
 | 5,000 or more | About 1 GB | 2 to 3 GB |
 
-Everything else is small. A scan of a post with 5,000 engagers adds about 1.3 MB to the decision log, which is kept for good. A weekly re-score of a 20,000-account list is about 3 MB, and only the newest four are kept.
+Everything else is small. A scan of a post with 5,000 engagers adds about 1.3 MB to the decision log. Scans you never approve anything from are cleared after 30 days; anything a change to the list came from is kept for good. A weekly re-score of a 20,000-account list is about 3 MB, and only the newest four are kept.
 
 So the defaults here are enough for most people: 2 GB on Render and Fly, which grows by itself, and 5 GB on Railway's Hobby plan. If you follow thousands of accounts, give Render a 5 GB disk. A disk can grow later; on Render and Fly it can't shrink.
+
+### Keeping it smaller
+
+If the disk is tight, or you'd rather keep less:
+
+- `MOD_SCORING=simple` reads only who you follow, and counts anyone who follows you as close. The file stays at a few MB whoever you follow, and the snapshot takes seconds instead of minutes. The cost is that friends of friends who don't follow you score as strangers. [HOW-IT-WORKS.md](HOW-IT-WORKS.md#simple-scoring) has the details.
+- `MOD_KEEP_SNAPSHOTS=1` keeps one snapshot instead of two, which roughly halves the file most of the week. The second is only a spare, used if the newest has to be dropped.
+- `DRIFT_EVERY_HOURS=0` turns off the weekly re-score.
+- The other `MOD_KEEP_*` settings in [.env.example](../.env.example) say how long scans, quotes and token counts are kept. They are small next to the snapshot.
 
 The bot checks the disk every hour. When it runs low (under a tenth of the disk, or under 256 MB), it says so in the log and DMs you once a day, before anything starts failing.

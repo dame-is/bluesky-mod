@@ -15,10 +15,11 @@ import { OWNER_DID } from './constants.js';
 import { createScorer } from './lib/score.js';
 import { loadReference } from './bot/reference.js';
 import { listUri } from './bot/listWrite.js';
-import { del, select, selectAll, update, upsert } from './bot/db.js';
+import { select, selectAll, update, upsert } from './bot/db.js';
 import { chunkForDm } from './lib/agent.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { pruneAudits } from './retention.js';
 
 /** "1 are gone" makes a machine sound like a machine. */
 const plural = (n, one, many) =>
@@ -350,11 +351,6 @@ async function moveBackTimesAhead(dueAfter) {
   }
 }
 
-/** Finished re-scores kept. Only the newest is read, as the baseline. */
-const KEEP_AUDITS = 4;
-/** How long a model call's token counts are kept. */
-const KEEP_USAGE_DAYS = 90;
-
 /**
  * Make an audit the baseline for the next one, and drop what no longer
  * matters, so the file does not grow with every week: a re-score is a row
@@ -366,40 +362,7 @@ async function finishAudit(auditId, { now = Date.now() } = {}) {
     { eq: { id: auditId } },
     { finished_at: new Date(now).toISOString() },
   );
-  await pruneOld({ now }).catch(() => {});
-}
-
-/**
- * Finished audits past the newest KEEP_AUDITS, unfinished ones a day old (a
- * run that was killed partway), and token counts past KEEP_USAGE_DAYS. An
- * audit's items go with it.
- */
-export async function pruneOld({ now = Date.now() } = {}) {
-  const finished = await selectAll('audit', {
-    select: 'id',
-    eq: { list_uri: listUri() },
-    where: { finished_at: 'not.is.null' },
-    order: 'started_at.desc',
-  });
-  const old = finished.slice(KEEP_AUDITS).map((a) => a.id);
-  const stale = await selectAll('audit', {
-    select: 'id',
-    where: {
-      finished_at: 'is.null',
-      started_at: `lt.${new Date(now - 24 * 3_600_000).toISOString()}`,
-    },
-    order: 'started_at.asc',
-  });
-  const gone = [...old, ...stale.map((a) => a.id)];
-  for (let i = 0; i < gone.length; i += 50) {
-    await del('audit', { where: { id: { in: gone.slice(i, i + 50) } } });
-  }
-  await del('llm_usage', {
-    where: {
-      at: `lt.${new Date(now - KEEP_USAGE_DAYS * 86_400_000).toISOString()}`,
-    },
-  });
-  return gone.length;
+  await pruneAudits({ now }).catch(() => {});
 }
 
 /**

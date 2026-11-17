@@ -202,7 +202,11 @@ A card's `hostile`, an auto watch and the agent approving by label add without a
 
 ## The weekly re-score
 
-Every `DRIFT_EVERY_HOURS` (a week by default) the bot re-scores everyone on the list and DMs you only what moved: anyone who was a stranger and isn't now, anyone on it who has become PROTECTED, and accounts that have gone since the last run. Most weeks it says nothing. A brief that restates thousands of unchanged rows is one that stops being read.
+Every `DRIFT_EVERY_HOURS` (a week by default, 0 for never) the bot re-scores everyone on the list and DMs you only what moved: anyone who was a stranger and isn't now, anyone on it who has become PROTECTED, and accounts that have gone since the last run. Most weeks it says nothing. A brief that restates thousands of unchanged rows is one that stops being read.
+
+## What it keeps
+
+Once a day the bot clears what the `MOD_KEEP_*` settings say it no longer needs: re-scores past the newest four, scans nobody approved anything from after 30 days, and model token counts after 90. The words behind tone labels are kept unless `MOD_KEEP_QUOTES_DAYS` says otherwise. A plan any change to the list was written from is never cleared, so history and undo work however far back they go.
 
 ## Steering it
 

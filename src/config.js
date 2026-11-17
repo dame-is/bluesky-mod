@@ -180,7 +180,7 @@ export const config = {
     /** Finalised snapshots: the newest is scored against, older ones are spares. */
     snapshots: num('MOD_KEEP_SNAPSHOTS', 2, { positive: true, whole: true }),
     /** Finished weekly re-scores, the newest compared with the one before. */
-    audits: num('MOD_KEEP_AUDITS', 4, { positive: true, min: 2, whole: true }),
+    audits: num('MOD_KEEP_AUDITS', 4, { positive: true, whole: true }),
     /** Scans never approved: their plans and every row in them. */
     unapprovedDays: num('MOD_KEEP_UNAPPROVED_DAYS', 30),
     /** The words of a reply or quote kept beside its tone label. */

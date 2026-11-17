@@ -119,6 +119,12 @@ vi.mock('./drift.js', async (importOriginal) => ({
   ownerConvo: async () => 'owner-convo',
 }));
 
+vi.mock('./retention.js', () => ({
+  pruneData: async () => {
+    h.events.push('retention');
+    return { audits: 0, plans: 0 };
+  },
+}));
 vi.mock('./disk.js', async (importOriginal) => ({
   ...(await importOriginal()),
   diskSpace: async () => h.disk,
