@@ -338,8 +338,15 @@ function onEvent(event) {
     logger.debug('Already answered', { uri: t.uri });
     return;
   }
-  // A dry run posts nothing, so it marks nothing as answered.
-  if (!config.dryRun) markAnswered(t.uri);
+  // A dry run posts nothing, so it marks nothing as answered. A mark that
+  // could not be stored would let a restart replay the mention, so it is left
+  // unanswered.
+  if (!config.dryRun && !markAnswered(t.uri)) {
+    logger.error('Not answering a mention: could not record it as answered', {
+      uri: t.uri,
+    });
+    return;
+  }
 
   stats.triggers += 1;
   logger.info('Trigger', {

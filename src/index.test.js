@@ -123,10 +123,13 @@ const ENV = {
 
 let savedEnv;
 
+let dataDir;
+
 async function boot(extraEnv = {}) {
   savedEnv = { ...process.env };
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-index-'));
   Object.assign(process.env, ENV, extraEnv, {
-    DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-index-')),
+    DATA_DIR: dataDir,
     MOD_CONFIG_FILE: path.join(os.tmpdir(), 'bluesky-mod-no-such-config.json'),
   });
   await import('./index.js');
@@ -261,6 +264,20 @@ describe('a public mention', () => {
     expect(rows).toEqual([
       { kind: 'post', input_tokens: 120, output_tokens: 3 },
     ]);
+    expect(h.posted).toEqual([]);
+  });
+
+  it('is not answered when it cannot be recorded as answered', async () => {
+    // A restart would replay a mention it has no record of, and answer it a
+    // second time, in public.
+    await boot();
+    const { config } = await import('./config.js');
+    fs.mkdirSync(path.join(dataDir, `${config.answeredFile}.tmp`));
+    h.trigger = mention();
+    h.answerText = 'A stranger: nobody you follow follows them.';
+    h.onEvent({ time_us: 1 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.events).not.toContain('answer');
     expect(h.posted).toEqual([]);
   });
 
