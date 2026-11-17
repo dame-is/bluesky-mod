@@ -95,6 +95,8 @@ import {
   undoPlan,
   lastChange,
   countDecisions,
+  CLOSE_BANDS,
+  HELD_BANDS,
   historyFor,
   shortCode,
 } from './bulkPlan.js';
@@ -1413,7 +1415,8 @@ const HOSTILE_PER_ROUND = CONCURRENCY;
  * Nobody reads the quotes before this adds, so each post gets a model call of
  * its own, as on an auto watch, and a post that talks to the model can sway no
  * label but its own. Three rounds at most; anything still unread is said, so
- * the counts are not taken for the whole post.
+ * the counts are not taken for the whole post. Anyone CONNECTED or NOTABLE is
+ * held, as a watch holds them, and `ask` puts them to the owner as a 👍.
  */
 async function runHostile(code, { writeAgent, generate, model, log }) {
   if (!(modelsEnabled() && model)) {
@@ -1439,7 +1442,9 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   const failedReads = failedReadsOf(out);
   const added = await applyPlanToTriage(writeAgent, plan, 'hostile', {
     reason: `hostile ${code}`,
+    skipBands: HELD_BANDS,
   });
+  const held = await heldFor(plan, code);
   const c = out?.counts || {};
   const unread = out?.remaining
     ? ` ${out.remaining} not read yet; "triage ${code}" reads them.`
@@ -1449,11 +1454,34 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
     : '';
   return {
     text:
-      `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${failedLine}${unread} ${added.message}`,
+      `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${failedLine}${unread} ${added.message}${held?.line ?? ''}`,
     // Reads that failed with nobody added is a failure, not nothing to do.
     outcome:
       planOutcome(added, addedOrRecorded(added)) ??
       (failedReads ? 'failed' : null),
+    ask: held?.ask ?? null,
+  };
+}
+
+/**
+ * The accounts read as hostile that a label approval held back, as a line
+ * for the reply and a 👍 question bounded to what was counted, or null.
+ */
+async function heldFor(plan, code) {
+  const held = await countDecisions(plan, {
+    label: 'hostile',
+    bands: CLOSE_BANDS,
+  });
+  if (!held) return null;
+  const asOf = await newestLabelAt(plan, 'hostile');
+  return {
+    line: ` Held ${held} close to you (connected or notable) for your OK.`,
+    ask: {
+      commands: [
+        `approve ${code} hostile ${CLOSE_BANDS.join(',')}${asOfToken(asOf)}`,
+      ],
+      describe: `add the ${held} close to you read as hostile from plan ${code}`,
+    },
   };
 }
 
@@ -1473,6 +1501,7 @@ async function runPending(
   { writeAgent, getIo, convoId, generate, model, log },
 ) {
   const lines = [];
+  const asks = [];
   let failed = false;
   let changed = false;
   for (const command of pending.commands || []) {
@@ -1502,6 +1531,7 @@ async function runPending(
           log,
         });
         lines.push(out.text);
+        if (out.ask) asks.push(out.ask);
         failed ||= out.outcome === 'failed';
         changed ||= out.outcome === 'done';
         continue;
@@ -1527,12 +1557,37 @@ async function runPending(
       failed = true;
     }
   }
-  return { text: lines.join('\n\n'), failed, changed };
+  return { text: lines.join('\n\n'), failed, changed, asks };
 }
 
 /** The reaction a run of stored commands earns: a failure outranks a change. */
 const pendingOutcome = (out) =>
   out.failed ? 'failed' : out.changed ? 'done' : null;
+
+/**
+ * Send what a run of stored commands said, as a receipt when it changed the
+ * list, with any question it raised written by code and stored against the
+ * message, so a 👍 on it runs exactly that.
+ */
+async function sendRun(send, convoId, out, { log }) {
+  const asks = out.asks || [];
+  const text = asks.length
+    ? `${out.text}\n\n${confirmLine(asks.map((a) => a.describe))}`
+    : out.text;
+  const ids =
+    pendingOutcome(out) === 'done'
+      ? await sendReceipt(send, text, { log })
+      : await send(text);
+  if (asks.length && ids) {
+    await savePending(convoId, {
+      commands: asks.flatMap((a) => a.commands),
+      describe: asks.map((a) => a.describe).join('; '),
+      messageIds: ids,
+    }).catch((err) =>
+      log('Could not store the question', { err: String(err?.message || err) }),
+    );
+  }
+}
 
 /** What classic mode says to a memory command. */
 const NOTES_NEED_AGENT_MODE =
@@ -1709,8 +1764,7 @@ async function withoutModel({
           ctx,
         );
         const outcome = pendingOutcome(out);
-        if (outcome === 'done') await sendReceipt(send, out.text, { log });
-        else await send(out.text);
+        await sendRun(send, convoId, out, { log });
         log('Answered a card', { keys: keys.join(','), ok: !out.failed });
         return { convoId, card: keys.join(','), outcome };
       }
@@ -2149,7 +2203,7 @@ export async function runDmPass({
         model: activeModel,
         log,
       });
-      await send(out.text);
+      await sendRun(send, r.convoId, out, { log });
       log('Ran a confirmed change', {
         via: 'reaction',
         commands: pending.commands.join(' | '),
@@ -2275,8 +2329,7 @@ export async function runDmPass({
             log,
           });
           outcome = pendingOutcome(out);
-          if (outcome === 'done') await sendReceipt(send, out.text, { log });
-          else await send(out.text);
+          await sendRun(send, entry.convoId, out, { log });
           log('Ran a confirmed change', {
             via: 'reply',
             commands: pending.commands.join(' | '),

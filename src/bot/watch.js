@@ -37,6 +37,7 @@ import {
   proposePlan,
   applyPlanToTriage,
   countDecisions,
+  HELD_BANDS,
   shortCode,
 } from './bulkPlan.js';
 import { runTriage, evidenceUriFor } from './triage.js';
@@ -47,8 +48,6 @@ export const WATCH_EVERY_MS = 5 * 60_000;
 const DIGEST_EVERY_MS = 60 * 60_000;
 /** Engagement worth reading on a watched post. */
 const READ_KINDS = ['quote', 'reply', 'threadReply'];
-/** Bands a watch never adds without a 👍, even in auto. */
-const HELD_BANDS = ['PROTECTED', 'CONNECTED', 'NOTABLE'];
 
 const hoursLeft = (w, now) =>
   Math.max(0, Math.round((Date.parse(w.until) - now) / 3_600_000));

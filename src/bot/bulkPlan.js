@@ -70,6 +70,14 @@ const BATCH = 50;
 export const shortCode = (uuid) => uuid.replace(/-/g, '').slice(0, 8);
 
 /**
+ * Bands a label approval nobody reviewed never adds without a 👍: someone
+ * close to the owner or widely followed is never blocked on a model's reading
+ * alone. PROTECTED is never added at all.
+ */
+export const CLOSE_BANDS = ['CONNECTED', 'NOTABLE'];
+export const HELD_BANDS = ['PROTECTED', ...CLOSE_BANDS];
+
+/**
  * The `approved_via` for a write, given who asked for it.
  *
  * `by` is null for a typed command, 'agent' when agent mode acted on the

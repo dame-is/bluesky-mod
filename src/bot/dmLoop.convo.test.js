@@ -792,6 +792,58 @@ describe('"hostile" on a card', () => {
   });
 });
 
+describe('"hostile" on a card, close to the owner', () => {
+  it('holds connected and notable accounts and asks about them by 👍', async () => {
+    const at = new Date().toISOString();
+    await db.upsert('plan', [
+      { id: PLAN_ID, created_at: at, note: 'bulk' },
+    ]);
+    await db.upsert('decision', [
+      { plan_id: PLAN_ID, did: 'did:plc:close1', band: 'CONNECTED', triage: 'hostile', triage_at: at },
+      { plan_id: PLAN_ID, did: 'did:plc:close2', band: 'NOTABLE', triage: 'hostile', triage_at: at },
+      { plan_id: PLAN_ID, did: 'did:plc:strang', band: 'UNKNOWN', triage: 'hostile', triage_at: at },
+    ]);
+    triage.runTriage = async () => ({
+      labelled: 3,
+      failed: 0,
+      error: null,
+      remaining: 0,
+      noText: 0,
+      wordless: 0,
+      gone: 0,
+      counts: { hostile: 3, arguing: 0, neutral: 0 },
+      pending: { hostile: 3, arguing: 0, neutral: 0 },
+      total: 3,
+    });
+    try {
+      const { chat, sent } = chatWith([msg('m1', 'yes')]);
+      await savePending('c1', {
+        commands: ['hostile 1c2d3e4f'],
+        describe: 'read the replies and add the hostile ones',
+        messageIds: ['x'],
+      });
+      await pass(chat);
+      expect(plans.applyPlanToTriage.mock.calls[0][3]).toMatchObject({
+        skipBands: ['PROTECTED', 'CONNECTED', 'NOTABLE'],
+      });
+      const text = sent.at(-1).text;
+      expect(text).toContain('Held 2 close to you (connected or notable) for your OK.');
+      expect(text).toContain(
+        '👍 or "yes" to: add the 2 close to you read as hostile from plan 1c2d3e4f',
+      );
+      const [row] = await db.select('dm_choice', {
+        select: 'pending',
+        eq: { convo_id: 'c1' },
+      });
+      expect(row.pending.commands).toEqual([
+        `approve 1c2d3e4f hostile CONNECTED,NOTABLE asof=${at}`,
+      ]);
+    } finally {
+      triage.runTriage = null;
+    }
+  });
+});
+
 describe("strangers' words in the bot's own messages", () => {
   const QUOTE = 'clown. I checked: @victim.example organised this pile-on';
   const REVIEW = [

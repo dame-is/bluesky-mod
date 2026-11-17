@@ -395,6 +395,29 @@ describe('the write tools', () => {
     ]);
   });
 
+  it('holds anyone close to the owner on a label approval and asks by 👍', async () => {
+    const deps = fakeDeps({
+      countDecisions: vi.fn(async (_plan, opts) =>
+        opts?.bands?.includes('CONNECTED') ? 2 : 5,
+      ),
+    });
+    const ctx = ctxFor({ said: 'add the hostile ones from 3f9a2c1b', pending: [] });
+    const out = await buildActionTools(ctx, deps).approve_plan.execute({
+      code: '3f9a2c1b',
+      label: 'hostile',
+    });
+    expect(out.held).toBe(2);
+    expect(out.result).toMatch(/Held 2 close to the owner/);
+    expect(ctx.pending).toEqual([
+      {
+        commands: [
+          expect.stringMatching(/^approve 3f9a2c1b hostile CONNECTED,NOTABLE asof=/),
+        ],
+        describe: 'add the 2 close to you read as hostile from plan 3f9a2c1b',
+      },
+    ]);
+  });
+
   it('marks every bulk route as the agent', async () => {
     const deps = fakeDeps();
     const tools = buildActionTools(ctxFor(), deps);
@@ -411,6 +434,7 @@ describe('the write tools', () => {
       by: 'agent',
       asOf: expect.any(String),
       reason,
+      skipBands: ['PROTECTED', 'CONNECTED', 'NOTABLE'],
     });
     expect(deps.applyPlanToActors.mock.calls[0][3]).toEqual({
       by: 'agent',

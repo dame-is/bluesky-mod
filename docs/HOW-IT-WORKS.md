@@ -179,7 +179,7 @@ Three labels, because the only line that carries weight is between attacking a p
 
 This is still a bulk sweep, with a model's reading in place of the follow graph. What makes it defensible is that the subset is smaller and better justified than "everyone who engaged", the words behind each label are stored next to it, `review <code> hostile` shows them before anything is approved, and approving is a separate human step with the PROTECTED veto still in place.
 
-A card's `hostile` and an auto watch add without anyone reading the quotes first, so there each post gets a model call of its own and can sway no label but its own. A card's `hostile` reads up to 36 posts and says how many it left for `triage <code>`.
+A card's `hostile`, an auto watch and the agent approving by label add without anyone reading the quotes first. So on a card and a watch each post gets a model call of its own and can sway no label but its own, and on all three anyone CONNECTED or NOTABLE is held back and put to you as a 👍 instead. A card's `hostile` reads up to 36 posts and says how many it left for `triage <code>`.
 
 **A label is not a band, anywhere.** Bands come from the follow graph by a fixed rule. A model's verdict is reproducible by nobody, so it lives in its own column and is approved by its own command.
 

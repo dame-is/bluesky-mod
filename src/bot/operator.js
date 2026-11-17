@@ -63,6 +63,8 @@ import {
   historyFor,
   handlesFor,
   countDecisions,
+  CLOSE_BANDS,
+  HELD_BANDS,
   decisionsFor,
   activitySince,
   shortCode,
@@ -1270,10 +1272,15 @@ export function buildActionTools(ctx, deps = DEPS) {
         // are stamped when a triage starts, and triages share the one job
         // queue, so none counted here is later than this.
         const asOf = label && !named ? new Date().toISOString() : null;
+        // A label approval leaves out anyone close to the owner: nobody has
+        // read their words, so they are held for a 👍 instead.
+        const labelBands = label
+          ? BANDS.filter((b) => !HELD_BANDS.includes(b))
+          : bands;
         const count = named
           ? named.length
           : await deps.countDecisions(plan, {
-              bands,
+              bands: labelBands,
               label,
               ...(asOf ? { asOf } : {}),
             });
@@ -1329,6 +1336,7 @@ export function buildActionTools(ctx, deps = DEPS) {
                 by: 'agent',
                 asOf,
                 reason: why,
+                skipBands: HELD_BANDS,
               })
             : await deps.applyPlan(ctx.writeAgent, plan, bands, {
                 by: 'agent',
@@ -1341,13 +1349,31 @@ export function buildActionTools(ctx, deps = DEPS) {
             `approved ${which} ${named ? 'by name' : label || bands.join(',')} (${out.added ?? 0} added${out.recorded ? `, ${out.recorded} recorded` : ''})`,
           );
         }
+        const held = label
+          ? await deps.countDecisions(plan, {
+              label,
+              bands: CLOSE_BANDS,
+              asOf,
+            })
+          : 0;
+        if (held && where.pointedAt && ctx.pending) {
+          ctx.pending.push({
+            commands: [`approve ${which} ${label} ${CLOSE_BANDS.join(',')} asof=${asOf}`],
+            describe: `add the ${held} close to you read as ${label} from plan ${which}`,
+          });
+        }
         return {
           ok: out.ok,
           added: out.added ?? 0,
           recorded: out.recorded ?? 0,
           remaining: out.remaining ?? 0,
           failed: out.failed ?? 0,
-          result: out.message,
+          held,
+          result:
+            out.message +
+            (held
+              ? ` Held ${held} close to the owner (connected or notable)${where.pointedAt && ctx.pending ? ', put to the owner as a question' : ''}.`
+              : ''),
         };
       } catch (err) {
         return failed(err);
