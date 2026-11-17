@@ -16,13 +16,13 @@ vi.mock('./listWrite.js', async (importOriginal) => ({
 const PLAN = { id: '1c2d3e4f-0000-4000-8000-000000000000', totals: {} };
 const plans = {
   findPlan: vi.fn(async (code) => (code === '1c2d3e4f' ? PLAN : null)),
-  lastActedPlan: vi.fn(async () => PLAN),
+  lastChange: vi.fn(async () => ({ plan: PLAN, removed: null })),
   undoPlan: vi.fn(async () => ({ ok: true, message: 'Took 12 back off.' })),
 };
 vi.mock('./bulkPlan.js', async (importOriginal) => ({
   ...(await importOriginal()),
   findPlan: (...a) => plans.findPlan(...a),
-  lastActedPlan: (...a) => plans.lastActedPlan(...a),
+  lastChange: (...a) => plans.lastChange(...a),
   undoPlan: (...a) => plans.undoPlan(...a),
 }));
 

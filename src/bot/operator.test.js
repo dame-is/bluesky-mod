@@ -69,14 +69,18 @@ function fakeDeps(overrides = {}) {
       added: 0,
       rows: [],
     })),
-    cancelPlan: vi.fn(async () => {}),
+    cancelPlan: vi.fn(async () => ({
+      live: 0,
+      watching: 0,
+      message: 'Cancelled 3f9a2c1b. Nothing was added.',
+    })),
     undoPlan: vi.fn(async () => ({
       ok: true,
       removed: 9,
       remaining: 0,
       message: 'Took 9 back off the list.',
     })),
-    lastActedPlan: vi.fn(async () => PLAN),
+    lastChange: vi.fn(async () => ({ plan: PLAN, removed: null })),
     historyFor: vi.fn(async () => ({ total: 0, rows: [] })),
     handlesFor: vi.fn(async () => new Map()),
     runTriage: vi.fn(async () => ({
@@ -343,9 +347,38 @@ describe('the write tools', () => {
     const deps = fakeDeps();
     const ctx = ctxFor();
     const out = await buildActionTools(ctx, deps).undo.execute({});
-    expect(deps.lastActedPlan).toHaveBeenCalled();
+    expect(deps.lastChange).toHaveBeenCalled();
     expect(out.removed).toBe(9);
     expect(ctx.actions).toEqual(['undid 3f9a2c1b (9 removed)']);
+  });
+
+  it('undoes nothing when the newest change was an unblock', async () => {
+    // Reaching past it to an older add would take off a batch nobody named.
+    const deps = fakeDeps({
+      lastChange: vi.fn(async () => ({
+        plan: null,
+        removed: { did: 'did:plc:b', planId: 'p', at: '2026-11-01T10:00:00Z' },
+      })),
+    });
+    const ctx = ctxFor();
+    const out = await buildActionTools(ctx, deps).undo.execute({});
+    expect(out.result).toBe(
+      'The last change took did:plc:b off the list. Undo only takes people off, so nothing was undone.',
+    );
+    expect(deps.undoPlan).not.toHaveBeenCalled();
+    expect(ctx.actions).toEqual([]);
+  });
+
+  it('says what a cancel leaves on the list', async () => {
+    const message =
+      'Cancelled 3f9a2c1b. 9 it added are still on the list; "undo 3f9a2c1b" takes them off.';
+    const deps = fakeDeps({
+      cancelPlan: vi.fn(async () => ({ live: 9, watching: 0, message })),
+    });
+    const out = await buildActionTools(ctxFor(), deps).cancel_plan.execute({
+      code: '3f9a2c1b',
+    });
+    expect(out).toMatchObject({ ok: true, live: 9, result: message });
   });
 });
 

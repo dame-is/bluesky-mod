@@ -59,7 +59,7 @@ import {
   reviewPlan,
   cancelPlan,
   undoPlan,
-  lastActedPlan,
+  lastChange,
   historyFor,
   handlesFor,
   countDecisions,
@@ -290,7 +290,7 @@ const DEPS = {
   reviewPlan,
   cancelPlan,
   undoPlan,
-  lastActedPlan,
+  lastChange,
   historyFor,
   handlesFor,
   runTriage,
@@ -1261,10 +1261,17 @@ export function buildActionTools(ctx, deps = DEPS) {
     execute: async ({ code }) => {
       try {
         const plan = await findOrFail(code);
-        await deps.cancelPlan(plan);
+        // The result says how many of its adds are still on the list, and
+        // whether an auto watch is still adding to it: a cancel stops neither.
+        const out = await deps.cancelPlan(plan);
         const which = shortCode(plan.id);
         record(`cancelled ${which}`);
-        return { ok: true, result: `Cancelled ${which}. Nothing was added.` };
+        return {
+          ok: true,
+          live: out.live,
+          watching: out.watching,
+          result: out.message,
+        };
       } catch (err) {
         return failed(err);
       }
@@ -1273,7 +1280,7 @@ export function buildActionTools(ctx, deps = DEPS) {
 
   tools.undo = tool({
     description:
-      "Take a plan's additions back off the list. With no code, undoes the most recent plan or single add that put someone on the list. The record is kept and marked undone. Up to 1,000 per call.",
+      "Take a plan's additions back off the list. With no code, undoes the newest change to the list when that change was an add; after an unblock it undoes nothing. The record is kept and marked undone. Up to 1,000 per call.",
     inputSchema: z.object({
       code: z.string().optional(),
       ask_first: z
@@ -1283,7 +1290,14 @@ export function buildActionTools(ctx, deps = DEPS) {
     }),
     execute: async ({ code, ask_first: askFirst = false }) => {
       try {
-        const plan = code ? await findOrFail(code) : await deps.lastActedPlan();
+        const last = code ? null : await deps.lastChange();
+        const plan = code ? await findOrFail(code) : last.plan;
+        if (!plan && last?.removed) {
+          return {
+            ok: true,
+            result: `The last change took ${last.removed.did} off the list. Undo only takes people off, so nothing was undone.`,
+          };
+        }
         if (!plan) return { ok: true, result: 'Nothing to undo.' };
         const live = await deps.countDecisions(plan, { state: 'live' });
         if (!live) {

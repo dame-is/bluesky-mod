@@ -124,7 +124,6 @@ const {
   cancelPlan,
   countDecisions,
   undoPlan,
-  lastActedPlan,
   lastChange,
   findPlan,
   historyFor,
@@ -436,7 +435,7 @@ describe('undo', () => {
 
     // And "undo last" moves on to the add before it.
     db.decision.push(added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z'));
-    expect((await lastActedPlan()).id).toBe(PLAN_A);
+    expect((await lastChange()).plan.id).toBe(PLAN_A);
   });
 
   it('does not close anyone on the strength of a lookup that found nothing', async () => {
@@ -481,7 +480,7 @@ describe('undo', () => {
       undo_reason: 'undo 1c2d3e4f',
     });
     // Left open, "undo last" would pick plan B next for someone already gone.
-    expect(await lastActedPlan()).toBe(null);
+    expect((await lastChange()).plan).toBe(null);
   });
 
   it('leaves on the list someone the owner also blocked by name, and closes only this plan', async () => {
@@ -510,7 +509,7 @@ describe('undo', () => {
     expect([...repo.values()]).toEqual(['did:plc:a']);
     expect(row(PLAN_A, 'did:plc:a')).toMatchObject({ undo_reason: 'too broad' });
     expect(row(PLAN_B, 'did:plc:a').undone_at).toBe(null);
-    expect((await lastActedPlan()).id).toBe(PLAN_B);
+    expect((await lastChange()).plan.id).toBe(PLAN_B);
   });
 
   it("does not stamp a typed block undone when a band plan's duplicate comes off", async () => {
@@ -621,13 +620,13 @@ describe('undo last', () => {
         undone_at: '2026-10-01T12:00:00Z',
       }),
     ];
-    expect((await lastActedPlan()).id).toBe(PLAN_A);
+    expect((await lastChange()).plan.id).toBe(PLAN_A);
     const read = db.reads.find((r) => r.table === 'decision');
     expect(read.opts).toMatchObject({ limit: 1, order: 'acted_at.desc' });
   });
 
   it('answers null when nothing is live', async () => {
-    expect(await lastActedPlan()).toBe(null);
+    expect((await lastChange()).plan).toBe(null);
   });
 
   it('does not reach past an unblock to an older add', async () => {
@@ -638,7 +637,7 @@ describe('undo last', () => {
         action: 'list_remove',
       }),
     ];
-    expect(await lastActedPlan()).toBe(null);
+    expect((await lastChange()).plan).toBe(null);
     expect(await lastChange()).toEqual({
       plan: null,
       removed: {

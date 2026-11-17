@@ -1009,15 +1009,6 @@ export async function lastChange() {
 }
 
 /**
- * The plan a bare `undo` takes back: the newest change, when it was an add
- * still on the list. Null otherwise, including when the newest change was a
- * removal (see lastChange).
- */
-export async function lastActedPlan() {
-  return (await lastChange()).plan;
-}
-
-/**
  * Up to this many accounts, an undo asks Constellation where each one's
  * listitems are instead of walking the bot's whole repo, which costs a page per
  * hundred listitems to find even one record.
@@ -1253,7 +1244,7 @@ export async function undoPlan(
     alreadyOff,
     kept,
     message:
-      `Took ${removed} back off the list.` +
+      `Took ${removed} back off the list (plan ${shortCode(plan.id)}).` +
       (alreadyOff ? ` ${alreadyOff} had already come off another way.` : '') +
       (kept
         ? ` ${kept === 1 ? '1 stays' : `${kept} stay`} on the list, since you also added them by name.`

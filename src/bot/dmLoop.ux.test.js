@@ -299,6 +299,23 @@ describe('the quick lane', () => {
     expect(reactions).toContain('+❌@m2');
   });
 
+  it('says so when a block went through but could not be recorded', async () => {
+    listWrite.applyCommand.mockResolvedValueOnce({
+      ok: true,
+      changed: true,
+      logged: false,
+      account: { handle: 'pest.test', band: 'UNKNOWN' },
+      message:
+        'Added did:plc:author to the list, but I could not record it, so undo and history will not find it. "unblock did:plc:author" takes it back.',
+    });
+    const { chat, sent, reactions } = chatWith([shared('m1', 'block')]);
+    await pass(chat);
+    expect(sent).toEqual([
+      'Added @pest.test to the list, but I could not record it, so undo and history will not find it. "unblock @pest.test" takes it back.',
+    ]);
+    expect(reactions).toContain('+✅@m1');
+  });
+
   it('leaves two things at once to the agent', async () => {
     const generate = vi.fn(async () => ({ text: 'Done.', steps: [] }));
     const { chat } = chatWith([

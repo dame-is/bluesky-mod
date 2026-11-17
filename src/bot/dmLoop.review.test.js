@@ -227,3 +227,77 @@ describe('a label approval that names bands or a time', () => {
     expect(out.text).toMatch(/^Added 2 that a model read as hostile\./);
   });
 });
+
+describe('what undo and cancel say they do', () => {
+  /** A lookUp that names every account by a handle made from its DID. */
+  const lookUp = async (did) => ({ did, handle: `${did.slice(8, 14)}.test` });
+  const run = (text) =>
+    runCommand(parseCommand(text), agent, { lookUp, canWrite: true });
+
+  it("names the whole plan on a receipt's undo when an earlier approval added to it", async () => {
+    const first = await run('approve abcd1234 CONNECTED');
+    expect(first.options[0]).toEqual({
+      label: 'Undo those 5',
+      command: 'undo abcd1234',
+    });
+    const second = await run('approve abcd1234 NOTABLE');
+    expect(second.options[0]).toEqual({
+      label: 'Undo everything plan abcd1234 added (15)',
+      command: 'undo abcd1234',
+    });
+    const undo = await runCommand(
+      parseCommand(second.options[0].command),
+      agent,
+      {},
+    );
+    // The fake repo holds no listitems, so all 15 the label counted are found
+    // already off: the undo covers what the label said.
+    expect(undo.text).toBe(
+      'Took 0 back off the list (plan abcd1234). 15 had already come off another way.',
+    );
+  });
+
+  it('says what a cancel leaves on the list, and offers to take it back', async () => {
+    await run('approve abcd1234 CONNECTED');
+    const out = await run('cancel abcd1234');
+    expect(out.text).toBe(
+      'Cancelled abcd1234. 5 it added are still on the list; "undo abcd1234" takes them off.',
+    );
+    expect(out.options).toEqual([
+      { label: 'Take the 5 back off', command: 'undo abcd1234' },
+    ]);
+  });
+
+  it('undoes nothing after an unblock, and offers to put the account back', async () => {
+    await run('approve abcd1234 CONNECTED');
+    await db.upsert('plan', [
+      { id: 'feedf00d-0000-4000-8000-000000000000', note: 'unblock' },
+    ]);
+    await db.upsert('decision', [
+      {
+        plan_id: 'feedf00d-0000-4000-8000-000000000000',
+        did: 'did:plc:gone00000000',
+        band: 'UNKNOWN',
+        action: 'list_remove',
+        acted_at: new Date(Date.now() + 1000).toISOString(),
+      },
+    ]);
+    const out = await run('undo');
+    expect(out.text).toBe(
+      'The last change took @gone00.test off the list. Undo only takes people off, so nothing was undone. "block @gone00.test" puts them back.',
+    );
+    expect(out.options).toEqual([
+      {
+        label: 'Put @gone00.test back on the list',
+        command: 'list add did:plc:gone00000000',
+      },
+    ]);
+  });
+
+  it("gives the resolver's reason when history cannot resolve a handle", async () => {
+    const out = await run('history @nobody.test');
+    expect(out.text).toBe(
+      'I could not resolve nobody.test: the AppView could not resolve nobody.test (HTTP 503).',
+    );
+  });
+});

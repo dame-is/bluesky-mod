@@ -88,7 +88,8 @@ import {
   reviewPlan,
   cancelPlan,
   undoPlan,
-  lastActedPlan,
+  lastChange,
+  countDecisions,
   historyFor,
   shortCode,
 } from './bulkPlan.js';
@@ -393,6 +394,24 @@ function renderReview(plan, review, { bands: asked = [] } = {}) {
 }
 
 /**
+ * The label on a receipt's undo option. `undo <code>` takes back every add of
+ * the plan still on the list, so when earlier approvals of it added more than
+ * this one did, the label says so rather than naming this approval's count.
+ */
+function undoLabel(
+  code,
+  added,
+  live,
+  { few = `Undo those ${added}`, all = 'Undo everything plan' } = {},
+) {
+  return live > added ? `${all} ${code} added (${live})` : few;
+}
+
+/** How many of a plan's adds are on the list, or null when unreadable. */
+const liveAdds = (plan) =>
+  countDecisions(plan, { state: 'live' }).catch(() => null);
+
+/**
  * Run one typed command and return what to say back.
  *
  * No branch asks a model what to do. The inputs are the sender's literal text
@@ -474,10 +493,18 @@ export async function runCommand(
   }
 
   if (cmd.action === 'history') {
-    const did = cmd.actor
-      ? await resolveActor(cmd.actor).catch(() => null)
-      : null;
-    if (cmd.actor && !did) return say(`I could not resolve ${cmd.actor}.`);
+    let did = null;
+    if (cmd.actor) {
+      try {
+        did = await resolveActor(cmd.actor);
+      } catch (err) {
+        // The resolver's reason, so an AppView outage does not read as an
+        // account that does not exist.
+        return say(
+          `I could not resolve ${cmd.actor}: ${String(err?.message || err).replace(/\.$/, '')}.`,
+        );
+      }
+    }
     const h = await historyFor(did);
     if (!h.rows.length) {
       return say(
@@ -497,7 +524,20 @@ export async function runCommand(
   }
 
   if (cmd.action === 'undo') {
-    const plan = cmd.last ? await lastActedPlan() : await findPlan(cmd.code);
+    const last = cmd.last ? await lastChange() : null;
+    // The newest change took someone off the list. Undo only takes people
+    // off, so it has nothing to reverse, and reaching past the removal to an
+    // older add would undo something else.
+    if (last?.removed) {
+      const { did } = last.removed;
+      const found = lookUp ? await lookUp(did).catch(() => null) : null;
+      const who = nameOf(found, did);
+      return say(
+        `The last change took ${who} off the list. Undo only takes people off, so nothing was undone. "block ${who}" puts them back.`,
+        [{ label: `Put ${who} back on the list`, command: `list add ${did}` }],
+      );
+    }
+    const plan = cmd.last ? last.plan : await findPlan(cmd.code);
     if (!plan) {
       return say(
         cmd.last ? 'Nothing to undo.' : `No plan with code ${cmd.code}.`,
@@ -577,9 +617,21 @@ export async function runCommand(
       return say(lines.join('\n'), choices);
     }
 
+    // A cancel takes nobody off the list. The reply says how many of the
+    // plan's adds are still on it, and offers to take them back.
     if (cmd.action === 'cancel') {
-      await cancelPlan(plan);
-      return say(`Cancelled ${cmd.code}. Nothing was added.`);
+      const out = await cancelPlan(plan);
+      return say(
+        out.message,
+        out.live
+          ? [
+              {
+                label: `Take the ${out.live} back off`,
+                command: `undo ${cmd.code}`,
+              },
+            ]
+          : null,
+      );
     }
 
     // A label review prints the words: a label nobody can check is only a
@@ -600,7 +652,13 @@ export async function runCommand(
             : `Nothing read as ${label} is left to add. ${out.added} of the ${out.total} are on the list through this plan; the rest are PROTECTED, were already on it, or were taken back off.`,
           out.added
             ? [
-                { label: 'Take them back off', command: `undo ${cmd.code}` },
+                {
+                  label: undoLabel(cmd.code, out.added, await liveAdds(plan), {
+                    few: 'Take them back off',
+                    all: 'Take back everything plan',
+                  }),
+                  command: `undo ${cmd.code}`,
+                },
                 record,
               ]
             : [record],
@@ -653,7 +711,10 @@ export async function runCommand(
         out.message,
         out.added
           ? [
-              { label: `Undo those ${out.added}`, command: `undo ${cmd.code}` },
+              {
+                label: undoLabel(cmd.code, out.added, out.live),
+                command: `undo ${cmd.code}`,
+              },
               { label: 'Show me the record', command: 'history' },
             ]
           : null,
@@ -683,7 +744,7 @@ export async function runCommand(
       out.added
         ? [
             {
-              label: `Undo those ${out.added}`,
+              label: undoLabel(shortCode(plan.id), out.added, out.live),
               command: `undo ${shortCode(plan.id)}`,
             },
             { label: 'Show me the record', command: 'history' },
@@ -1059,6 +1120,14 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
   if (!out.ok) {
     await send(out.message.replace(String(quick.actor), at));
     return { outcome: 'failed', quick: quick.action };
+  }
+  // Done, but the decision log missed it, so undo and history will not find
+  // it. Said out loud with the way back, not left to a ✅.
+  if (out.changed && out.logged === false) {
+    await sendReceipt(send, out.message.split(String(quick.actor)).join(at), {
+      log,
+    });
+    return { outcome: 'done', quick: quick.action };
   }
   const adding = quick.action === 'list_add';
   if (adding && out.changed && a && LOUD_BANDS.has(a.band)) {

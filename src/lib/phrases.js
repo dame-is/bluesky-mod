@@ -41,7 +41,7 @@ export const ACK_CLAUSE = {
     'Pulling the accounts that need a look.',
     'Fetching the ones worth reading.',
   ],
-  cancel: ['Standing down.', 'Nothing will be written.'],
+  cancel: ['Standing down.'],
   undo: ['Taking those back off the list.', 'Undoing that.'],
   history: ['Pulling the record.'],
   list_add: ['Checking the list.', 'Looking them up.'],

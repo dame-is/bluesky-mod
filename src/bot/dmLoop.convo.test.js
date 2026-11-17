@@ -39,7 +39,11 @@ const plans = {
     added: 3,
     message: 'Added the 3 read as hostile (plan 1c2d3e4f).',
   })),
-  cancelPlan: vi.fn(async () => {}),
+  cancelPlan: vi.fn(async () => ({
+    live: 0,
+    watching: 0,
+    message: 'Cancelled 1c2d3e4f. Nothing was added.',
+  })),
   undoPlan: vi.fn(async () => ({ ok: true, message: 'Took 12 back off.' })),
 };
 vi.mock('./bulkPlan.js', async (importOriginal) => ({
