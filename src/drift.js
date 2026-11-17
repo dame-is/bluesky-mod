@@ -238,17 +238,21 @@ export function renderBrief({ scored, drifted, gone, added }) {
     '',
   ];
   if (drifted.length) {
+    // Every member who became PROTECTED is named, first: an audit that has
+    // reported one is the baseline after it, so a name cut here is never
+    // given. The rest are cut to the twelve with the most vouches.
+    const nowProtected = drifted.filter((d) => d.now === 'PROTECTED');
+    const rest = drifted
+      .filter((d) => d.now !== 'PROTECTED')
+      .sort((a, b) => (b.vouches ?? 0) - (a.vouches ?? 0));
     lines.push(
       `${plural(drifted.length, 'account is', 'accounts are')} no longer a stranger:`,
-      ...drifted
-        .sort((a, b) => (b.vouches ?? 0) - (a.vouches ?? 0))
-        .slice(0, 12)
-        .map(
-          (d) =>
-            `  @${d.handle ?? d.did} is now ${d.now}, ${plural(d.vouches ?? 0, 'vouch', 'vouches')}`,
-        ),
+      ...[...nowProtected, ...rest.slice(0, 12)].map(
+        (d) =>
+          `  @${d.handle ?? d.did} is now ${d.now}, ${plural(d.vouches ?? 0, 'vouch', 'vouches')}`,
+      ),
     );
-    if (drifted.length > 12) lines.push(`  and ${drifted.length - 12} more`);
+    if (rest.length > 12) lines.push(`  and ${rest.length - 12} more`);
     lines.push('');
   }
   if (gone.length) {

@@ -143,6 +143,36 @@ describe('the brief', () => {
     expect(body).toContain('unblock @handle');
   });
 
+  it('names every member who became PROTECTED, however many others moved', () => {
+    const strangers = Array.from({ length: 13 }, (_, i) => ({
+      did: `did:plc:s${i}`,
+      handle: `stranger${i}.test`,
+      was: 'UNKNOWN',
+      now: 'CONNECTED',
+      vouches: 5,
+    }));
+    const friends = Array.from({ length: 13 }, (_, i) => ({
+      did: `did:plc:f${i}`,
+      handle: `friend${i}.test`,
+      was: 'UNKNOWN',
+      now: 'PROTECTED',
+      vouches: 0,
+    }));
+    const body = renderBrief({
+      scored: 500,
+      drifted: [...strangers, ...friends],
+      gone: [],
+      added: 0,
+    });
+    for (const f of friends) {
+      expect(body).toContain(`@${f.handle} is now PROTECTED`);
+    }
+    // The cut applies to the others alone.
+    expect(body).toContain('@stranger11.test is now CONNECTED');
+    expect(body).not.toContain('@stranger12.test');
+    expect(body).toContain('and 1 more');
+  });
+
   it('says nothing when nothing moved', () => {
     expect(renderBrief({ scored: 10, drifted: [], gone: [], added: 3 })).toBe(
       null,
