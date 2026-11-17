@@ -6,6 +6,7 @@
 
 import { generateText } from 'ai';
 
+import { upsert } from './bot/db.js';
 import { chunkForDm } from './lib/agent.js';
 import { ownLinkFacets } from './lib/links.js';
 import {
@@ -34,6 +35,10 @@ import {
  * convo, and this runs on a timer while the owner may be mid-answer to
  * something the agent asked. When one is open, the message still goes, without
  * its 👍 line and without replacing what a "yes" or a 👍 would run.
+ *
+ * The convo's numbered menu is cleared first, as the DM loop does before each
+ * of its own messages, so a "1" typed after a digest cannot run an option
+ * offered before it.
  */
 export async function say(
   chat,
@@ -43,6 +48,9 @@ export async function say(
   if (!convoId || !text) return [];
   const asks = pending?.length > 0 && !(await questionOpen(convoId));
   const body = asks ? `${text}\n\n${confirmLine([describe])}` : text;
+  await upsert('dm_choice', [{ convo_id: convoId, options: [] }]).catch(
+    () => {},
+  );
   const ids = [];
   for (const chunk of chunkForDm(body)) {
     const facets = ownLinkFacets(chunk, { allow: links });

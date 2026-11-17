@@ -79,6 +79,17 @@ beforeEach(() => {
 });
 
 describe('a timed message that asks something', () => {
+  it('clears the menu of an earlier reply, so a number cannot answer it', async () => {
+    db.dm_choice.push({
+      convo_id: 'convo1',
+      options: [{ label: 'Undo those 12', command: 'undo 1c2d3e4f' }],
+    });
+    await say(chat(), 'convo1', DIGEST);
+    expect(db.dm_choice.find((r) => r.convo_id === 'convo1').options).toEqual(
+      [],
+    );
+  });
+
   it('stores its question when nothing else is waiting', async () => {
     const c = chat();
     await say(c, 'convo1', DIGEST);
