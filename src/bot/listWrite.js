@@ -127,10 +127,15 @@ async function protectedReason(did) {
  * the owner followed since then is refused here, whatever the plan says.
  * Throws if the table or the follows cannot be read.
  *
+ * `follows: false` leaves out the AppView and reads only the table, for a
+ * count of what an approval could add. It is not a veto: a follow made since
+ * the last snapshot is only found with the AppView.
+ *
  * @param {string[]} dids
+ * @param {{ follows?: boolean }} [opts]
  * @returns {Promise<Set<string>>}
  */
-export async function protectedAmong(dids) {
+export async function protectedAmong(dids, { follows = true } = {}) {
   const self = new Set([OWNER_DID, ownerOf(listUri())].filter(Boolean));
   const wanted = [...new Set(dids.filter(Boolean))];
   const out = new Set(wanted.filter((did) => self.has(did)));
@@ -138,7 +143,7 @@ export async function protectedAmong(dids) {
   if (!others.length) return out;
   const [table, followed] = await Promise.all([
     fromTable(others),
-    followedNow(others),
+    follows ? followedNow(others) : new Set(),
   ]);
   for (const did of table.keys()) out.add(did);
   for (const did of followed) out.add(did);
@@ -160,10 +165,13 @@ export async function protectedAmong(dids) {
  *   are their say-so, and the log still has to tell them apart: one is their
  *   literal target and the other is a model's reading of their sentence.
  * @returns {Promise<{ ok: boolean, message: string, did?: string,
- *   changed?: boolean, already?: boolean, vetoed?: string, account?: object }>}
+ *   changed?: boolean, already?: boolean, vetoed?: string, account?: object,
+ *   logged?: boolean }>}
  *   `changed` is whether the list moved; `already` is "was already on / not
  *   on"; `vetoed` is the PROTECTED reason; `account` is the scored account, so
  *   a receipt can say who that was without scoring them a second time.
+ *   `logged` is false when the decision log could not be written, so undo
+ *   and history cannot see this write.
  */
 export async function applyCommand(
   agent,
@@ -188,13 +196,16 @@ export async function applyCommand(
     };
   }
 
+  // The reason is kept: "no account found" and "the AppView answered 503"
+  // call for different things from the owner.
   let did;
   try {
     did = await resolveActor(actor);
-  } catch {
+  } catch (err) {
+    const why = String(err?.message || err).replace(/\.$/, '');
     return {
       ok: false,
-      message: `I could not resolve ${actor} to an account.`,
+      message: `I could not resolve ${actor}: ${why}.`,
     };
   }
 
@@ -248,13 +259,16 @@ export async function applyCommand(
     if (rkeys?.length) {
       // Recorded although nothing is written, so an undo of the plan that put
       // them on first leaves them where the owner's own words put them.
-      await log(did, 'list_add', raw, scored, via, { already: true });
+      const logged = await log(did, 'list_add', raw, scored, via, {
+        already: true,
+      });
       return {
         ok: true,
         did,
         already: true,
         changed: false,
         account,
+        logged,
         message: `${actor} was already on the list.`,
       };
     }
@@ -275,13 +289,16 @@ export async function applyCommand(
         .split('/')
         .pop(),
     );
-    await log(did, 'list_add', raw, scored, via);
+    const logged = await log(did, 'list_add', raw, scored, via);
     return {
       ok: true,
       did,
       changed: true,
       account,
-      message: `Added ${actor} to the list.`,
+      logged,
+      message: logged
+        ? `Added ${actor} to the list.`
+        : `Added ${actor} to the list, but I could not record it, so undo and history will not find it. "unblock ${actor}" takes it back.`,
     };
   }
 
@@ -323,13 +340,16 @@ export async function applyCommand(
   // plan that added them. Best effort, like the log below: the listitems are
   // already gone, and that is what the owner asked for.
   await closeAdds(did, raw || 'unblocked').catch(() => {});
-  await log(did, 'list_remove', raw, scored, via);
+  const logged = await log(did, 'list_remove', raw, scored, via);
   return {
     ok: true,
     did,
     changed: true,
     account,
-    message: `Removed ${actor} from the list.`,
+    logged,
+    message: logged
+      ? `Removed ${actor} from the list.`
+      : `Removed ${actor} from the list, but I could not record it, so history will not show it.`,
   };
 }
 
@@ -342,8 +362,12 @@ export async function applyCommand(
  * answer, with nothing to reconstruct. `already` marks an add of someone who
  * was on the list already, for which nothing was written.
  *
- * Best effort. A write that is not logged is bad; refusing to write because
- * the log is down is worse, and the repo itself is the record.
+ * Runs after the write, so a log that is down does not stop the owner
+ * acting. Undo, history and "why is this person on the list" read only the
+ * log, though, so a write it misses is invisible to them. It is tried twice
+ * under one plan id, so a first try that wrote the plan row and not the
+ * decision leaves one plan rather than two. Returns whether it was recorded,
+ * for the receipt to say so when it was not.
  */
 async function log(
   did,
@@ -353,29 +377,34 @@ async function log(
   via = 'command',
   { already = false } = {},
 ) {
-  try {
-    const planId = crypto.randomUUID();
-    await upsert('plan', [
-      {
-        id: planId,
-        created_at: new Date().toISOString(),
-        approved_at: new Date().toISOString(),
-        approved_bands: [via],
-        note: raw,
-      },
-    ]);
-    await upsert('decision', [
-      {
-        plan_id: planId,
-        did,
-        band: band || 'UNSCORED',
-        action,
-        acted_at: new Date().toISOString(),
-        approved_via: via,
-        ...(already ? { already_listed: true } : {}),
-      },
-    ]);
-  } catch {
-    /* the repo is the record; the log is the convenience */
+  const planId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await upsert('plan', [
+        {
+          id: planId,
+          created_at: now,
+          approved_at: now,
+          approved_bands: [via],
+          note: raw,
+        },
+      ]);
+      await upsert('decision', [
+        {
+          plan_id: planId,
+          did,
+          band: band || 'UNSCORED',
+          action,
+          acted_at: now,
+          approved_via: via,
+          ...(already ? { already_listed: true } : {}),
+        },
+      ]);
+      return true;
+    } catch {
+      // A lock another writer held may have cleared by the second try.
+    }
   }
+  return false;
 }

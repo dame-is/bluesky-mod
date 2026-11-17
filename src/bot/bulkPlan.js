@@ -314,7 +314,9 @@ export async function applyPlan(
   const asked = rows.filter(
     (r) => wanted.includes(r.band) && engagedAs(r, kinds),
   );
-  const pending = asked.filter((r) => !r.acted_at && !r.already_listed);
+  const { rows: pending, refused } = await withoutProtected(
+    asked.filter((r) => !r.acted_at && !r.already_listed),
+  );
   if (!pending.length) {
     return {
       ok: true,
@@ -322,6 +324,7 @@ export async function applyPlan(
       remaining: 0,
       message:
         'Nothing left to add for those bands.' +
+        vetoNote(refused) +
         undoneNote(asked.filter((r) => r.undone_at).length),
     };
   }
@@ -347,6 +350,7 @@ export async function applyPlan(
       ],
     },
   );
+  const live = await liveCount(plan);
 
   if (rateLimited) {
     const left = pending.length - added - already - vetoed;
@@ -355,6 +359,7 @@ export async function applyPlan(
       added,
       already,
       remaining: left,
+      live,
       message: `Added ${added}. Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
     };
   }
@@ -366,10 +371,11 @@ export async function applyPlan(
     failed,
     already,
     remaining,
+    live,
     message:
       `Added ${added} to the list${failed ? `, ${failed} failed` : ''}.` +
       alreadyNote(already) +
-      vetoNote(vetoed) +
+      vetoNote(vetoed + refused) +
       note +
       (remaining
         ? ` ${remaining} left. Send "${again}" again to continue.`
@@ -387,6 +393,38 @@ function alreadyNote(n) {
 function vetoNote(n) {
   return n ? ` ${n} refused: PROTECTED.` : '';
 }
+
+/**
+ * These rows without the ones the veto refuses at the time of the call, and
+ * how many that was: the `protected` table and the owner's and the bot's own
+ * accounts, read fresh rather than taken from when the plan was scored. Such
+ * a row stays pending, since protection lapses when the owner unfollows, so
+ * it is dropped here on every read. Kept in, it is counted as left to add,
+ * and enough of them fill an approval's slice so that nothing behind them is
+ * reached.
+ *
+ * Follows made since the last snapshot are only found by the check at the
+ * write, which keeps a count free of AppView calls. Best effort: when the
+ * table cannot be read nothing is dropped, and the write refuses on its own.
+ */
+async function withoutProtected(rows) {
+  if (!rows.length) return { rows, refused: 0 };
+  const veto = await protectedAmong(
+    rows.map((r) => r.did),
+    { follows: false },
+  ).catch(() => null);
+  if (!veto?.size) return { rows, refused: 0 };
+  const kept = rows.filter((r) => !veto.has(r.did));
+  return { rows: kept, refused: rows.length - kept.length };
+}
+
+/**
+ * How many of this plan's adds an `undo <code>` takes back after this write,
+ * every approval of the plan included, for a receipt's undo option to say.
+ * Null when it cannot be read, since the write has happened by then.
+ */
+const liveCount = (plan) =>
+  countDecisions(plan, { state: 'live' }).catch(() => null);
 
 /**
  * Why an approval finds nothing to add when an undo took this plan's adds
@@ -562,12 +600,14 @@ export async function applyPlanToTriage(
   });
   // skipBands is how a watch holds CONNECTED and NOTABLE back for a 👍 even
   // when it was asked to add the hostile ones on its own.
-  const pending = rows.filter(
-    (r) =>
-      r.band !== 'PROTECTED' &&
-      !skipBands.includes(r.band) &&
-      !r.acted_at &&
-      !r.already_listed,
+  const { rows: pending, refused } = await withoutProtected(
+    rows.filter(
+      (r) =>
+        r.band !== 'PROTECTED' &&
+        !skipBands.includes(r.band) &&
+        !r.acted_at &&
+        !r.already_listed,
+    ),
   );
   if (!pending.length) {
     return {
@@ -575,17 +615,35 @@ export async function applyPlanToTriage(
       added: 0,
       message:
         `Nothing left to add for ${label}.` +
+        vetoNote(refused) +
         undoneNote(rows.filter((r) => r.undone_at).length),
     };
   }
 
+  const again = `approve ${shortCode(plan.id)} ${label}`;
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, already, vetoed, note } = await writeRows(
-    agent,
-    plan,
-    slice,
-    { uri, bot, via: viaFor(`triage:${label}`, by) },
-  );
+  const { added, failed, rateLimited, already, vetoed, note } =
+    await writeRows(agent, plan, slice, {
+      uri,
+      bot,
+      via: viaFor(`triage:${label}`, by),
+    });
+  const live = await liveCount(plan);
+
+  // The batch the limit stopped is still pending, so it is not taken off
+  // what is left.
+  if (rateLimited) {
+    const left = pending.length - added - already - vetoed;
+    return {
+      ok: true,
+      added,
+      already,
+      remaining: left,
+      live,
+      message: `Added ${added} that a model read as ${label}. Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
+    };
+  }
+
   const remaining = pending.length - added - already - failed - vetoed;
   return {
     ok: true,
@@ -593,22 +651,22 @@ export async function applyPlanToTriage(
     failed,
     already,
     remaining,
+    live,
     message:
       `Added ${added} that a model read as ${label}${failed ? `, ${failed} failed` : ''}.` +
       alreadyNote(already) +
-      vetoNote(vetoed) +
+      vetoNote(vetoed + refused) +
       note +
-      (remaining
-        ? ` ${remaining} left, send "approve ${shortCode(plan.id)} ${label}" again.`
-        : ''),
+      (remaining ? ` ${remaining} left, send "${again}" again.` : ''),
   };
 }
 
 /**
  * How many accounts a plan action would touch, counted the way the action
  * itself counts them: `pending` is what an approval would still add (never
- * PROTECTED, never anyone already acted on), `live` is what an undo would take
- * back. Read before a write so the check on it can see the size of it.
+ * PROTECTED, by the plan's band or by the protected table as it stands, never
+ * anyone already acted on), `live` is what an undo would take back. Read
+ * before a write so the check on it can see the size of it.
  */
 export async function countDecisions(
   plan,
@@ -619,17 +677,20 @@ export async function countDecisions(
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
-  return rows.filter((r) => {
-    // This plan's recorded adds, the most an undo of it takes off. It takes
-    // fewer when another plan also added someone by name.
-    if (state === 'live') {
-      return r.acted_at && r.action === 'list_add' && !r.undone_at;
-    }
+  // This plan's recorded adds, the most an undo of it takes off. It takes
+  // fewer when another plan also added someone by name.
+  if (state === 'live') {
+    return rows.filter(
+      (r) => r.acted_at && r.action === 'list_add' && !r.undone_at,
+    ).length;
+  }
+  const pending = rows.filter((r) => {
     if (r.acted_at || r.band === 'PROTECTED' || r.already_listed) return false;
     if (bands?.length && !bands.includes(r.band)) return false;
     if (label && r.triage !== label) return false;
     return engagedAs(r, kinds);
-  }).length;
+  });
+  return (await withoutProtected(pending)).rows.length;
 }
 
 /** What a plan holds for these DIDs: band, triage label, whether acted on. */
@@ -644,17 +705,47 @@ export async function decisionsFor(plan, dids) {
   return new Map(rows.filter((r) => wanted.has(r.did)).map((r) => [r.did, r]));
 }
 
-/** Mark a plan as declined, so the log records the decision not to act. */
-export async function cancelPlan(plan) {
+/**
+ * Mark a plan as declined, so the log records the decision not to act.
+ *
+ * A cancel takes nobody off the list, so `approved_at` and `approved_bands`
+ * are left as they are: they record what the owner consented to, and the
+ * accounts added under it are still there. The reply says how many of them
+ * are, and whether an auto watch is still adding to the plan, since a cancel
+ * stops neither.
+ *
+ * @returns {Promise<{ live: number, watching: number, message: string }>}
+ */
+export async function cancelPlan(plan, { now = Date.now() } = {}) {
+  const [live, watches] = await Promise.all([
+    countDecisions(plan, { state: 'live' }),
+    select('watch', {
+      select: 'id,mode,until',
+      eq: { plan_id: plan.id },
+      where: { stopped_at: 'is.null' },
+    }).catch(() => []),
+  ]);
   await update(
     'plan',
     { eq: { id: plan.id } },
-    {
-      approved_at: new Date().toISOString(),
-      approved_bands: [],
-      note: `${plan.note || ''} (cancelled)`,
-    },
+    { note: `${plan.note || ''} (cancelled)` },
   );
+  const watching = (watches || []).filter(
+    (w) => w.mode === 'auto' && Date.parse(w.until) > now,
+  ).length;
+  const code = shortCode(plan.id);
+  const onList = live
+    ? `${live} it added ${live === 1 ? 'is' : 'are'} still on the list; "undo ${code}" takes ${live === 1 ? 'it' : 'them'} off.`
+    : 'Nothing was added.';
+  return {
+    live,
+    watching,
+    message:
+      `Cancelled ${code}. ${onList}` +
+      (watching
+        ? ' The watch on that post is still running and adds the hostile ones as they come.'
+        : ''),
+  };
 }
 
 /** Handles for a page of DIDs, 25 at a time, best effort. */
@@ -769,15 +860,22 @@ export async function applyPlanToActors(
   // Approving someone by name does not outrank the veto.
   const named = [...resolved.values()];
   const banned = named.filter((r) => r.band === 'PROTECTED').length;
-  const { added, failed, already, vetoed, note } = await writeRows(
-    agent,
-    plan,
-    named.filter((r) => r.band !== 'PROTECTED' && !r.acted_at),
-    { uri, bot, via: viaFor('individual', by) },
-  );
+  const toWrite = named.filter((r) => r.band !== 'PROTECTED' && !r.acted_at);
+  const { added, failed, rateLimited, already, vetoed, note } =
+    await writeRows(agent, plan, toWrite, {
+      uri,
+      bot,
+      via: viaFor('individual', by),
+    });
 
+  // As for a band approval: the batch the limit stopped is still pending.
+  const remaining = rateLimited
+    ? toWrite.length - added - already - vetoed
+    : 0;
   const parts = [
-    `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${alreadyNote(already)}${note}`,
+    rateLimited
+      ? `Added ${added} by name. Hit the write rate limit. Send "approve ${shortCode(plan.id)} ${actors.join(' ')}" again in an hour for the remaining ${remaining}.`
+      : `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${alreadyNote(already)}${note}`,
   ];
   if (banned + vetoed) parts.push(`${banned + vetoed} refused: PROTECTED.`);
   if (unknown.length) parts.push(`Not in this plan: ${unknown.join(', ')}.`);
@@ -790,6 +888,7 @@ export async function applyPlanToActors(
     ok: true,
     added,
     already,
+    remaining,
     message: parts.join(' '),
   };
 }
@@ -819,23 +918,51 @@ export function estimateWrites(n, { kind = 'create' } = {}) {
 }
 
 /**
- * The most recent plan that put someone on the list and still has them there.
- * One row from the database: the newest live add.
+ * The newest change to the list, which is what a bare `undo` means.
+ *
+ * `plan` is the plan behind it when that change put someone on the list and
+ * they are still there. When it took someone off, `removed` names them and
+ * `plan` is null: undo only takes people off, so it has nothing to reverse,
+ * and reaching past the removal to an older add would undo something else.
+ * An add already undone is passed over, so undoing again steps back to the
+ * change before it. One row from the database.
+ *
+ * @returns {Promise<{ plan: object|null,
+ *   removed: { did: string, planId: string, at: string }|null }>}
  */
-export async function lastActedPlan() {
+export async function lastChange() {
   const rows = await select('decision', {
-    select: 'plan_id',
-    eq: { action: 'list_add' },
-    where: { acted_at: 'not.is.null', undone_at: 'is.null' },
+    select: 'plan_id,did,action,acted_at',
+    where: {
+      action: 'in.(list_add,list_remove)',
+      acted_at: 'not.is.null',
+      undone_at: 'is.null',
+    },
     order: 'acted_at.desc',
     limit: 1,
   });
-  if (!rows?.length) return null;
+  const last = rows?.[0];
+  if (!last) return { plan: null, removed: null };
+  if (last.action === 'list_remove') {
+    return {
+      plan: null,
+      removed: { did: last.did, planId: last.plan_id, at: last.acted_at },
+    };
+  }
   const plans = await select('plan', {
     select: PLAN_COLUMNS,
-    eq: { id: rows[0].plan_id },
+    eq: { id: last.plan_id },
   });
-  return plans?.[0] ?? null;
+  return { plan: plans?.[0] ?? null, removed: null };
+}
+
+/**
+ * The plan a bare `undo` takes back: the newest change, when it was an add
+ * still on the list. Null otherwise, including when the newest change was a
+ * removal (see lastChange).
+ */
+export async function lastActedPlan() {
+  return (await lastChange()).plan;
 }
 
 /**

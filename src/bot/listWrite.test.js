@@ -3,6 +3,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const protectedRows = new Map();
 const veto = { unreadable: false };
 const decisions = [];
+// Plan ids the log was asked to write, and how many of those writes fail, as
+// a locked or full database would.
+const plans = { ids: [], failing: 0 };
 vi.mock('./db.js', () => ({
   select: vi.fn(async (table, { eq = {}, where = {}, limit } = {}) => {
     if (table !== 'protected') return [];
@@ -25,6 +28,13 @@ vi.mock('./db.js', () => ({
   ),
   update: vi.fn(async () => null),
   upsert: vi.fn(async (table, rows) => {
+    if (table === 'plan') {
+      plans.ids.push(...rows.map((r) => r.id));
+      if (plans.failing > 0) {
+        plans.failing -= 1;
+        throw new Error('database is locked');
+      }
+    }
     if (table === 'decision') {
       for (const row of rows) {
         const at = decisions.findIndex(
@@ -70,6 +80,7 @@ vi.mock('../lib/target.js', () => ({
 }));
 
 const { applyCommand, protectedAmong } = await import('./listWrite.js');
+const { resolveActor } = await import('../lib/target.js');
 const { OWNER_DID } = await import('../constants.js');
 
 process.env.MOD_LIST_URI = 'at://did:plc:bot/app.bsky.graph.list/3list';
@@ -102,6 +113,8 @@ beforeEach(() => {
   live.unreadable = false;
   live.asked.length = 0;
   decisions.length = 0;
+  plans.ids.length = 0;
+  plans.failing = 0;
   graph.rkeysForWrite.mockReset();
   graph.noteListed.mockReset();
   graph.noteUnlisted.mockReset();
@@ -232,6 +245,45 @@ describe('one block', () => {
     expect(decisions[0].acted_at).toBeTruthy();
   });
 
+  it('says so when the write could not be recorded, and how to take it back', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    plans.failing = 2;
+    const a = agent();
+    const out = await applyCommand(a, 'list_add', 'x.test');
+    expect(a.com.atproto.repo.createRecord).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ ok: true, changed: true, logged: false });
+    expect(out.message).toBe(
+      'Added x.test to the list, but I could not record it, so undo and history will not find it. "unblock x.test" takes it back.',
+    );
+    expect(decisions).toEqual([]);
+  });
+
+  it('tries the record once more, under the same plan', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    plans.failing = 1;
+    const out = await applyCommand(agent(), 'list_add', 'x.test');
+    expect(out).toMatchObject({ ok: true, changed: true, logged: true });
+    expect(out.message).toBe('Added x.test to the list.');
+    expect(plans.ids).toHaveLength(2);
+    expect(new Set(plans.ids).size).toBe(1);
+    expect(decisions).toEqual([
+      expect.objectContaining({ plan_id: plans.ids[0], action: 'list_add' }),
+    ]);
+  });
+
+  it('says why a handle could not be resolved', async () => {
+    resolveActor.mockRejectedValueOnce(
+      new Error('the AppView could not resolve alice.test (HTTP 503)'),
+    );
+    const a = agent();
+    const out = await applyCommand(a, 'list_add', 'alice.test');
+    expect(out).toMatchObject({ ok: false });
+    expect(out.message).toBe(
+      'I could not resolve alice.test: the AppView could not resolve alice.test (HTTP 503).',
+    );
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
   it('refuses an action it does not know rather than removing', async () => {
     graph.rkeysForWrite.mockResolvedValue(['r1']);
     const a = agent();
@@ -273,6 +325,17 @@ describe('the protected set for a bulk write', () => {
     expect(
       await protectedAmong([OWNER_DID, 'did:plc:bot', 'did:plc:a']),
     ).toEqual(new Set([OWNER_DID, 'did:plc:bot']));
+  });
+
+  it('reads only the table when follows are left out', async () => {
+    protectedRows.set('did:plc:friend', 'you follow them');
+    live.follows.add('did:plc:new');
+    expect(
+      await protectedAmong(['did:plc:friend', 'did:plc:new', OWNER_DID], {
+        follows: false,
+      }),
+    ).toEqual(new Set(['did:plc:friend', OWNER_DID]));
+    expect(live.asked).toEqual([]);
   });
 });
 
@@ -319,6 +382,16 @@ describe('one unblock', () => {
     const out = await applyCommand(agent(), 'list_remove', 'x.test');
     expect(out.ok).toBe(false);
     expect(out.message).toMatch(/could not check/);
+  });
+
+  it('says so when the removal could not be recorded', async () => {
+    graph.rkeysForWrite.mockResolvedValue(['r1']);
+    plans.failing = 2;
+    const out = await applyCommand(agent(), 'list_remove', 'x.test');
+    expect(out).toMatchObject({ ok: true, changed: true, logged: false });
+    expect(out.message).toBe(
+      'Removed x.test from the list, but I could not record it, so history will not show it.',
+    );
   });
 
   it('does not need the protected set to take someone off', async () => {

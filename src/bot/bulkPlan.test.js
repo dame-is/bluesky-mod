@@ -104,10 +104,15 @@ const veto = { unreadable: false };
 vi.mock('./listWrite.js', () => ({
   listUri: () => LIST,
   ownerOf: (uri) => /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''))?.[1] ?? null,
-  protectedAmong: async (dids) => {
+  // A row marked `live` is a follow made since the last snapshot: only the
+  // AppView knows it, so it is found only when follows are asked for.
+  protectedAmong: async (dids, { follows = true } = {}) => {
     if (veto.unreadable) throw new Error('could not read the protected set');
     return new Set(
-      db.protected.map((r) => r.did).filter((did) => dids.includes(did)),
+      db.protected
+        .filter((r) => follows || !r.live)
+        .map((r) => r.did)
+        .filter((did) => dids.includes(did)),
     );
   },
 }));
@@ -115,8 +120,12 @@ vi.mock('./listWrite.js', () => ({
 const {
   applyPlan,
   applyPlanToActors,
+  applyPlanToTriage,
+  cancelPlan,
+  countDecisions,
   undoPlan,
   lastActedPlan,
+  lastChange,
   findPlan,
   historyFor,
 } = await import('./bulkPlan.js');
@@ -194,6 +203,7 @@ beforeEach(() => {
   ];
   db.decision = [];
   db.protected = [];
+  db.watch = [];
   db.writes = [];
   db.reads = [];
   db.failStamp = null;
@@ -600,14 +610,14 @@ describe('approving after an undo', () => {
 });
 
 describe('undo last', () => {
-  it('reads one row, newest live add first, and ignores removals and undone adds', async () => {
+  it('reads one row, newest change first, and passes over undone adds and older removals', async () => {
     db.decision = [
+      added(PLAN_B, 'did:plc:x', '2026-10-01T09:00:00Z', {
+        action: 'list_remove',
+      }),
       added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z'),
       added(PLAN_B, 'did:plc:b', '2026-10-01T11:00:00Z', {
         undone_at: '2026-10-01T12:00:00Z',
-      }),
-      added(PLAN_B, 'did:plc:x', '2026-10-01T13:00:00Z', {
-        action: 'list_remove',
       }),
     ];
     expect((await lastActedPlan()).id).toBe(PLAN_A);
@@ -617,6 +627,201 @@ describe('undo last', () => {
 
   it('answers null when nothing is live', async () => {
     expect(await lastActedPlan()).toBe(null);
+  });
+
+  it('does not reach past an unblock to an older add', async () => {
+    db.decision = [
+      // block @a, then unblock @b by mistake.
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z'),
+      added(PLAN_B, 'did:plc:b', '2026-10-01T11:00:00Z', {
+        action: 'list_remove',
+      }),
+    ];
+    expect(await lastActedPlan()).toBe(null);
+    expect(await lastChange()).toEqual({
+      plan: null,
+      removed: {
+        did: 'did:plc:b',
+        planId: PLAN_B,
+        at: '2026-10-01T11:00:00Z',
+      },
+    });
+  });
+
+  it('names the plan when the newest change was an add', async () => {
+    db.decision = [
+      added(PLAN_B, 'did:plc:b', '2026-10-01T09:00:00Z', {
+        action: 'list_remove',
+      }),
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z'),
+    ];
+    const last = await lastChange();
+    expect(last.plan.id).toBe(PLAN_A);
+    expect(last.removed).toBe(null);
+  });
+});
+
+describe('approving one plan twice', () => {
+  it('says how many an undo of the plan takes off, earlier approvals included', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:u1', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:u2', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:n', 'NOTABLE'),
+    ];
+    const first = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(first).toMatchObject({ added: 2, live: 2 });
+
+    const second = await applyPlan(bot(), db.plan[0], ['NOTABLE']);
+    expect(second).toMatchObject({ added: 1, live: 3 });
+
+    const undo = await undoPlan(bot(), db.plan[0]);
+    expect(undo.removed).toBe(second.live);
+  });
+
+  it('counts the band approvals when a label is approved after them', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:u1', 'UNKNOWN'),
+      { ...scanned(PLAN_A, 'did:plc:h', 'NOTABLE'), triage: 'hostile' },
+    ];
+    await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    const out = await applyPlanToTriage(bot(), db.plan[0], 'hostile');
+    expect(out).toMatchObject({ added: 1, live: 2 });
+  });
+});
+
+describe('cancel', () => {
+  it('keeps the bands already approved, and says what is still on the list', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:c', 'UNKNOWN'),
+    ];
+    await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    const approvedAt = db.plan[0].approved_at;
+
+    const out = await cancelPlan(db.plan[0]);
+
+    expect(db.plan[0]).toMatchObject({
+      approved_at: approvedAt,
+      approved_bands: ['UNKNOWN'],
+      note: 'block @a.test (cancelled)',
+    });
+    expect(out.live).toBe(2);
+    expect(out.message).toBe(
+      'Cancelled 1c2d3e4f. 2 it added are still on the list; "undo 1c2d3e4f" takes them off.',
+    );
+  });
+
+  it('says nothing was added when nothing was, and records no approval', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:a', 'UNKNOWN')];
+    const out = await cancelPlan(db.plan[0]);
+    expect(out).toMatchObject({
+      live: 0,
+      message: 'Cancelled 1c2d3e4f. Nothing was added.',
+    });
+    expect(db.plan[0].note).toBe('block @a.test (cancelled)');
+    expect(db.plan[0].approved_bands).toBeUndefined();
+  });
+
+  it('says when a watch on the post is still adding to the plan', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:a', 'UNKNOWN')];
+    db.watch = [
+      {
+        id: 'w1',
+        plan_id: PLAN_A,
+        mode: 'auto',
+        until: new Date(Date.now() + 3_600_000).toISOString(),
+        stopped_at: null,
+      },
+    ];
+    const out = await cancelPlan(db.plan[0]);
+    expect(out.watching).toBe(1);
+    expect(out.message).toMatch(/watch on that post is still running/);
+
+    db.watch[0].mode = 'ask';
+    expect((await cancelPlan(db.plan[0])).watching).toBe(0);
+  });
+});
+
+describe('rows the veto refuses at the write', () => {
+  it('are not counted as left to add', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:f', 'UNKNOWN'),
+    ];
+    // Followed, or put on a curation list, after the plan was made.
+    db.protected = [{ did: 'did:plc:f', reason: 'you follow them' }];
+    expect(await countDecisions(db.plan[0], { bands: ['UNKNOWN'] })).toBe(1);
+    expect(await countDecisions(db.plan[0])).toBe(1);
+  });
+
+  it('leave nothing to add once only they are left', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:f', 'UNKNOWN')];
+    db.protected = [{ did: 'did:plc:f', reason: 'you follow them' }];
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(out).toMatchObject({ added: 0, remaining: 0 });
+    expect(out.message).toBe(
+      'Nothing left to add for those bands. 1 refused: PROTECTED.',
+    );
+    expect(repo.size).toBe(0);
+  });
+
+  it('do not fill an approval and stop the rest being added', async () => {
+    db.decision = [
+      ...Array.from({ length: 500 }, (_, i) =>
+        scanned(PLAN_A, `did:plc:f${String(i).padStart(3, '0')}`, 'UNKNOWN'),
+      ),
+      scanned(PLAN_A, 'did:plc:z', 'UNKNOWN'),
+    ];
+    db.protected = db.decision
+      .filter((r) => r.did !== 'did:plc:z')
+      .map((r) => ({ did: r.did, reason: 'on your list' }));
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(out).toMatchObject({ added: 1, remaining: 0 });
+    expect(out.message).toMatch(/500 refused: PROTECTED/);
+    expect([...repo.values()]).toEqual(['did:plc:z']);
+  });
+
+  it('are still refused when only the AppView knows the follow', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:f', 'UNKNOWN'),
+    ];
+    db.protected = [{ did: 'did:plc:f', reason: 'you follow them', live: true }];
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(out).toMatchObject({ added: 1, remaining: 0 });
+    expect(out.message).toMatch(/1 refused: PROTECTED/);
+    expect([...repo.values()]).toEqual(['did:plc:a']);
+  });
+});
+
+describe('a rate limit', () => {
+  const limited = () => {
+    const agent = bot();
+    agent.com.atproto.repo.applyWrites.mockRejectedValue(
+      new Error('Rate Limit Exceeded'),
+    );
+    return agent;
+  };
+
+  it('on a label approval says to send it again later, and keeps the rest pending', async () => {
+    db.decision = [
+      { ...scanned(PLAN_A, 'did:plc:h1', 'UNKNOWN'), triage: 'hostile' },
+      { ...scanned(PLAN_A, 'did:plc:h2', 'UNKNOWN'), triage: 'hostile' },
+    ];
+    const out = await applyPlanToTriage(limited(), db.plan[0], 'hostile');
+    expect(out).toMatchObject({ added: 0, remaining: 2 });
+    expect(out.message).toBe(
+      'Added 0 that a model read as hostile. Hit the write rate limit. Send "approve 1c2d3e4f hostile" again in an hour for the remaining 2.',
+    );
+  });
+
+  it('on an approval by name says to send it again later', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:a', 'UNKNOWN')];
+    const out = await applyPlanToActors(limited(), db.plan[0], ['did:plc:a']);
+    expect(out).toMatchObject({ added: 0, remaining: 1 });
+    expect(out.message).toBe(
+      'Added 0 by name. Hit the write rate limit. Send "approve 1c2d3e4f did:plc:a" again in an hour for the remaining 1.',
+    );
   });
 });
 
