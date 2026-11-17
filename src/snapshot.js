@@ -200,7 +200,8 @@ async function startSnapshot(pds) {
  * @param {object} [opts]
  * @param {boolean} [opts.restart] start a new snapshot regardless of age
  * @param {number} [opts.budgetMs]
- * @returns {Promise<{state: 'idle'|'collecting'|'finalising'|'finalised'}>}
+ * @returns {Promise<{state: 'idle'|'collecting'|'waiting'|'finalising'|'finalised', remaining?: number, retryInMs?: number}>}
+ *   On 'waiting', `retryInMs` is how long until a member may be asked again.
  */
 export async function snapshotStep({
   restart = false,
