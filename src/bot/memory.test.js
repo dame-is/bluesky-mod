@@ -98,6 +98,48 @@ describe('notes from the chat', () => {
     );
   });
 
+  it("makes a writer's note the owner's when the owner says it too", async () => {
+    await remember('never block people who only liked', {
+      author: 'did:plc:writer',
+    });
+    const out = await remember('Never block people who only liked', {
+      author: 'did:plc:owner',
+      owner: 'did:plc:owner',
+    });
+    expect(out).toEqual({
+      ok: true,
+      message:
+        'I had that one from a writer. It\'s yours now: "Never block people who only liked"',
+    });
+    const notes = await listNotes();
+    expect(notes).toHaveLength(1);
+    const block = notesBlock(notes, { owner: 'did:plc:owner' });
+    expect(block).toBe(
+      "THINGS THE OWNER ASKED YOU TO REMEMBER, in the owner's own words. Keep to them as you would the standing instructions:\n- Never block people who only liked",
+    );
+  });
+
+  it("keeps the owner's note the owner's when a writer says it too", async () => {
+    await remember('never block people who only liked', {
+      author: 'did:plc:owner',
+      owner: 'did:plc:owner',
+    });
+    const out = await remember('Never block people who only liked', {
+      author: 'did:plc:writer',
+      owner: 'did:plc:owner',
+    });
+    expect(out.message).toBe(
+      'I already had that one: "Never block people who only liked"',
+    );
+    const notes = await listNotes();
+    expect(notes).toEqual([
+      expect.objectContaining({
+        text: 'never block people who only liked',
+        author_did: 'did:plc:owner',
+      }),
+    ]);
+  });
+
   it('holds a bounded number', async () => {
     for (let i = 0; i < MAX_NOTES; i += 1) await remember(`note ${i}`);
     expect((await remember('one more')).ok).toBe(false);

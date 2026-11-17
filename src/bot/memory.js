@@ -40,15 +40,33 @@ const marked = (note, owner) =>
     ? note.text
     : `(from writer ${note.author_did}) ${note.text}`;
 
-/** Keep a note in its writer's words. `author` is the sender's DID. */
-export async function remember(text, { author } = {}) {
+/**
+ * Keep a note in its writer's words. `author` is the sender's DID.
+ *
+ * When the owner repeats a note a writer saved, the note becomes the owner's,
+ * in the owner's spelling, and keeps its place in the numbering. A writer
+ * repeating a note changes nothing.
+ */
+export async function remember(text, { author, owner = OWNER_DID } = {}) {
   const clean = String(text ?? '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, MAX_NOTE_CHARS);
   if (!clean) return { ok: false, message: 'Remember what?' };
   const notes = await listNotes();
-  if (notes.some((n) => n.text.toLowerCase() === clean.toLowerCase())) {
+  const dup = notes.find((n) => n.text.toLowerCase() === clean.toLowerCase());
+  if (dup) {
+    if (byOwner({ author_did: author }, owner) && !byOwner(dup, owner)) {
+      await update(
+        'memory',
+        { eq: { id: dup.id } },
+        { text: clean, author_did: author ?? null },
+      );
+      return {
+        ok: true,
+        message: `I had that one from a writer. It's yours now: "${clean}"`,
+      };
+    }
     return { ok: true, message: `I already had that one: "${clean}"` };
   }
   if (notes.length >= MAX_NOTES) {
