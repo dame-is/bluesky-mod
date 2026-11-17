@@ -68,7 +68,7 @@ It answers in one-to-one chats only. In a group chat it says nothing, because ev
 
 Read-only accounts can still see bands, vouch counts and follower numbers for third parties. They can also see what was added and when, by band and plan code, but not the words that asked for it. That is your private reading of your own social graph, and adding someone to the roster shares it with them.
 
-`src/lib/senders.js` is the only place that decides who is answered, for DMs and public mentions alike.
+`src/lib/senders.js` decides which accounts are answered, for DMs and public mentions alike, and `directConvos` in `src/bot/dmLoop.js` keeps DMs to one-to-one chats.
 
 ### Commands
 
