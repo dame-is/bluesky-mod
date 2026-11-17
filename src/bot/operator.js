@@ -1334,14 +1334,17 @@ export function buildActionTools(ctx, deps = DEPS) {
                 by: 'agent',
                 reason: why,
               });
-        if (out.added) {
+        // A batch an earlier approval sent and this one only recorded is
+        // still a change to the record, so it is said like an add.
+        if (out.added || out.recorded) {
           record(
-            `approved ${which} ${named ? 'by name' : label || bands.join(',')} (${out.added} added)`,
+            `approved ${which} ${named ? 'by name' : label || bands.join(',')} (${out.added ?? 0} added${out.recorded ? `, ${out.recorded} recorded` : ''})`,
           );
         }
         return {
           ok: out.ok,
           added: out.added ?? 0,
+          recorded: out.recorded ?? 0,
           remaining: out.remaining ?? 0,
           failed: out.failed ?? 0,
           result: out.message,

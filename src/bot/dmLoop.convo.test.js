@@ -343,6 +343,29 @@ describe('the reaction on an approval', () => {
     await pass(chat);
     expect(reactions.filter((r) => /^\+(✅|❌)/.test(r))).toEqual([]);
   });
+
+  it('is ✅ with an undo when it only recorded what an earlier one wrote', async () => {
+    const recordedOnly = {
+      ok: true,
+      added: 0,
+      recorded: 50,
+      live: 50,
+      remaining: 0,
+      message:
+        'Added 0 to the list. Recorded 50 that an earlier approval wrote.',
+    };
+    plans.applyPlan.mockResolvedValueOnce(recordedOnly);
+    plans.applyPlanToTriage.mockResolvedValueOnce(recordedOnly);
+    for (const [id, text] of [
+      ['m1', 'approve 1c2d3e4f UNKNOWN'],
+      ['m2', 'approve 1c2d3e4f hostile'],
+    ]) {
+      const { chat, sent, reactions } = chatWith([msg(id, text)]);
+      await pass(chat);
+      expect(reactions).toContain(`+✅@${id}`);
+      expect(shownMenu(sent.at(-1).text)[0]).toBe('Undo those 50');
+    }
+  });
 });
 
 describe('"Undo that" after a single block', () => {

@@ -527,6 +527,13 @@ const planOutcome = (out, moved) =>
   moved > 0 ? 'done' : out?.ok === false || out?.failed > 0 ? 'failed' : null;
 
 /**
+ * How many accounts an approval put on the list or recorded there. A batch an
+ * earlier approval sent and this one only found and recorded counts, so its
+ * receipt offers the undo and reads as done.
+ */
+const addedOrRecorded = (out) => (out?.added || 0) + (out?.recorded || 0);
+
+/**
  * Run one typed command and return what to say back.
  *
  * No branch asks a model what to do. The inputs are the sender's literal text
@@ -859,7 +866,7 @@ export async function runCommand(
       const out = await applyPlanToActors(writeAgent, plan, cmd.actors, {
         reason: cmd.raw,
       });
-      return say(out.message, null, planOutcome(out, out.added));
+      return say(out.message, null, planOutcome(out, addedOrRecorded(out)));
     }
     // Narrowed to the bands and the label time the command names, when it
     // names them: a watch digest's 👍 adds what the digest counted.
@@ -871,16 +878,16 @@ export async function runCommand(
       });
       return say(
         out.message,
-        out.added
+        addedOrRecorded(out)
           ? [
               {
-                label: undoLabel(cmd.code, out.added, out.live),
+                label: undoLabel(cmd.code, addedOrRecorded(out), out.live),
                 command: `undo ${cmd.code}`,
               },
               { label: 'Show me the record', command: 'history' },
             ]
           : null,
-        planOutcome(out, out.added),
+        planOutcome(out, addedOrRecorded(out)),
       );
     }
 
@@ -904,16 +911,20 @@ export async function runCommand(
     // them. An undo you have to go and look up is one you will not use.
     return say(
       out.message,
-      out.added
+      addedOrRecorded(out)
         ? [
             {
-              label: undoLabel(shortCode(plan.id), out.added, out.live),
+              label: undoLabel(
+                shortCode(plan.id),
+                addedOrRecorded(out),
+                out.live,
+              ),
               command: `undo ${shortCode(plan.id)}`,
             },
             { label: 'Show me the record', command: 'history' },
           ]
         : null,
-      planOutcome(out, out.added),
+      planOutcome(out, addedOrRecorded(out)),
     );
   }
 
@@ -1426,7 +1437,8 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
       `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${failedLine}${unread} ${added.message}`,
     // Reads that failed with nobody added is a failure, not nothing to do.
     outcome:
-      planOutcome(added, added.added) ?? (failedReads ? 'failed' : null),
+      planOutcome(added, addedOrRecorded(added)) ??
+      (failedReads ? 'failed' : null),
   };
 }
 

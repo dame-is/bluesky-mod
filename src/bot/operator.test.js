@@ -375,6 +375,26 @@ describe('the write tools', () => {
     expect(ctx.actions).toEqual(['approved 3f9a2c1b UNKNOWN (37 added)']);
   });
 
+  it('records an approval that only recorded what an earlier one wrote', async () => {
+    const ctx = ctxFor();
+    const out = await buildActionTools(
+      ctx,
+      fakeDeps({
+        applyPlan: vi.fn(async () => ({
+          ok: true,
+          added: 0,
+          recorded: 50,
+          remaining: 0,
+          message: 'Added 0 to the list. Recorded 50 that an earlier approval wrote.',
+        })),
+      }),
+    ).approve_plan.execute({ code: '3f9a2c1b', bands: ['UNKNOWN'] });
+    expect(out).toMatchObject({ added: 0, recorded: 50 });
+    expect(ctx.actions).toEqual([
+      'approved 3f9a2c1b UNKNOWN (0 added, 50 recorded)',
+    ]);
+  });
+
   it('marks every bulk route as the agent', async () => {
     const deps = fakeDeps();
     const tools = buildActionTools(ctxFor(), deps);
