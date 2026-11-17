@@ -896,6 +896,77 @@ describe('group conversations', () => {
     expect(logged.some((l) => /conversation/i.test(l))).toBe(true);
   });
 
+  /**
+   * A chat service whose log reads from the cursor and whose conversation
+   * c2 cannot be read while `down()` is true.
+   */
+  function withUnreadable(logs, down) {
+    const fake = chatWith(logs);
+    const describe = fake.chat.chat.bsky.convo.getConvo;
+    fake.chat.chat.bsky.convo.getConvo = async (args) => {
+      if (args.convoId === 'c2' && down()) throw new Error('upstream down');
+      return describe(args);
+    };
+    fake.chat.chat.bsky.convo.getLog = async ({ cursor } = {}) => ({
+      data: {
+        cursor: logs.at(-1).rev,
+        logs: logs.slice(logs.findIndex((e) => e.rev === cursor) + 1),
+      },
+    });
+    return fake;
+  }
+  const storedCursor = async () =>
+    (await db.select('dm_cursor', { select: 'cursor', eq: { id: 1 } }))[0]
+      .cursor;
+
+  it('stops before a message whose conversation cannot be read, and answers it next pass', async () => {
+    let down = true;
+    const { chat, reactions } = withUnreadable(
+      [
+        { ...msg('m1', 'help'), rev: 'r1' },
+        { ...msg('m2', 'help', { convo: 'c2' }), rev: 'r2' },
+        { ...msg('m3', 'help'), rev: 'r3' },
+      ],
+      () => down,
+    );
+    const pickedUp = () => reactions.filter((r) => r.startsWith('+👀'));
+    await pass(chat);
+    expect(pickedUp()).toEqual(['+👀@m1']);
+    expect(await storedCursor()).toBe('r1');
+
+    down = false;
+    await pass(chat);
+    expect(pickedUp()).toEqual(['+👀@m1', '+👀@m2', '+👀@m3']);
+    expect(await storedCursor()).toBe('r3');
+  });
+
+  it('passes over a conversation that stays unreadable, so the rest are answered', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const logs = [
+        { ...msg('m1', 'help', { convo: 'c2' }), rev: 'r1' },
+        { ...msg('m2', 'help'), rev: 'r2' },
+      ];
+      const { chat, sent, reactions } = withUnreadable(logs, () => true);
+      await pass(chat);
+      expect(sent).toEqual([]);
+      expect(await storedCursor()).toBe('c0');
+
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      await pass(chat);
+      expect(reactions.filter((r) => r.startsWith('+👀'))).toEqual(['+👀@m2']);
+      expect(sent.every((s) => s.convoId === 'c1')).toBe(true);
+      expect(await storedCursor()).toBe('r2');
+
+      // A later message there waits again rather than going straight past.
+      logs.push({ ...msg('m3', 'help', { convo: 'c2' }), rev: 'r3' });
+      await pass(chat);
+      expect(await storedCursor()).toBe('r2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('treats a conversation of two with no kind as direct', async () => {
     const { chat, sent } = chatWith([msg('m1', 'help')], {
       getConvo: async ({ convoId }) => ({

@@ -1733,9 +1733,20 @@ async function flushSummaries(chat, { log = () => {} } = {}) {
  */
 const convoKinds = new Map();
 
+/**
+ * How long a conversation that cannot be read holds up the pass. Past this
+ * its messages are passed over, so one conversation the chat service will not
+ * describe cannot keep the bot from answering every other one for good.
+ */
+const UNREAD_HOLD_MS = 10 * 60_000;
+
+/** When each conversation that cannot be read first failed, by convo id. */
+const unreadSince = new Map();
+
 /** For tests. */
 export function resetConvoKinds() {
   convoKinds.clear();
+  unreadSince.clear();
 }
 
 /**
@@ -1747,13 +1758,18 @@ export function resetConvoKinds() {
  * and every member of a group reads every reply. In a group, one member could
  * answer or steer for another, and members off the roster would read what
  * the bot says about the owner's graph. A server that leaves out the kind is
- * taken at its member count. A conversation that cannot be read is not
- * answered this time and is asked about again next time.
+ * taken at its member count.
  *
- * @returns {Promise<Set<string>>}
+ * A conversation that cannot be read is `held`: the pass stops before its
+ * first message and the next pass asks again, so a request in it is not
+ * passed over. After UNREAD_HOLD_MS of failing it is no longer held, and its
+ * messages go unanswered.
+ *
+ * @returns {Promise<{ direct: Set<string>, held: Set<string> }>}
  */
 async function directConvos(chat, entries, { log = () => {} } = {}) {
   const out = new Set();
+  const held = new Set();
   for (const convoId of new Set(entries.map((e) => e.convoId))) {
     if (!convoKinds.has(convoId)) {
       try {
@@ -1765,18 +1781,34 @@ async function directConvos(chat, entries, { log = () => {} } = {}) {
           ? kind === 'chat.bsky.convo.defs#directConvo'
           : convo.members?.length === 2;
         convoKinds.set(convoId, direct);
+        unreadSince.delete(convoId);
         if (!direct) log('Not answering a group conversation', { convoId });
       } catch (err) {
-        log('Could not read a conversation, so it is not answered', {
-          convoId,
-          err: String(err?.message || err),
-        });
+        // Logged when the wait starts and when it ends, not on every poll.
+        const fields = { convoId, err: String(err?.message || err) };
+        if (!unreadSince.has(convoId)) {
+          unreadSince.set(convoId, Date.now());
+          log(
+            'Could not read a conversation; its messages wait until it can be',
+            fields,
+          );
+        }
+        if (Date.now() - unreadSince.get(convoId) < UNREAD_HOLD_MS) {
+          held.add(convoId);
+        } else {
+          // A later failure in this conversation waits afresh.
+          unreadSince.delete(convoId);
+          log(
+            'Gave up waiting to read a conversation, so its messages are not answered',
+            fields,
+          );
+        }
         continue;
       }
     }
     if (convoKinds.get(convoId)) out.add(convoId);
   }
-  return out;
+  return { direct: out, held };
 }
 
 /**
@@ -1920,7 +1952,6 @@ export async function runDmPass({
   }
 
   const res = await chat.chat.bsky.convo.getLog(cursor ? { cursor } : {});
-  const end = res.data.cursor;
   // A message moves the cursor to its own rev, so an entry whose rev is the
   // cursor was read before, whether or not the chat service sends it again.
   const entries = (res.data.logs || []).filter(
@@ -1973,15 +2004,26 @@ export async function runDmPass({
 
   // One-to-one conversations only, so the roster check above also decides
   // who reads the reply.
-  const direct = await directConvos(chat, [...unseen, ...rosterReactions], {
-    log,
-  });
-  const inbound = unseen.filter((e) => direct.has(e.convoId));
-  const reactions = rosterReactions.filter((e) => direct.has(e.convoId));
+  const asked = [...unseen, ...rosterReactions];
+  const { direct, held } = await directConvos(chat, asked, { log });
+  // The pass stops before the first message in a conversation that could not
+  // be read, and the cursor goes no further than the entry before it, so the
+  // next pass reads that message again.
+  const stop = entries.findIndex(
+    (e) => held.has(e.convoId) && asked.includes(e),
+  );
+  const page = new Set(stop === -1 ? entries : entries.slice(0, stop));
+  const end =
+    stop === -1 ? res.data.cursor : stop > 0 ? entries[stop - 1].rev : null;
+  const inbound = unseen.filter((e) => page.has(e) && direct.has(e.convoId));
+  const reactions = rosterReactions.filter(
+    (e) => page.has(e) && direct.has(e.convoId),
+  );
 
-  // Advance past everything, answered or not, once the page is done with: a
-  // message the bot will not answer must not be replayed on every pass
-  // forever. Each message answered below moves the cursor past itself first.
+  // Advance to `end` once the page is done with, past every message answered
+  // or not: a message the bot will not answer must not be replayed on every
+  // pass forever. Each message answered below moves the cursor past itself
+  // first.
   if (!inbound.length && !reactions.length) {
     if (end) await writeCursor(end);
     await flushSummaries(chat, { log });
