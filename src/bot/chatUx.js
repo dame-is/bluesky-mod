@@ -250,13 +250,13 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
     e.quote && plural(e.quote, 'quote', 'quotes'),
     replies && plural(replies, 'reply', 'replies'),
   ].filter(Boolean);
+  // A card that leaves out "likers" because the likes could not be read
+  // says why, and any cut harvest says the counts are partial.
+  const missing = unreadText(plan.unread);
   if (plan.total) {
     lines.push(
       `${plural(plan.total, 'account', 'accounts')} engaged${parts.length ? `: ${parts.join(', ')}` : ''}.`,
     );
-    // A card that leaves out "likers" because the likes could not be read
-    // says why, and any cut harvest says the counts are partial.
-    const missing = unreadText(plan.unread);
     if (missing) {
       lines.push(
         `Could not read ${missing}, so these counts cover part of the post. Send it again to retry.`,
@@ -276,6 +276,10 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
       plan.blocksYou && `${nf(plan.blocksYou)} already block you`,
     ].filter(Boolean);
     if (known.length) lines.push(`${known.join(', ')}.`);
+  } else if (missing) {
+    lines.push(`Could not read ${missing}. Send it again to retry.`);
+  } else if (plan.truncated) {
+    lines.push('Not every engagement was read. Send it again to retry.');
   } else {
     lines.push('Nobody has engaged with it yet.');
   }

@@ -82,6 +82,21 @@ describe('the post card', () => {
     );
   });
 
+  it('never says nobody engaged when what there was could not be read', () => {
+    const empty = { ...PLAN, total: 0, engagements: {}, byBand: {} };
+    const unread = renderCard({
+      ...empty,
+      truncated: true,
+      unread: [{ kind: 'like', count: 900 }],
+    });
+    expect(unread).toContain('Could not read 900 likes. Send it again to retry.');
+    expect(unread).not.toContain('Nobody has engaged');
+    const cut = renderCard({ ...empty, truncated: true, unread: [] });
+    expect(cut).toContain('Not every engagement was read. Send it again to retry.');
+    expect(cut).not.toContain('Nobody has engaged');
+    expect(renderCard(empty)).toContain('Nobody has engaged with it yet.');
+  });
+
   it('counts a direct reply once', () => {
     // A direct reply to a first post links to it as parent and as root.
     const text = renderCard({
