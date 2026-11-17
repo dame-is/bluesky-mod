@@ -67,13 +67,27 @@ vi.mock('../lib/harvest.js', () => ({
     };
   },
 }));
-vi.mock('../lib/score.js', async (importOriginal) => ({
-  ...(await importOriginal()),
-  createScorer: () => ({
-    score: async (dids) =>
-      new Map(dids.map((did) => [did, { did, band: 'UNKNOWN', trust: 0 }])),
-  }),
-}));
+// With `appview.fetch` set, scans score through the real scorer against that
+// stub; otherwise every account comes back UNKNOWN without a request.
+const appview = { fetch: null };
+vi.mock('../lib/score.js', async (importOriginal) => {
+  const real = await importOriginal();
+  return {
+    ...real,
+    createScorer: (ref) =>
+      appview.fetch
+        ? real.createScorer(ref, {
+            fetchImpl: appview.fetch,
+            retryDelaysMs: [],
+          })
+        : {
+            score: async (dids) =>
+              new Map(
+                dids.map((did) => [did, { did, band: 'UNKNOWN', trust: 0 }]),
+              ),
+          },
+  };
+});
 
 process.env.MOD_LIST_URI = LIST;
 const { proposePlan } = await import('./bulkPlan.js');
@@ -87,6 +101,7 @@ beforeEach(() => {
   harvested.length = 0;
   unread.length = 0;
   stopDuringHarvest.controller = null;
+  appview.fetch = null;
 });
 
 describe('who a scan puts in a plan', () => {
@@ -143,6 +158,33 @@ describe('a scan the turn ran out of time for', () => {
         signal: stopDuringHarvest.controller.signal,
       }),
     ).rejects.toThrow('That took too long');
+    expect(stored.plan).toEqual([]);
+    expect(stored.decision).toEqual([]);
+  });
+
+  it('stops scoring at the first AppView request after the signal fires', async () => {
+    for (let i = 0; i < 500; i += 1) {
+      participants.push(engaged(`did:plc:s${i}`, { like: 1 }));
+    }
+    const controller = new AbortController();
+    const requests = [];
+    // Stands in for a deadline that passes while the participants are scored.
+    // Like fetch, the stub rejects once the signal it was handed is aborted.
+    appview.fetch = async (url, { signal } = {}) => {
+      requests.push(url);
+      controller.abort(new Error('That took too long'));
+      signal?.throwIfAborted();
+      return {
+        ok: true,
+        json: async () => ({ profiles: [], relationships: [] }),
+      };
+    };
+    await expect(
+      proposePlan({ link: POST, kind: 'everyone', signal: controller.signal }),
+    ).rejects.toThrow('That took too long');
+    // One profiles batch and one relationships batch start together; neither
+    // goes on to the next.
+    expect(requests.length).toBeLessThanOrEqual(2);
     expect(stored.plan).toEqual([]);
     expect(stored.decision).toEqual([]);
   });

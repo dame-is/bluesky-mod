@@ -193,7 +193,8 @@ async function sentUnconfirmed(dids) {
 /**
  * Harvest a post, score everyone on it, and store an unapproved plan.
  *
- * `signal` stops the harvest, and a plan cut short by it is not stored.
+ * `signal` stops the harvest and the scoring, and a plan cut short by it is
+ * not stored.
  *
  * @returns {Promise<{code, uri, kind, total, byBand, truncated, protectedCount}>}
  */
@@ -221,9 +222,10 @@ export async function proposePlan({ link, kind, signal }) {
   // no engagement still says something about the person who wrote it.
   // summarise() maps over the harvest, so the extra entry in the score map
   // cannot leak into the plan's rows.
-  const scores = await scorer.score([
-    ...new Set([...harvest.participants.map((p) => p.did), target.did]),
-  ]);
+  const scores = await scorer.score(
+    [...new Set([...harvest.participants.map((p) => p.did), target.did])],
+    { signal },
+  );
   signal?.throwIfAborted();
   const summary = summarise(harvest, scores);
   const author = scores.get(target.did) ?? null;
