@@ -273,6 +273,26 @@ describe('the menu a number answers is the one on screen', () => {
     expect(shown.some((l) => /^Add /.test(l))).toBe(false);
   });
 
+  it('does not answer a menu dated well ahead of the clock', async () => {
+    // Offered while the clock ran fast, it would stay live until the clock
+    // caught up.
+    await db.upsert('dm_choice', [
+      {
+        convo_id: 'c1',
+        options: [
+          {
+            label: 'Add @x.test to the list',
+            command: 'list add did:plc:x',
+            offered_at: new Date(Date.now() + 365 * 86_400_000).toISOString(),
+          },
+        ],
+      },
+    ]);
+    const { chat } = chatWith([msg('m1', '1')]);
+    await pass(chat);
+    expect(listWrite.applyCommand).not.toHaveBeenCalled();
+  });
+
   it('forgets the menu when a reply shows none', async () => {
     let { chat } = chatWith([msg('m1', '', { embed: POST })]);
     await pass(chat);

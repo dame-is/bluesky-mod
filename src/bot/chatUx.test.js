@@ -193,6 +193,20 @@ describe('confirmations and reactions', () => {
     expect(await readPending('c')).toMatchObject({ commands });
   });
 
+  it('treats a question dated well ahead of the clock as expired', async () => {
+    // Stored while the clock ran fast; it would stay live for a year.
+    const commands = ['list add @a.test'];
+    const at = (ms) => new Date(Date.now() + ms).toISOString();
+    select.mockResolvedValueOnce([
+      { pending: { commands, created_at: at(365 * 86_400_000) } },
+    ]);
+    expect(await readPending('c')).toBe(null);
+    select.mockResolvedValueOnce([
+      { pending: { commands, created_at: at(60_000) } },
+    ]);
+    expect(await readPending('c')).toMatchObject({ commands });
+  });
+
   it('never throws over a reaction', async () => {
     const chat = {
       chat: {

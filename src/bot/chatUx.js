@@ -109,7 +109,11 @@ export async function readPending(convoId, { now = Date.now() } = {}) {
   }).catch(() => []);
   const p = rows?.[0]?.pending;
   if (!p?.commands?.length) return null;
-  if (!(now - Date.parse(p.created_at) <= PENDING_TTL_MS)) return null;
+  // A question dated more than a few minutes ahead was stored while the
+  // clock ran fast, and counts as expired rather than live until it catches
+  // up. NaN, an unreadable time, is expired too.
+  const age = now - Date.parse(p.created_at);
+  if (!(age >= -5 * 60_000 && age <= PENDING_TTL_MS)) return null;
   return p;
 }
 

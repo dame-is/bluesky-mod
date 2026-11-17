@@ -236,9 +236,18 @@ export function composeMessage(message) {
  */
 const CHOICE_TTL_MS = 30 * 60_000;
 
-/** True while `at` (an ISO time) is within the TTL. A missing time is stale. */
-const fresh = (at, now = Date.now()) =>
-  now - Date.parse(at) <= CHOICE_TTL_MS;
+/** How far ahead of the clock a stored time may be and still count. */
+const AHEAD_SLACK_MS = 5 * 60_000;
+
+/**
+ * True while `at` (an ISO time) is within the TTL. A missing time is stale,
+ * and so is one more than a few minutes ahead, from a clock that ran fast:
+ * it would otherwise stay live until the clock caught up.
+ */
+const fresh = (at, now = Date.now()) => {
+  const age = now - Date.parse(at);
+  return age >= -AHEAD_SLACK_MS && age <= CHOICE_TTL_MS;
+};
 
 /**
  * The stored options, if they are still live.
