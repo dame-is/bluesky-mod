@@ -156,7 +156,7 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
     '  approve <code> UNKNOWN    add that band only',
     '  block @handle             add one account to the list',
     '  unblock @handle           take them back off',
-    '  undo                      take back the last add, one account or a batch',
+    '  undo                      take back the last change when it was an add',
   ];
   const tail = [
     '',

@@ -376,11 +376,11 @@ export function parseCommand(
     return { action: 'history', actor, refusal, needsTarget: !actor, raw };
   }
 
-  // Bare `undo` means the most recent addition still on the list, one block or
-  // a whole batch. Undo is the one verb that may default to a target nobody
-  // named: every other verb adds someone to a block list, where guessing is
-  // the failure that matters, while undo only removes people, who can be added
-  // again.
+  // Bare `undo` means the newest change to the list when that change was an
+  // add, one block or a whole batch; after an unblock it undoes nothing. Undo
+  // is the one verb that may default to a target nobody named: every other
+  // verb adds someone to a block list, where guessing is the failure that
+  // matters, while undo only removes people, who can be added again.
   //
   // A token meant as a code is not defaulted, though. Undoing the most recent
   // plan over a typo would act on a batch the owner did not name.

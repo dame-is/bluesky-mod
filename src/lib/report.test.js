@@ -449,13 +449,15 @@ describe('helpText', () => {
     expect(text).toContain('block @handle');
   });
 
-  it('says undo takes back the last add, whatever its size', () => {
-    // Bare undo picks the most recent addition still on the list, which after
-    // a "block @x" is that one account and not the batch before it.
+  it('says undo takes back the last change only when it was an add', () => {
+    // Bare undo takes back the newest change when it was an add, which after
+    // a "block @x" is that one account and not the batch before it, and after
+    // an unblock is nothing.
     const line = helpText()
       .split('\n')
       .find((l) => /^\s+undo\s/.test(l));
-    expect(line).toMatch(/last add/);
+    expect(line).toMatch(/last change/);
+    expect(line).toMatch(/\badd\b/);
     expect(line).not.toMatch(/last batch/);
   });
 });
