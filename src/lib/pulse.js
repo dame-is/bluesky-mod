@@ -834,7 +834,11 @@ export async function pulse({
             includeReplies,
             deadline,
           });
-    if (useCache) cacheSet(key, fetched, now);
+    // A read the caller gave up on is not kept: the turn that asked has
+    // already failed, and the next ask has a full budget of its own. A read
+    // cut short by this digest's own budget is kept, because asking again
+    // would hit the same budget.
+    if (useCache && !signal?.aborted) cacheSet(key, fetched, now);
   }
 
   const totals = summariseWindow(fetched.posts);

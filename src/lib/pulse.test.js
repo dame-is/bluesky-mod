@@ -1010,6 +1010,35 @@ describe('the time budget', () => {
     expect(r.coverage).toMatchObject({ read: 0, unread: 1 });
   });
 
+  it('does not keep a read the caller gave up on, so the next ask reads again', async () => {
+    // The turn that asked has already failed, and a later turn with a full
+    // budget would otherwise be served its half-read window.
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    const opts = { source: 'circle', circleDids: ['did:plc:a'], now: NOW };
+    const cut = await pulse({
+      ...opts,
+      fetchImpl: stalled(),
+      signal: controller.signal,
+      budgetMs: 60_000,
+    });
+    expect(cut.coverage).toMatchObject({ read: 0, unread: 1 });
+
+    const fetchImpl = fakeFetch([['getAuthorFeed', { feed: [item()] }]]);
+    const again = await pulse({ ...opts, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalled();
+    expect(again.coverage).toMatchObject({ read: 1, unread: 0, cached: false });
+  });
+
+  it('keeps a read its own budget cut short, so a follow-up reuses it', async () => {
+    const opts = { source: 'circle', circleDids: ['did:plc:a'], now: NOW };
+    await pulse({ ...opts, fetchImpl: stalled(), budgetMs: 100 });
+    const fetchImpl = fakeFetch([['getAuthorFeed', { feed: [item()] }]]);
+    const again = await pulse({ ...opts, fetchImpl });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(again.coverage).toMatchObject({ read: 0, unread: 1, cached: true });
+  });
+
   it('takes a budget a timer cannot, instead of throwing', async () => {
     // AbortSignal.timeout wants a whole number of milliseconds that fits a
     // 32-bit timer; config only checks for a number above 0.
