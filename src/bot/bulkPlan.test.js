@@ -1,7 +1,7 @@
 // Approve, undo, "undo last" and history, against an in-memory decision log,
 // a stubbed Constellation lookup and a fake repo.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const LIST = 'at://did:plc:bot/app.bsky.graph.list/3list';
 const PLAN_A = '1c2d3e4f-0000-4000-8000-000000000001';
@@ -1539,6 +1539,60 @@ describe('a label approval with bounds', () => {
     expect(out.message).toContain(
       'Send "approve 1c2d3e4f hostile CONNECTED asof=2026-11-01T10:00:00.000Z" again',
     );
+  });
+});
+
+describe('several lists (multi-list mode)', () => {
+  const SPAM = 'at://did:plc:bot/app.bsky.graph.list/3spam';
+  beforeEach(() => {
+    process.env.MOD_MULTI_LIST = 'true';
+    // Plan B was bound to Spam by its first approval; plan A has no list,
+    // which is the main list.
+    db.plan[1].list_uri = SPAM;
+  });
+  afterEach(() => {
+    delete process.env.MOD_MULTI_LIST;
+  });
+
+  it("writes an approval's listitems to the list the plan is bound to", async () => {
+    db.decision = [scanned(PLAN_B, 'did:plc:x', 'UNKNOWN')];
+    const agent = bot();
+    const out = await applyPlan(agent, db.plan[1], ['UNKNOWN']);
+    expect(out).toMatchObject({ ok: true, added: 1 });
+    const [{ writes }] = agent.com.atproto.repo.applyWrites.mock.calls[0];
+    expect(writes.map((w) => w.value.list)).toEqual([SPAM]);
+    // Membership is read on that list, not the main one.
+    expect(graph.graphFacts).toHaveBeenCalledWith({ list: SPAM });
+  });
+
+  it("undoes from the plan's list: looks there and takes them off there", async () => {
+    db.decision = [added(PLAN_B, 'did:plc:b', '2026-10-01T11:00:00Z')];
+    constellation.set('did:plc:b', ['rk-b']);
+    repo.set('rk-b', 'did:plc:b');
+    const out = await undoPlan(bot(), db.plan[1], { reason: 'undo' });
+    expect(out).toMatchObject({ removed: 1 });
+    expect(graph.rkeysForWrite.mock.calls.map((c) => c[0])).toEqual([SPAM]);
+    expect(graph.noteUnlisted).toHaveBeenCalledWith(SPAM, 'did:plc:b');
+  });
+
+  it('does not keep someone on one list because a plan on another list added them by name', async () => {
+    db.decision = [
+      // Typed "block @a" on the main list.
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', {
+        approved_via: 'command',
+      }),
+      // And a batch on Spam.
+      added(PLAN_B, 'did:plc:a', '2026-10-01T11:00:00Z', {
+        approved_via: 'band',
+      }),
+    ];
+    constellation.set('did:plc:a', ['rk-a']);
+    repo.set('rk-a', 'did:plc:a');
+    const out = await undoPlan(bot(), db.plan[1], { reason: 'too broad' });
+    expect(out).toMatchObject({ removed: 1, kept: 0 });
+    expect(row(PLAN_B, 'did:plc:a').undone_at).toBeTruthy();
+    // The main list's add still stands: they are still on that list.
+    expect(row(PLAN_A, 'did:plc:a').undone_at).toBe(null);
   });
 });
 

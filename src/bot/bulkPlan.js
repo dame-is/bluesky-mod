@@ -47,6 +47,17 @@ import {
 } from './listWrite.js';
 import { evidenceUriFor } from './triage.js';
 import { closeAdds } from './closeAdds.js';
+import { planList, listScope, rowsOnList } from './planList.js';
+import { multiListOn } from '../lib/listChoice.js';
+import { listName } from './lists.js';
+
+/**
+ * How a receipt names where a plan's writes went: "the list" with one list,
+ * the list's name with several. `extra` is for the receipts that never named
+ * the list before: with one list they stay word for word as they were.
+ */
+const where = (uri) => (multiListOn() ? listName(uri) : 'the list');
+const whereExtra = (uri) => (multiListOn() ? ` to ${listName(uri)}` : '');
 import {
   graphFacts,
   isListed,
@@ -324,7 +335,10 @@ export async function proposePlan({ link, kind, signal }) {
       // How they engaged, so "the likers" of a whole-post scan can be approved
       // without harvesting the post again.
       engaged: Object.keys(r.engagements || {}),
-      already_listed: Boolean(r.alreadyListed),
+      // With several lists, "on one of them" says nothing about the list an
+      // approval will choose, so the write finds out per list (splitListed)
+      // instead of a mark skipping them here.
+      already_listed: multiListOn() ? false : Boolean(r.alreadyListed),
       blocks_me: Boolean(r.blocksYou),
     })),
   );
@@ -356,7 +370,8 @@ export async function proposePlan({ link, kind, signal }) {
   };
 }
 
-const PLAN_COLUMNS = 'id,created_at,approved_at,approved_bands,totals,note';
+const PLAN_COLUMNS =
+  'id,created_at,approved_at,approved_bands,totals,note,list_uri';
 
 /**
  * Find a plan by its short code.
@@ -397,7 +412,7 @@ export async function applyPlan(
   bands,
   { by = null, kinds = null, reason = null, carryOn = false } = {},
 ) {
-  const uri = listUri();
+  const uri = planList(plan);
   const bot = agent.session?.did;
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
@@ -470,7 +485,7 @@ export async function applyPlan(
       rateLimited: true,
       again,
       live,
-      message: `Added ${added}.${recordedNote(recorded)}${restLine({ left, again, rateLimited, carryOn })}`,
+      message: `Added ${added}${whereExtra(uri)}.${recordedNote(recorded)}${restLine({ left, again, rateLimited, carryOn })}`,
     };
   }
 
@@ -486,7 +501,7 @@ export async function applyPlan(
     again,
     live,
     message:
-      `Added ${added} to the list${failed ? `, ${failed} failed` : ''}.` +
+      `Added ${added} to ${where(uri)}${failed ? `, ${failed} failed` : ''}.` +
       recordedNote(recorded) +
       alreadyNote(already) +
       vetoNote(vetoed + refused) +
@@ -813,7 +828,7 @@ export async function applyPlanToTriage(
     carryOn = false,
   } = {},
 ) {
-  const uri = listUri();
+  const uri = planList(plan);
   const bot = agent.session?.did;
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
@@ -886,7 +901,7 @@ export async function applyPlanToTriage(
       rateLimited: true,
       again,
       live,
-      message: `Added ${added} that a model read as ${label}.${recordedNote(recorded)}${restLine({ left, again, rateLimited, carryOn })}`,
+      message: `Added ${added} that a model read as ${label}${whereExtra(uri)}.${recordedNote(recorded)}${restLine({ left, again, rateLimited, carryOn })}`,
     };
   }
 
@@ -903,7 +918,7 @@ export async function applyPlanToTriage(
     again,
     live,
     message:
-      `Added ${added} that a model read as ${label}${failed ? `, ${failed} failed` : ''}.` +
+      `Added ${added} that a model read as ${label}${whereExtra(uri)}${failed ? `, ${failed} failed` : ''}.` +
       recordedNote(recorded) +
       alreadyNote(already) +
       vetoNote(vetoed + refused) +
@@ -1107,7 +1122,7 @@ export async function applyPlanToActors(
   actors,
   { by = null, reason = null } = {},
 ) {
-  const uri = listUri();
+  const uri = planList(plan);
   const bot = agent.session?.did;
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
@@ -1162,8 +1177,8 @@ export async function applyPlanToActors(
     : 0;
   const parts = [
     rateLimited
-      ? `Added ${added} by name.${recordedNote(recorded)} Hit the write rate limit. Send "approve ${shortCode(plan.id)} ${actors.join(' ')}" again in an hour for the remaining ${remaining}.`
-      : `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${recordedNote(recorded)}${alreadyNote(already)}${note}`,
+      ? `Added ${added} by name${whereExtra(uri)}.${recordedNote(recorded)} Hit the write rate limit. Send "approve ${shortCode(plan.id)} ${actors.join(' ')}" again in an hour for the remaining ${remaining}.`
+      : `Added ${added} by name${whereExtra(uri)}${failed ? `, ${failed} failed` : ''}.${recordedNote(recorded)}${alreadyNote(already)}${note}`,
   ];
   if (banned + vetoed) parts.push(`${banned + vetoed} refused: PROTECTED.`);
   if (unknown.length) parts.push(`Not in this plan: ${unknown.join(', ')}.`);
@@ -1413,7 +1428,8 @@ async function addsElsewhere(plan, dids) {
       },
       order: 'did.asc',
     });
-    for (const r of rows) {
+    // Another plan on another list holds them on that list, not this one.
+    for (const r of await rowsOnList(rows, listScope(planList(plan)))) {
       if (r.plan_id === plan.id) continue;
       out.set(r.did, [...(out.get(r.did) || []), r.approved_via]);
     }
@@ -1464,7 +1480,9 @@ export async function undoPlan(
 ) {
   // Nothing more is added to a plan being taken back.
   await stopContinuation(plan.id).catch(() => {});
-  const uri = listUri();
+  const uri = planList(plan);
+  // Cross-plan reads below count only plans on this list (planList.js).
+  const scope = listScope(uri);
   const bot = agent.session?.did;
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
@@ -1522,7 +1540,7 @@ export async function undoPlan(
   if (exhaustive) {
     const missing = live.map((r) => r.did).filter((did) => !byDid.has(did));
     if (missing.length) {
-      await closeAdds(missing, 'already off the list');
+      await closeAdds(missing, 'already off the list', { list: scope });
       alreadyOff = missing.length;
     }
   } else {
@@ -1545,7 +1563,7 @@ export async function undoPlan(
       });
     }
     if (off.length) {
-      await closeAdds(off, 'already off the list');
+      await closeAdds(off, 'already off the list', { list: scope });
       alreadyOff = off.length;
     }
   }
@@ -1591,7 +1609,7 @@ export async function undoPlan(
       // Every live add of theirs, not only this plan's: every copy came off,
       // including one another plan put there, and that plan's row left open
       // would count them as still on the list.
-      await closeAdds(batch.dids, reason);
+      await closeAdds(batch.dids, reason, { list: scope });
       removed += batch.dids.length;
     } catch (err) {
       const message = String(err?.message || err);
@@ -1610,7 +1628,7 @@ export async function undoPlan(
     alreadyOff,
     kept,
     message:
-      `Took ${removed} back off the list (plan ${shortCode(plan.id)}).` +
+      `Took ${removed} back off ${where(uri)} (plan ${shortCode(plan.id)}).` +
       (alreadyOff ? ` ${alreadyOff} had already come off another way.` : '') +
       (kept
         ? ` ${kept === 1 ? '1 stays' : `${kept} stay`} on the list, since you also added them by name.`
@@ -1647,7 +1665,7 @@ export async function historyFor(did = null, { limit = 8 } = {}) {
   const ids = [...new Set(acted.map((r) => r.plan_id))];
   const plans = ids.length
     ? await select('plan', {
-        select: 'id,note,approved_bands,created_at',
+        select: 'id,note,approved_bands,created_at,list_uri',
         where: { id: { in: ids } },
       })
     : [];

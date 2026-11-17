@@ -81,6 +81,10 @@ import {
 } from './tiers.js';
 import { select } from './db.js';
 import { continueLater } from './continuation.js';
+import { botLists, resolveList, listName, multiListOn } from './lists.js';
+import { pickRemoval, namedIn, bindPlan } from './listPick.js';
+import { boundList } from './planList.js';
+import { withListToken } from '../lib/listChoice.js';
 
 /**
  * A number from the environment, or the default when unset, not a number, or
@@ -220,6 +224,8 @@ CHECKED WRITES. Before any change to the list runs, it is checked against what t
 
 WATCHING AND REMEMBERING. watch_post keeps reading a post's new quotes and replies for some hours and reports hourly; with block_hostile it also adds what triage reads as hostile, holding anyone CONNECTED or NOTABLE for the owner. stop_watching ends one. recent_activity says what was added, removed and undone lately, with plan codes. You cannot save anything to memory yourself: when the owner wants something kept, it is kept by the owner starting a message with "remember:".`;
 
+const LISTS = `SEVERAL LISTS. The owner keeps more than one moderation list. add_to_list, remove_from_list, approve_plan and watch_post (with block_hostile) take list, a number or a name. Pass it only when the owner named a list in their own words; otherwise leave it out. A write with no list the owner named is not done: the owner is asked "Which list?" with a numbered menu built by code, and answering it does the write. Such a result comes back with waitingOnOwner: true; say in one line what you were about to do. Never choose a list yourself. A plan goes to the list its first approval went to. "lists" and "new list <name>" are handled without a model.`;
+
 const HAND_OFF = `A STRONGER MODEL IS AVAILABLE. Call hand_off, and nothing after it, when the owner asks for a second opinion, a closer look or a more careful answer; when you have read the conversation and still cannot tell what the owner wants; when a tool result contradicts something you said earlier; or when a decision about a specific person needs judgement you are not confident in. Do not hand off routine work: lookups, scans, and requests that are already clear.`;
 
 /** The paragraph a second-wave turn starts from. */
@@ -280,6 +286,7 @@ export function operatorPrompt({
   self = null,
 } = {}) {
   const blocks = [promptBody(self), canWrite ? ACTING : READ_ONLY, REFERENCE];
+  if (canWrite && multiListOn()) blocks.push(LISTS);
   if (stage === 'first') blocks.push(HAND_OFF);
   if (stage === 'second') blocks.push(secondWave(reason, prior));
   blocks.push(String(voice || '').trim() || DEFAULT_VOICE);
@@ -643,8 +650,12 @@ function holdsShort(plan) {
  */
 export function actionText(
   kind,
-  { accounts = [], plan, count, of, bands, label } = {},
+  { accounts = [], plan, count, of, bands, label, list = null } = {},
 ) {
+  // Which list, in multi-list mode, when it is known before the check: named
+  // by the owner, or the one a plan is bound to. Left out with one list, so
+  // the words the check and its eval read are the ones they always were.
+  const theList = list ? `the moderation list "${list}"` : 'the moderation list';
   // How much of the plan a band approval takes, when known: bands are the
   // code's way of saying "all of them", and the check has to be able to see it.
   const share =
@@ -655,17 +666,17 @@ export function actionText(
         : ` (${count} of the ${of} still waiting in it)`;
   switch (kind) {
     case 'add':
-      return `Add ${plural(accounts.length, 'account', 'accounts')} to the moderation list: ${accounts.join(', ')}.`;
+      return `Add ${plural(accounts.length, 'account', 'accounts')} to ${theList}: ${accounts.join(', ')}.`;
     case 'remove':
-      return `Remove ${plural(accounts.length, 'account', 'accounts')} from the moderation list: ${accounts.join(', ')}.`;
+      return `Remove ${plural(accounts.length, 'account', 'accounts')} from ${theList}: ${accounts.join(', ')}.`;
     case 'approve-label':
-      return `Add ${plural(count, 'account', 'accounts')} to the moderation list from ${plan}: every account on it that a triage labelled ${label}.`;
+      return `Add ${plural(count, 'account', 'accounts')} to ${theList} from ${plan}: every account on it that a triage labelled ${label}.`;
     case 'approve-bands':
-      return `Add ${plural(count, 'account', 'accounts')} to the moderation list from ${plan}: every account in band ${bands.join(' or ')}${share}, regardless of what they wrote.`;
+      return `Add ${plural(count, 'account', 'accounts')} to ${theList} from ${plan}: every account in band ${bands.join(' or ')}${share}, regardless of what they wrote.`;
     case 'approve-names':
-      return `Add ${plural(accounts.length, 'account', 'accounts')} to the moderation list from ${plan}: ${accounts.join(', ')}.`;
+      return `Add ${plural(accounts.length, 'account', 'accounts')} to ${theList} from ${plan}: ${accounts.join(', ')}.`;
     case 'undo':
-      return `Take ${plural(count, 'account', 'accounts')} back off the moderation list: everything ${plan} added.`;
+      return `Take ${plural(count, 'account', 'accounts')} back off ${theList}: everything ${plan} added.`;
     default:
       return String(kind);
   }
@@ -930,6 +941,57 @@ export function buildActionTools(ctx, deps = DEPS) {
     return ask(out.why);
   };
 
+  // --- multi-list mode -------------------------------------------------------
+  const multi = multiListOn();
+  /** The `list` argument the write tools take, in multi-list mode only. */
+  const listArg = multi
+    ? {
+        list: z
+          .string()
+          .optional()
+          .describe(
+            'which of the owner\'s lists, by number or name; only when the owner named one',
+          ),
+      }
+    : {};
+
+  /**
+   * The list a write goes to: the only one, or the one the agent passed when
+   * the owner's own words name it, or the one this message names when the
+   * agent passed none. Otherwise `list` is null and the owner is asked. A
+   * list the agent picked by itself is never written to: the choice of list
+   * is the owner's, as the choice of target is.
+   */
+  const ownerList = async (word) => {
+    const lists = await botLists();
+    if (lists.length === 1) return { list: lists[0], lists };
+    const named = (l) => namedIn(ctx.said, l) || namedIn(ctx.ownerText, l);
+    if (word) {
+      const r = resolveList(word, lists);
+      return { list: r.list && named(r.list) ? r.list : null, lists };
+    }
+    const said = lists.filter((l) => namedIn(ctx.said, l));
+    return { list: said.length === 1 ? said[0] : null, lists };
+  };
+
+  /** " list:<rkey>" for a list the owner named among several, else nothing. */
+  const namedToken = (target) =>
+    target?.list && target.lists.length > 1 ? ` list:${target.list.rkey}` : '';
+
+  /**
+   * Not done: the owner is asked which list, in a menu code sends after this
+   * turn's reply (answerAsAgent). Each option runs `commandsFor(list)`.
+   */
+  const askList = (lists, commandsFor, describe, all = null) => {
+    ctx.listMenus?.push({ lists, commandsFor, describe, all });
+    return {
+      ok: false,
+      notDone: true,
+      waitingOnOwner: true,
+      result: `Not done yet: the owner keeps several lists (${lists.map((l) => `${l.n}. ${l.name}`).join(', ')}) and did not say which. They are being asked "Which list?" with a numbered menu, and answering it does this. Say in one line what you were about to do.`,
+    };
+  };
+
   const tools = {
     scan_post: tool({
       description:
@@ -1190,22 +1252,31 @@ export function buildActionTools(ctx, deps = DEPS) {
           .boolean()
           .optional()
           .describe('put it to the owner as a question instead of doing it'),
+        ...listArg,
       }),
-      execute: async ({ accounts, reason, ask_first: askFirst = false }) => {
+      execute: async ({
+        accounts,
+        reason,
+        ask_first: askFirst = false,
+        list: listWord = null,
+      }) => {
         const { actors, error } = commandActors(accounts);
         if (error) return { error };
         const infos = await Promise.all(actors.map((a) => accountInfo(a)));
         const adding = verb === 'list_add';
+        const target = multi ? await ownerList(listWord) : null;
         const stopped = await gate(
           actionText(adding ? 'add' : 'remove', {
             accounts: infos.map((i) => i.phrase),
+            list: target?.list && target.lists.length > 1 ? target.list.name : null,
           }),
           {
             pointedAt: infos.every((i) => i.fromOwner),
             // By DID, so a 👍 up to 30 minutes later writes the account that
             // was described, not whoever holds the handle by then.
             commands: actors.map(
-              (a, n) => `list ${adding ? 'add' : 'remove'} ${infos[n].did || a}`,
+              (a, n) =>
+                `list ${adding ? 'add' : 'remove'} ${infos[n].did || a}${namedToken(target)}`,
             ),
             describe: adding
               ? `add ${someNames(infos.map((i) => i.label))} to the list`
@@ -1214,18 +1285,84 @@ export function buildActionTools(ctx, deps = DEPS) {
           { askFirst },
         );
         if (stopped) return stopped;
+        // Multi-list mode: which list each account goes on or comes off.
+        // null in `where` is the primary list, as with one list.
+        const where = new Map(actors.map((a) => [a, [null]]));
         const results = [];
-        for (const account of actors) {
-          try {
-            const out = await deps.applyCommand(ctx.writeAgent, verb, account, {
-              raw: noteFor(ctx.raw, reason),
-              lookUp: ctx.lookUp,
-              via: 'agent',
+        if (multi && adding && !target.list) {
+          return askList(
+            target.lists,
+            (l) =>
+              actors.map((a, n) => `list add ${infos[n].did || a} list:${l.rkey}`),
+            `add ${someNames(infos.map((i) => i.label))}`,
+          );
+        }
+        if (multi && adding) {
+          for (const a of actors) where.set(a, [target.list.uri]);
+        }
+        if (multi && !adding) {
+          // Named by the owner: that list. Otherwise each account comes off
+          // the one list it is on; anyone on several is asked about.
+          const asking = [];
+          for (const [n, a] of actors.entries()) {
+            const did = infos[n].did;
+            if (target.list || !did) {
+              where.set(a, [target.list?.uri ?? null]);
+              continue;
+            }
+            const pick = await pickRemoval(did, null, {
+              who: infos[n].label,
+              commandsFor: (l) => [`list remove ${did} list:${l.rkey}`],
             });
-            results.push({ account, ok: out.ok, result: out.message });
-            if (out.ok) record(`${adding ? 'added' : 'removed'} ${account}`);
-          } catch (err) {
-            results.push({ account, ok: false, ...failed(err) });
+            if (pick.none) {
+              where.delete(a);
+              results.push({
+                account: a,
+                ok: true,
+                result: `${infos[n].label} is not on any of the owner's lists.`,
+              });
+            } else if (pick.lists) {
+              where.set(a, pick.lists.map((l) => l.uri));
+            } else {
+              where.delete(a);
+              asking.push(did);
+            }
+          }
+          if (asking.length) {
+            const asked = askList(
+              target.lists,
+              (l) => asking.map((d) => `list remove ${d} list:${l.rkey}`),
+              `take ${plural(asking.length, 'account', 'accounts')} off`,
+              target.lists.flatMap((l) =>
+                asking.map((d) => `list remove ${d} list:${l.rkey}`),
+              ),
+            );
+            results.push({ ok: false, result: asked.result, waitingOnOwner: true });
+          }
+        }
+        for (const [account, lists] of where) {
+          for (const list of lists) {
+            try {
+              const out = await deps.applyCommand(
+                ctx.writeAgent,
+                verb,
+                account,
+                {
+                  raw: noteFor(ctx.raw, reason),
+                  lookUp: ctx.lookUp,
+                  via: 'agent',
+                  ...(list ? { list } : {}),
+                },
+              );
+              results.push({ account, ok: out.ok, result: out.message });
+              if (out.ok) {
+                record(
+                  `${adding ? 'added' : 'removed'} ${account}${multi && list ? ` (${listName(list)})` : ''}`,
+                );
+              }
+            } catch (err) {
+              results.push({ account, ok: false, ...failed(err) });
+            }
           }
         }
         return { results };
@@ -1248,6 +1385,7 @@ export function buildActionTools(ctx, deps = DEPS) {
         .boolean()
         .optional()
         .describe('put it to the owner as a question instead of doing it'),
+      ...listArg,
     }),
     execute: async ({
       code,
@@ -1256,6 +1394,7 @@ export function buildActionTools(ctx, deps = DEPS) {
       accounts,
       reason,
       ask_first: askFirst = false,
+      list: listWord = null,
     }) => {
       const given = [bands?.length, label, accounts?.length].filter(Boolean);
       if (given.length !== 1) {
@@ -1299,8 +1438,31 @@ export function buildActionTools(ctx, deps = DEPS) {
               of: label ? undefined : await deps.countDecisions(plan),
             });
         const which = shortCode(plan.id);
+        // Multi-list mode: a plan already bound goes where it went, and a list
+        // named against it is refused; an unbound one goes to the list the
+        // owner named, or the owner is asked after the check.
+        let target = null;
+        if (multi) {
+          const bound = boundList(plan);
+          if (bound) {
+            const lists = await botLists();
+            const asked = listWord ? resolveList(listWord, lists).list : null;
+            if (asked && asked.uri !== bound) {
+              return {
+                error: `Plan ${which} adds to ${listName(bound)}, so it cannot add to ${asked.name}. Nothing was done; tell the owner, who can scan the post again for that list.`,
+              };
+            }
+            target = { list: lists.find((l) => l.uri === bound) || { uri: bound, name: listName(bound) }, lists, bound: true };
+          } else {
+            target = await ownerList(listWord);
+          }
+        }
+        const listed = target?.list && target.lists.length > 1 ? target.list.name : null;
+        const checked = listed
+          ? action.replace('to the moderation list', `to the moderation list "${listed}"`)
+          : action;
         const stopped = await gate(
-          action,
+          checked,
           {
             // inPlan is null when the plan could not be read: not offered.
             pointedAt:
@@ -1316,7 +1478,7 @@ export function buildActionTools(ctx, deps = DEPS) {
                   : label
                     ? `${label} asof=${asOf}`
                     : bands.join(',')
-              }`,
+              }${target?.bound ? '' : namedToken(target)}`,
             ],
             describe: named
               ? `add ${someNames(named.map((i) => i.label))} from plan ${which}`
@@ -1327,6 +1489,21 @@ export function buildActionTools(ctx, deps = DEPS) {
           { askFirst },
         );
         if (stopped) return stopped;
+        if (multi && !target.list) {
+          const command = `approve ${which} ${
+            named
+              ? named.map((i, n) => i.did || actors[n]).join(' ')
+              : label
+                ? `${label} asof=${asOf}`
+                : bands.join(',')
+          }`;
+          return askList(
+            target.lists,
+            (l) => [withListToken(command, l.rkey)],
+            `approve plan ${which}`,
+          );
+        }
+        if (multi && !target.bound) await bindPlan(plan, target.list);
         const why = noteFor(ctx.raw, reason);
         // Past the batch cap the rest goes on by itself, in this conversation.
         const carryOn = Boolean(ctx.convoId);
@@ -1496,9 +1673,10 @@ export function buildActionTools(ctx, deps = DEPS) {
       post: z.string().describe('post URL or at:// URI'),
       hours: z.number().int().min(1).max(168).optional(),
       block_hostile: z.boolean().optional(),
+      ...listArg,
     }),
     execute: async (
-      { post, hours = 24, block_hostile: auto = false },
+      { post, hours = 24, block_hostile: auto = false, list: listWord = null },
       { abortSignal } = {},
     ) => {
       if (!ctx.convoId) {
@@ -1513,6 +1691,7 @@ export function buildActionTools(ctx, deps = DEPS) {
         if (collection !== 'app.bsky.feed.post') {
           return { error: 'I watch posts, and that is not a post.' };
         }
+        let target = null;
         if (auto) {
           // Named by where it came from, never by the model's argument, so the
           // check reads only words code wrote, and just "a post" when code
@@ -1520,15 +1699,27 @@ export function buildActionTools(ctx, deps = DEPS) {
           const place = await postPlace(uri);
           const pointedAt = place === 'attached' || place === 'ownerPost';
           const which = WATCHED[place] ?? 'a post';
+          target = multi ? await ownerList(listWord) : null;
+          const toList =
+            target?.list && target.lists.length > 1
+              ? ` to the moderation list "${target.list.name}"`
+              : '';
           const stopped = await gate(
-            `Watch ${which} for ${hours} hours, and add the accounts triage reads as hostile in its new quotes and replies as they arrive (CONNECTED and NOTABLE held for the owner).`,
+            `Watch ${which} for ${hours} hours, and add the accounts triage reads as hostile in its new quotes and replies${toList} as they arrive (CONNECTED and NOTABLE held for the owner).`,
             {
               pointedAt,
-              commands: [`watch ${uri} ${hours}h auto`],
+              commands: [`watch ${uri} ${hours}h auto${namedToken(target)}`],
               describe: `watch it for ${hours}h and block the hostile ones as they come`,
             },
           );
           if (stopped) return stopped;
+          if (multi && !target.list) {
+            return askList(
+              target.lists,
+              (l) => [`watch ${uri} ${hours}h auto list:${l.rkey}`],
+              `watch it and block the hostile ones`,
+            );
+          }
         }
         const out = await deps.startWatch({
           convoId: ctx.convoId,
@@ -1536,6 +1727,7 @@ export function buildActionTools(ctx, deps = DEPS) {
           hours,
           auto,
           signal: abortSignal,
+          ...(multi && auto ? { list: target.list.uri } : {}),
         });
         record(
           `${out.extended ? 'extended the watch on' : 'started watching'} a post for ${hours}h${auto ? ', blocking the hostile ones' : ''}`,
@@ -1724,6 +1916,9 @@ async function runTurn({
     // Questions put to the owner this turn, each a set of classic commands
     // that a thumbs-up runs. See gate() in buildActionTools.
     pending: [],
+    // Multi-list mode: writes that passed the check but named no list, each
+    // asked as "Which list?" after the reply (askList in buildActionTools).
+    listMenus: [],
   };
 
   // Same layering as the analyst: anything merged in from outside sits UNDER
@@ -1745,6 +1940,7 @@ async function runTurn({
     handoff: ctx.handoff,
     trace,
     pending: ctx.pending,
+    listMenus: ctx.listMenus,
     ...extra,
   });
 
@@ -1999,6 +2195,7 @@ export async function operate({
     plans: [...new Set([...first.plans, ...second.plans])],
     checks: [...first.checks, ...second.checks],
     pending: [...first.pending, ...second.pending],
+    listMenus: [...(first.listMenus || []), ...(second.listMenus || [])],
     steps: (first.steps || 0) + (second.steps || 0),
     usages: [
       ...firstUsages,
