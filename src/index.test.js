@@ -1,6 +1,7 @@
 // index.js runs start() when it is imported, so each test imports a fresh copy
 // with the network-facing modules mocked and fake timers in place. The mocks
-// record what ran, in order, in `h.events`.
+// record what ran, in order, in `h.events`. Each copy also adds its own
+// process listeners, which afterEach removes so they do not pile up.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -141,6 +142,15 @@ let savedEnv;
 
 let dataDir;
 
+const PROCESS_EVENTS = [
+  'SIGINT',
+  'SIGTERM',
+  'uncaughtException',
+  'unhandledRejection',
+];
+/** The process listeners there were before index.js was imported. */
+let listenersBefore = null;
+
 async function boot(extraEnv = {}) {
   savedEnv = { ...process.env };
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-index-'));
@@ -155,6 +165,9 @@ async function boot(extraEnv = {}) {
     },
     extraEnv,
     { DATA_DIR: dataDir },
+  );
+  listenersBefore = Object.fromEntries(
+    PROCESS_EVENTS.map((e) => [e, new Set(process.listeners(e))]),
   );
   await import('./index.js');
   // Let start() run up to its timers.
@@ -196,6 +209,12 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   process.env = savedEnv;
+  for (const e of PROCESS_EVENTS) {
+    for (const fn of process.listeners(e)) {
+      if (listenersBefore && !listenersBefore[e].has(fn)) process.off(e, fn);
+    }
+  }
+  listenersBefore = null;
 });
 
 describe('the first login', () => {
