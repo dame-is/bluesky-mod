@@ -327,29 +327,44 @@ const DEPS = {
 /**
  * A plan's note, as a model reads it back. Either "bulk <kind> from <post>",
  * or the asker's own message followed by the agent's reason in brackets (see
- * noteFor).
+ * noteFor). Each approval appends "; approved: " and its own message and
+ * reason, and a cancel appends " (cancelled)".
  *
- * The part before the reason is not fenced as untrusted, because it is not
- * other people's writing, and a fence leads the agent to tell the owner their
- * own words came from the network. Angle brackets and backticks are replaced
- * so it cannot forge one. The reason IS fenced: a model wrote it in a turn
- * that read strangers' posts, so it can carry their words. Everything after
- * the first marker counts as the reason, so a reason that writes a marker of
- * its own stays inside the fence.
+ * The asker's words and what code wrote around them are not fenced as
+ * untrusted, because they are not other people's writing, and a fence leads
+ * the agent to tell the owner their own words came from the network. Angle
+ * brackets and backticks are replaced so they cannot forge one. Each reason
+ * IS fenced: a model wrote it in a turn that read strangers' posts, so it can
+ * carry their words. A reason holds no brackets (noteFor removes them), so it
+ * ends at the first "]" after its marker. A marker the asker typed and never
+ * closed runs on over the reason after it, which stays inside the fence, and
+ * so does a reason cut short before its "]".
  */
 const AGENT_MARK = ' [agent: ';
+const AGENT_REASON = / \[agent: ([^\]]*)\]?/g;
+/** How much of each piece of a note is read back, and of the whole note. */
+const NOTE_PIECE = 200;
+const NOTE_MAX = 1000;
 const noteText = (note) => {
   const s = String(note || '');
-  const at = s.indexOf(AGENT_MARK);
-  const own = (at === -1 ? s : s.slice(0, at))
-    .replace(/[`<>]/g, "'")
-    .slice(0, 200);
-  if (at === -1) return own;
-  const why = s
-    .slice(at + AGENT_MARK.length)
-    .replace(/\]$/, '')
-    .slice(0, 200);
-  return `${own} ${untrusted('agent-reason', why)}`;
+  const pieces = [];
+  let at = 0;
+  for (const m of s.matchAll(AGENT_REASON)) {
+    pieces.push({ text: s.slice(at, m.index) }, { text: m[1], reason: true });
+    at = m.index + m[0].length;
+  }
+  pieces.push({ text: s.slice(at) });
+  let left = NOTE_MAX;
+  let out = '';
+  for (const { text, reason } of pieces) {
+    const part = text.slice(0, Math.min(NOTE_PIECE, left));
+    left -= part.length;
+    out += reason
+      ? ` ${untrusted('agent-reason', part)}`
+      : part.replace(/[`<>]/g, "'");
+    if (left <= 0) break;
+  }
+  return out;
 };
 
 /** A tool failure the model can read and explain, instead of a dead turn. */
@@ -363,10 +378,12 @@ const failed = (err) => ({
  * The owner's literal message first, because "The owner wrote this sentence on
  * this date" is the part of "why am I on your list" that needs no
  * reconstruction. The model's stated reason rides after it, marked as the
- * model's.
+ * model's, with its brackets made spaces so it cannot end its own marker
+ * early or start another.
  */
 function noteFor(raw, reason) {
   const why = String(reason || '')
+    .replace(/[[\]]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 200);
