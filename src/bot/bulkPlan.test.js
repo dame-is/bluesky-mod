@@ -846,7 +846,7 @@ describe('approving after an undo', () => {
     expect([...repo.values()]).toEqual(['did:plc:q']);
   });
 
-  it('says when an undo is why a plan has nothing left to add', async () => {
+  it('says when an account it added coming off is why a plan has nothing left to add', async () => {
     db.decision = [
       added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', {
         engaged: ['like'],
@@ -855,12 +855,37 @@ describe('approving after an undo', () => {
     ];
 
     const bands = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
-    expect(bands.message).toMatch(/^Nothing left to add for those bands\./);
-    expect(bands.message).toMatch(/1 was taken off by an earlier undo/);
+    expect(bands.message).toBe(
+      'Nothing left to add for those bands. 1 was added by this plan and has since come off the list; scan the post again to add them back.',
+    );
 
     const named = await applyPlanToActors(bot(), db.plan[0], ['did:plc:a']);
-    expect(named.message).toMatch(/Taken off by an earlier undo: did:plc:a\./);
+    expect(named.message).toBe(
+      'Added 0 by name. This plan added them and they have since come off the list: did:plc:a. Block them by name to add them back.',
+    );
     expect(repo.size).toBe(0);
+  });
+
+  it('never calls an unblock an undo', async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', { engaged: ['like'] }),
+      added(PLAN_A, 'did:plc:h', '2026-10-01T10:00:00Z', {
+        engaged: ['like'],
+        triage: 'hostile',
+      }),
+    ];
+    // What an unblock does to the record once the listitems are gone.
+    const { closeAdds } = await import('./closeAdds.js');
+    await closeAdds(['did:plc:a', 'did:plc:h'], 'unblock @a.test');
+
+    const named = await applyPlanToActors(bot(), db.plan[0], ['did:plc:a']);
+    const bands = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    const label = await applyPlanToTriage(bot(), db.plan[0], 'hostile');
+
+    for (const out of [named, bands, label]) {
+      expect(out.message).not.toMatch(/undo/i);
+      expect(out.message).toMatch(/since come off the list/);
+    }
   });
 });
 

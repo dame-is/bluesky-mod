@@ -519,13 +519,13 @@ const liveCount = (plan) =>
   countDecisions(plan, { state: 'live' }).catch(() => null);
 
 /**
- * Why an approval finds nothing to add when an undo took this plan's adds
- * back off. An undone row stays done for its own plan, so a fresh scan is the
- * way back.
+ * Why an approval finds nothing to add when accounts this plan added have
+ * since come off the list, by an undo, an unblock or a removal the bot found.
+ * Such a row stays done for its own plan, so a fresh scan is the way back.
  */
 function undoneNote(n) {
   if (!n) return '';
-  return ` ${n === 1 ? '1 was' : `${n} were`} taken off by an earlier undo; scan the post again to add them back.`;
+  return ` ${n === 1 ? '1 was' : `${n} were`} added by this plan and ${n === 1 ? 'has' : 'have'} since come off the list; scan the post again to add them back.`;
 }
 
 /**
@@ -1084,7 +1084,8 @@ export async function applyPlanToActors(
       unknown.push(a);
       continue;
     }
-    // An undo is final for its own plan, the same as for a band approval.
+    // An add that has since come off the list stays done for its own plan,
+    // the same as for a band approval.
     if (row.undone_at && !resolved.has(did)) undone.push(a);
     resolved.set(did, row);
   }
@@ -1117,7 +1118,7 @@ export async function applyPlanToActors(
   if (unknown.length) parts.push(`Not in this plan: ${unknown.join(', ')}.`);
   if (undone.length) {
     parts.push(
-      `Taken off by an earlier undo: ${undone.join(', ')}. Block them by name to add them back.`,
+      `This plan added them and they have since come off the list: ${undone.join(', ')}. Block them by name to add them back.`,
     );
   }
   return {
