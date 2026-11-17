@@ -120,6 +120,71 @@ describe('the real SDK accepts how we call it', () => {
     ]);
   });
 
+  it('says when the step cap stopped a turn before it read its tool results', async () => {
+    const callsATool = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage,
+        content: [
+          { type: 'text', text: 'Looking them up.' },
+          {
+            type: 'tool-call',
+            toolCallId: 'c1',
+            toolName: 'reference_status',
+            input: '{}',
+          },
+        ],
+        warnings: [],
+      }),
+    });
+    const cut = await answer({
+      generate: generateText,
+      model: callsATool,
+      message: 'x',
+      io,
+      maxSteps: 1,
+    });
+    expect(cut.cutOff).toBe(true);
+    const whole = await answer({
+      generate: generateText,
+      model,
+      message: 'x',
+      io,
+    });
+    expect(whole.cutOff).toBe(false);
+  });
+
+  it('carries what the calls that came back spent on a turn that fails', async () => {
+    let calls = 0;
+    const failsLater = new MockLanguageModelV4({
+      doGenerate: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error('provider went away');
+        return {
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: { inputTokens: { total: 40 }, outputTokens: { total: 2 } },
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'c1',
+              toolName: 'reference_status',
+              input: '{}',
+            },
+          ],
+          warnings: [],
+        };
+      },
+    });
+    const err = await answer({
+      generate: generateText,
+      model: failsLater,
+      message: 'x',
+      io,
+    }).catch((e) => e);
+    expect(String(err?.message)).toMatch(/provider went away/);
+    expect(err.usage).toEqual({ inputTokens: 40, outputTokens: 2 });
+  });
+
   it("keeps the marker table's links out of what the model reads", async () => {
     // The links are built from authors' handles. The model cites markers, and
     // code turns them into links from the full result.

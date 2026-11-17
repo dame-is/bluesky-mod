@@ -260,29 +260,37 @@ async function answerPublicly(t) {
 
   const activeModel = botConfig?.model || model;
   const limits = botConfig?.limits || {};
-  const reply = await answer({
-    generate: generateText,
-    message: composeMessage(t),
-    io,
-    history,
-    model: activeModel,
-    surface: 'post',
-    extraTools,
-    voice: botConfig?.style,
-    guidance: botConfig?.guidance,
-    maxSteps: limits.maxSteps,
-    reviewRows: limits.reviewRows,
-  });
-
-  // Recorded first: the tokens are spent whether or not anything is posted.
-  await upsert('llm_usage', [
-    {
-      kind: 'post',
+  // Recorded first: the tokens are spent whether or not anything is posted,
+  // and a turn that fails carries what its finished calls spent.
+  const recordUsage = (usage) =>
+    upsert('llm_usage', [
+      {
+        kind: 'post',
+        model: activeModel,
+        input_tokens: usage?.inputTokens ?? null,
+        output_tokens: usage?.outputTokens ?? null,
+      },
+    ]).catch((err) => logger.warn('Could not record llm usage', { err }));
+  let reply;
+  try {
+    reply = await answer({
+      generate: generateText,
+      message: composeMessage(t),
+      io,
+      history,
       model: activeModel,
-      input_tokens: reply.usage?.inputTokens ?? null,
-      output_tokens: reply.usage?.outputTokens ?? null,
-    },
-  ]).catch((err) => logger.warn('Could not record llm usage', { err }));
+      surface: 'post',
+      extraTools,
+      voice: botConfig?.style,
+      guidance: botConfig?.guidance,
+      maxSteps: limits.maxSteps,
+      reviewRows: limits.reviewRows,
+    });
+  } catch (err) {
+    if (err?.usage) await recordUsage(err.usage);
+    throw err;
+  }
+  await recordUsage(reply.usage);
 
   // A turn with no text (it ended on a tool call at the step cap, or the
   // provider sent nothing back) posts nothing. A placeholder under someone

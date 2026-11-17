@@ -480,26 +480,47 @@ export async function answer({
     ...cacheHint(model),
   };
 
-  const result = await generate({
-    model,
-    instructions,
-    // Every model call gets a deadline. Jobs run through one queue and the DM
-    // poll skips while anything is in flight, so one hung request would
-    // otherwise stop DMs, public replies and the drift run, with nothing in
-    // the log.
-    abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
-    // The gate's tools go last so nothing merged in can shadow them: a remote
-    // `preflight_post` must never replace the one whose output is
-    // reproducible.
-    tools: { ...extraTools, ...buildTools(io, { reviewRows }) },
-    stopWhen: stepCountIs(maxSteps),
-    messages: [...history, { role: 'user', content: message }],
-  });
+  // What the model calls that came back have spent, counted as each one ends,
+  // so a turn that fails later still reports it (as the error's `usage`).
+  const spent = { inputTokens: 0, outputTokens: 0 };
+  let result;
+  try {
+    result = await generate({
+      model,
+      instructions,
+      // Every model call gets a deadline. Jobs run through one queue and the
+      // DM poll skips while anything is in flight, so one hung request would
+      // otherwise stop DMs, public replies and the drift run, with nothing in
+      // the log.
+      abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+      onLanguageModelCallEnd: (call) => {
+        spent.inputTokens += call?.usage?.inputTokens ?? 0;
+        spent.outputTokens += call?.usage?.outputTokens ?? 0;
+      },
+      // The gate's tools go last so nothing merged in can shadow them: a
+      // remote `preflight_post` must never replace the one whose output is
+      // reproducible.
+      tools: { ...extraTools, ...buildTools(io, { reviewRows }) },
+      stopWhen: stepCountIs(maxSteps),
+      messages: [...history, { role: 'user', content: message }],
+    });
+  } catch (err) {
+    const any = spent.inputTokens || spent.outputTokens;
+    if (any && err && typeof err === 'object') err.usage = { ...spent };
+    throw err;
+  }
 
+  // A last step that still called tools is one the step cap stopped before
+  // the model read what those calls returned, so its answer may be missing
+  // what they found.
+  const cutOff = (result.steps?.at(-1)?.toolCalls?.length ?? 0) > 0;
   return {
     text: (result.text || '').trim(),
     steps: result.steps?.length ?? 0,
-    usage: result.usage ?? null,
+    usage:
+      result.usage ??
+      (spent.inputTokens || spent.outputTokens ? { ...spent } : null),
+    cutOff,
     // Read from the tool loop rather than the prose, so a follow-up menu
     // describes the digest that ran. The model may have chosen three days
     // when the owner said "lately".

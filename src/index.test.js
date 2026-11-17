@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   onEvent: null,
   trigger: null,
   answerText: '',
+  answerError: null,
   posted: [],
 }));
 
@@ -96,6 +97,7 @@ vi.mock('./lib/agent.js', async (importOriginal) => ({
   ...(await importOriginal()),
   answer: async () => {
     h.events.push('answer');
+    if (h.answerError) throw h.answerError;
     return { text: h.answerText, steps: 12, usage: null, pulses: [] };
   },
 }));
@@ -151,6 +153,7 @@ beforeEach(() => {
     onEvent: null,
     trigger: null,
     answerText: '',
+    answerError: null,
     posted: [],
   });
   vi.resetModules();
@@ -241,6 +244,24 @@ describe('a public mention', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(h.events).toContain('answer');
     expect(h.posted).toEqual(['A stranger: nobody you follow follows them.']);
+  });
+
+  it('records what a failed answer spent before it failed', async () => {
+    await boot();
+    h.trigger = mention();
+    h.answerError = Object.assign(new Error('provider went away'), {
+      usage: { inputTokens: 120, outputTokens: 3 },
+    });
+    h.onEvent({ time_us: 1 });
+    await vi.advanceTimersByTimeAsync(10);
+    const { select } = await import('./bot/db.js');
+    const rows = await select('llm_usage', {
+      select: 'kind,input_tokens,output_tokens',
+    });
+    expect(rows).toEqual([
+      { kind: 'post', input_tokens: 120, output_tokens: 3 },
+    ]);
+    expect(h.posted).toEqual([]);
   });
 
   it('posts nothing when the analyst produced no text', async () => {

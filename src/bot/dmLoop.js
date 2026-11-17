@@ -2172,6 +2172,17 @@ export async function runDmPass({
             ? 'That took too long and I stopped.'
             : `That failed: ${why.slice(0, 200)}`,
         ).catch(() => {});
+        // What the model calls that came back spent, before it failed.
+        if (err?.usage) {
+          await upsert('llm_usage', [
+            {
+              kind: 'dm',
+              model: activeModel,
+              input_tokens: err.usage.inputTokens ?? null,
+              output_tokens: err.usage.outputTokens ?? null,
+            },
+          ]).catch(() => {});
+        }
         log('The analyst failed', { convoId: entry.convoId, err: why });
         outcome = 'failed';
         turns.push({ convoId: entry.convoId, analyst: 'failed' });
@@ -2179,6 +2190,10 @@ export async function runDmPass({
       }
 
       let text = reply.text || 'No answer produced.';
+      if (reply.cutOff) {
+        text +=
+          '\n\n(I ran out of steps before finishing, so this may be incomplete.)';
+      }
       // The analyst quotes commands in backticks. Lift them into a menu so the
       // sender can answer "2" instead of retyping one. Parsed, not copied: see
       // offersFrom for what that does and does not guarantee.

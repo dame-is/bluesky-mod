@@ -264,6 +264,60 @@ describe('a DM pass in agent mode', () => {
     expect(tools).toHaveProperty('look_up_account');
   });
 
+  it('says when the analyst ran out of steps before it read what it looked up', async () => {
+    const { chat, sent } = chatWith('what is going on');
+    const generate = vi.fn(async () => ({
+      text: 'Looking them up.',
+      steps: [{ toolCalls: [{ toolName: 'look_up_account' }] }],
+    }));
+    await runDmPass({
+      chat,
+      writeAgent: { session: { did: BOT } },
+      getIo: async () => io,
+      botDid: BOT,
+      roster,
+      generate,
+      mode: 'classic',
+      model: 'test/model',
+    });
+    // After the ack: the chat here takes no reactions.
+    expect(sent.at(-1)).toBe(
+      'Looking them up.\n\n(I ran out of steps before finishing, so this may be incomplete.)',
+    );
+  });
+
+  it('records what a failed analyst turn spent before it failed', async () => {
+    const { chat, sent } = chatWith('what is going on');
+    const generate = vi.fn(async (opts) => {
+      opts.onLanguageModelCallEnd({
+        usage: { inputTokens: 30, outputTokens: 2 },
+      });
+      throw new Error('gateway 502');
+    });
+    await runDmPass({
+      chat,
+      writeAgent: { session: { did: BOT } },
+      getIo: async () => io,
+      botDid: BOT,
+      roster,
+      generate,
+      mode: 'classic',
+      model: 'test/model',
+    });
+    expect(sent.at(-1)).toBe('That failed: gateway 502');
+    const usage = db.writes.filter((w) => w.table === 'llm_usage');
+    expect(usage.map((w) => w.rows)).toEqual([
+      [
+        {
+          kind: 'dm',
+          model: 'test/model',
+          input_tokens: 30,
+          output_tokens: 2,
+        },
+      ],
+    ]);
+  });
+
   it('never answers its own messages, even with its DID on the roster', async () => {
     const { chat, sent } = chatWith('hello');
     const generate = vi.fn(async () => ({ text: 'ok', steps: [] }));
