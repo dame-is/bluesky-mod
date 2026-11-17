@@ -1237,6 +1237,11 @@ export const bareEmoji = (text) =>
   String(text ?? '').replace(/[\u{1F3FB}-\u{1F3FF}\u{FE0F}]/gu, '');
 
 export const isYes = (text) => YES.test(bareEmoji(text).trim());
+
+/** A yes that says nothing but yes: no verb, no target, no "both". */
+const BARE_YES =
+  /^(y|ya|yes|yep|yeah|yup|ok|okay|k|sure|confirm|confirmed|go ahead|yes please|👍|✅|👌)[\s.!]*$/iu;
+export const isBareYes = (text) => BARE_YES.test(bareEmoji(text).trim());
 export const isNo = (text) => NO.test(bareEmoji(text).trim());
 
 /**

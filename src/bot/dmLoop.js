@@ -53,6 +53,7 @@ import {
   parseMemoryCommand,
   parseWatchCommand,
   isYes,
+  isBareYes,
   isNo,
   bareEmoji,
   isWrite,
@@ -1589,6 +1590,10 @@ async function sendRun(send, convoId, out, { log }) {
   }
 }
 
+/** What a yes gets when no question is open. */
+const NOTHING_TO_CONFIRM =
+  'Nothing is waiting for a yes. A question lapses after 30 minutes, or once you send something else, so say what you want done.';
+
 /** What classic mode says to a memory command. */
 const NOTES_NEED_AGENT_MODE =
   'Notes only work in agent mode (MOD_DM_MODE=agent). In classic mode nothing reads them, so I have not saved or changed anything.';
@@ -2341,6 +2346,21 @@ export async function runDmPass({
         if (isNo(said)) {
           await send('Okay, nothing changed.');
           turns.push({ convoId: entry.convoId, pending: 'declined' });
+          continue;
+        }
+      }
+      // A bare yes or no with nothing open is answered here, never by a
+      // model: the question it meant has lapsed or was never stored, and a
+      // model would take the bot's previous message as what was agreed to.
+      if (!pending && canWrite && !ownTarget) {
+        if (isBareYes(said)) {
+          await send(NOTHING_TO_CONFIRM);
+          turns.push({ convoId: entry.convoId, pending: 'none' });
+          continue;
+        }
+        if (isNo(said)) {
+          await send('Okay, nothing changed.');
+          turns.push({ convoId: entry.convoId, pending: 'none' });
           continue;
         }
       }

@@ -1220,3 +1220,41 @@ describe('notes and who reads them', () => {
     expect(sys).toContain('never block people who only liked');
   });
 });
+
+describe('a yes with nothing open', () => {
+  for (const mode of ['agent', 'classic']) {
+    it(`${mode}: is answered in code, and no model reads it`, async () => {
+      const generate = vi.fn(async () => ({ text: 'model said ok', steps: [] }));
+      const { chat, sent } = chatWith([msg('m1', 'yes')]);
+      await pass(chat, { mode, generate });
+      expect(generate).not.toHaveBeenCalled();
+      expect(sent.at(-1).text).toMatch(/^Nothing is waiting for a yes\./);
+    });
+  }
+
+  it('is answered in code when the question has lapsed', async () => {
+    const generate = vi.fn(async () => ({ text: 'model said ok', steps: [] }));
+    await db.upsert('dm_choice', [
+      {
+        convo_id: 'c1',
+        pending: {
+          commands: ['list add did:plc:victim'],
+          describe: 'add @victim.example',
+          message_ids: ['x'],
+          created_at: new Date(Date.now() - 45 * 60_000).toISOString(),
+        },
+      },
+    ]);
+    const { chat, sent } = chatWith([msg('m1', 'yes')]);
+    await pass(chat, { mode: 'agent', generate });
+    expect(generate).not.toHaveBeenCalled();
+    expect(sent.at(-1).text).toMatch(/^Nothing is waiting for a yes\./);
+  });
+
+  it('leaves "block them" to the agent, since it says what to do', async () => {
+    const generate = vi.fn(async () => ({ text: 'model said ok', steps: [] }));
+    const { chat } = chatWith([msg('m1', 'block them')]);
+    await pass(chat, { mode: 'agent', generate });
+    expect(generate).toHaveBeenCalled();
+  });
+});
