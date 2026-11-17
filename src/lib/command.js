@@ -191,7 +191,10 @@ function oneFromFacets(links, mentions) {
 
 /** A handle, DID, or profile URL, as written by the owner, not as inferred. */
 export function parseActor(token) {
-  const raw = String(token ?? '').trim();
+  // "@did:..." is how the bot prints an account it has no handle for.
+  const raw = String(token ?? '')
+    .trim()
+    .replace(/^@(?=did:)/, '');
   if (!raw) return null;
   if (DID.test(raw)) return raw;
   const url = raw.match(PROFILE);
@@ -355,13 +358,22 @@ export function parseCommand(
   }
 
   // `history` names an account or nothing at all, so it never needs a code.
+  // A name it cannot read is asked back. History rows do not name accounts,
+  // so the whole record under that name would read as theirs.
   if (verb.action === 'history') {
-    const tokens = rest.split(/\s+/).filter(Boolean);
+    const tokens = rest.split(/\s+/).filter((t) => bare(t));
+    if (!tokens.length) {
+      return { action: 'history', actor: null, needsTarget: false, raw };
+    }
     const actor =
-      tokens.length === 1
-        ? (typedActor(tokens[0]) ?? oneFromFacets(links, mentions))
-        : null;
-    return { action: 'history', actor, needsTarget: false, raw };
+      (tokens.length === 1 ? typedActor(tokens[0]) : null) ??
+      oneFromFacets(links, mentions);
+    const refusal = actor
+      ? null
+      : `I could not read "${rest.slice(0, 40)}" as an account. ` +
+        'Send "history" with a full handle, a DID or a profile link, ' +
+        'or "history" alone for everything.';
+    return { action: 'history', actor, refusal, needsTarget: !actor, raw };
   }
 
   // Bare `undo` means the most recent addition still on the list, one block or

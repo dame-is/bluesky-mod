@@ -32,6 +32,16 @@ describe('parseActor', () => {
     expect(parseActor('did:plc:abc123')).toBe('did:plc:abc123');
   });
 
+  it('takes a DID after an @, as a review row prints one with no handle', () => {
+    expect(parseActor('@did:plc:abc123')).toBe('did:plc:abc123');
+    expect(parseCommand('block @did:plc:abc123').actor).toBe('did:plc:abc123');
+    expect(parseCommand('approve 1c2d3e4f @did:plc:abc123')).toMatchObject({
+      actors: ['did:plc:abc123'],
+      refusal: null,
+      needsTarget: false,
+    });
+  });
+
   it('takes a profile link from any client', () => {
     expect(parseActor('https://bsky.app/profile/alice.example.com')).toBe('alice.example.com');
     expect(parseActor('https://deer.social/profile/did:plc:xyz/post/3a')).toBe(
@@ -629,6 +639,35 @@ describe('undo and history', () => {
     expect(parseCommand('history @a.bsky.social')).toMatchObject({
       action: 'history',
       actor: 'a.bsky.social',
+    });
+    expect(parseCommand('history @did:plc:abc123').actor).toBe(
+      'did:plc:abc123',
+    );
+    for (const text of ['history?', 'history.']) {
+      expect(parseCommand(text), text).toMatchObject({
+        actor: null,
+        needsTarget: false,
+      });
+    }
+  });
+
+  it('asks back a name it cannot read rather than showing everyone', () => {
+    // History rows do not name accounts, so the whole record under a name
+    // reads as that account's.
+    for (const text of ['history alice', 'history of @a.bsky.social']) {
+      const out = parseCommand(text);
+      expect(out, text).toMatchObject({ actor: null, needsTarget: true });
+      expect(out.refusal).toMatch(/^I could not read "/);
+    }
+    expect(parseCommand('history alice').refusal).toContain('"alice"');
+    // A mention facet names the account whatever words are around it.
+    expect(
+      parseCommand('history of @a.bsky.social', {
+        mentions: ['did:plc:aaaaaaaaaaaaaaaaaaaaaaaa'],
+      }),
+    ).toMatchObject({
+      actor: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      needsTarget: false,
     });
   });
 
