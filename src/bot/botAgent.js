@@ -14,7 +14,7 @@
 // database file can act as the moderator account.
 
 import { AtpAgent } from '@atproto/api';
-import { resolvePds } from '../lib/atproto.js';
+import { fetchWithTimeout, resolvePds } from '../lib/atproto.js';
 import { select, upsert } from './db.js';
 
 /**
@@ -28,6 +28,14 @@ const FALLBACK_SERVICE = 'https://bsky.social';
 
 /** DMs are served by the chat service, not the PDS or the AppView. */
 const CHAT_SERVICE_DID = 'did:web:api.bsky.chat';
+
+/**
+ * The ceiling on any one request the agent makes, chat included, so a server
+ * that stops answering cannot hold the job queue. Generous on purpose: a list
+ * write the PDS has taken but not yet answered would otherwise be reported
+ * as failed, though sending it again is safe.
+ */
+const AGENT_REQUEST_MS = 60_000;
 
 /**
  * The chat-service view of an agent that is already logged in.
@@ -133,6 +141,7 @@ export async function botAgent({ onExpired = null } = {}) {
   // over here before the account check below refuses it.
   const agent = new AtpAgent({
     service,
+    fetch: (input, init) => fetchWithTimeout(input, init, AGENT_REQUEST_MS),
     persistSession: (event, session) => {
       if (event === 'expired') {
         onExpired?.();

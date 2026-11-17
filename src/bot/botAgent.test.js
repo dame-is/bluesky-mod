@@ -17,7 +17,8 @@ let refreshFails = null;
 let resolvedPds = 'https://pds.example.com';
 let pdsThrows = false;
 
-vi.mock('../lib/atproto.js', () => ({
+vi.mock('../lib/atproto.js', async (importOriginal) => ({
+  ...(await importOriginal()),
   resolvePds: vi.fn(async () => {
     if (pdsThrows) throw new Error('plc unreachable');
     return resolvedPds;
@@ -100,6 +101,28 @@ describe('botAgent', () => {
     const { agent, via } = await botAgent();
     expect(via).toBe('login');
     expect(agent.session.did).toBe(BOT);
+  });
+
+  it('gives every request the agent makes a deadline', async () => {
+    // Chat and repo calls go through this fetch. Without a signal, a server
+    // that stops answering holds the one job queue.
+    const seen = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init) => {
+        seen.push(init?.signal);
+        return new Response('{}');
+      }),
+    );
+    try {
+      const { agent } = await botAgent();
+      await agent.opts.fetch('https://pds.example/xrpc/x', {});
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeInstanceOf(AbortSignal);
+      expect(seen[0].aborted).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('resumes a stored session instead of spending a createSession', async () => {
