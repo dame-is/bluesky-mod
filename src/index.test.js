@@ -119,9 +119,10 @@ const PROCESS_EVENTS = [
 /** The process listeners there were before index.js was imported. */
 let listenersBefore = null;
 
-async function boot(extraEnv = {}) {
+async function boot(extraEnv = {}, { beforeImport = () => {} } = {}) {
   savedEnv = { ...process.env };
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-index-'));
+  beforeImport(dataDir);
   Object.assign(
     process.env,
     ENV,
@@ -239,6 +240,22 @@ describe('DMs while the snapshot builds', () => {
     await vi.advanceTimersByTimeAsync(h.stepsToFinish * 26_000);
     expect(h.steps).toBe(h.stepsToFinish);
     expect(h.events).not.toContain('dm');
+  });
+});
+
+describe('a second copy', () => {
+  it('waits while another copy holds the data directory, then starts', async () => {
+    await boot({}, {
+      beforeImport: (dir) =>
+        fs.writeFileSync(
+          path.join(dir, 'bot.lease'),
+          JSON.stringify({ host: 'elsewhere', pid: 5, heartbeatAt: Date.now() }),
+        ),
+    });
+    expect(h.events).not.toContain('login');
+    // The other copy stopped beating; its lease goes stale.
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(h.events).toContain('login');
   });
 });
 

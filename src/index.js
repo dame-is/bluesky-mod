@@ -17,6 +17,7 @@
 // memory, and this is meant to run on a small machine. Serialising also means
 // a burst of DMs cannot open many harvests against the AppView at once.
 
+import fs from 'node:fs';
 import {
   createAtmosphereClient,
   loadAtmosphereTools,
@@ -40,6 +41,7 @@ import { logger } from './logger.js';
 import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { isAuthError, createReconnector } from './session.js';
+import { acquireLease, HEARTBEAT_MS } from './lease.js';
 
 const model = MODELS.agent;
 
@@ -391,6 +393,29 @@ function logStats() {
 // --- start -------------------------------------------------------------------
 let statsTimer = null;
 let stream = null;
+let lease = null;
+
+/**
+ * Wait until no other copy holds this data directory (lease.js). Waiting
+ * rather than exiting, so a restart policy does not turn a second copy into a
+ * loop of failed starts.
+ */
+async function holdLease() {
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  for (;;) {
+    const got = acquireLease({ dir: config.dataDir });
+    if (got.ok) return got;
+    logger.error(
+      'Another copy of the bot is running on this data directory; waiting for it to stop',
+      {
+        host: got.holder?.host,
+        pid: got.holder?.pid,
+        lastSeenS: Math.round((Date.now() - got.holder?.heartbeatAt) / 1000),
+      },
+    );
+    await new Promise((r) => setTimeout(r, HEARTBEAT_MS));
+  }
+}
 let shuttingDown = false;
 
 async function start() {
@@ -398,6 +423,7 @@ async function start() {
   // a readable list in the log instead of an ESM stack trace.
   assertConfig();
   installProvider();
+  lease = await holdLease();
   openDb();
   loadState();
 
@@ -523,6 +549,7 @@ async function shutdown(signal) {
   // systemd 90s.
   await Promise.race([chain, new Promise((r) => setTimeout(r, 45_000))]);
   closeDb();
+  lease?.release();
   logStats();
   logger.info('Shutdown complete');
   process.exit(0);
