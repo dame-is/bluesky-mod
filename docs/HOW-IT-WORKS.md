@@ -185,11 +185,11 @@ This is still a bulk sweep, with a model's reading in place of the follow graph.
 
 Mention the bot in a post, or reply to or quote one of its posts, and it answers **in public, in that thread**. That reply is readable by the accounts being described and by everyone else there. The prompt asks for counts by band rather than lists of handles, which is a prompt and not a guarantee. Replies carry no mention facets, so nobody named is notified. `PUBLIC_REPLIES=false` turns this path off and leaves DMs alone.
 
-The Jetstream subscription is filtered to the roster's own posts, so the bot never reads the whole firehose. An answered post is recorded before the model is called, so a reconnect that replays the stream can't produce a second public reply.
+The Jetstream subscription is filtered to the roster's own posts, so the bot never reads the whole firehose. An answered post is recorded before the model is called, so a reconnect that replays the stream can't produce a second public reply. If that record can't be saved, the mention goes unanswered.
 
 ## The weekly re-score
 
-Every `DRIFT_EVERY_HOURS` (a week by default) the bot re-scores everyone on the list and DMs you only what moved: anyone who was a stranger and isn't now, and accounts that are gone. Most weeks it says nothing. A brief that restates thousands of unchanged rows is one that stops being read.
+Every `DRIFT_EVERY_HOURS` (a week by default) the bot re-scores everyone on the list and DMs you only what moved: anyone who was a stranger and isn't now, anyone on it who has become PROTECTED, and accounts that have gone since the last run. Most weeks it says nothing. A brief that restates thousands of unchanged rows is one that stops being read.
 
 ## Steering it
 
@@ -217,11 +217,11 @@ Logging in is capped separately (`createSession`), which is why the bot stores a
 
 ## Why Constellation and not the AppView
 
-Collecting who engaged with a post reads [Constellation](https://constellation.microcosm.blue), a public backlink index, rather than `getLikes`/`getRepostedBy`. The AppView answers as a viewer: it hides accounts you have already blocked, so using it to decide who to block hides the people you already acted on and changes its answer as you work through a list. Constellation indexes the firehose and answers the same for everyone. It also finds engagement from lexicons outside `app.bsky`.
+Collecting who engaged with a post reads [Constellation](https://constellation.microcosm.blue), a public backlink index, rather than `getLikes`/`getRepostedBy`. The AppView answers as a viewer: it hides accounts you have already blocked, so using it to decide who to block hides the people you already acted on and changes its answer as you work through a list. Constellation indexes the firehose and answers the same for everyone. It also finds engagement from lexicons outside `app.bsky`. Such engagement is counted as "other": a collection's name is chosen by whoever wrote the record, so it is treated as attacker-controlled and never shown.
 
 ## What else it can't do
 
 - **Your personalised For You feed.** It personalises off the identity of whoever asks, and the bot is not you. The bot says so rather than substituting something else.
-- **Read everything on a viral post.** Collection stops at 60 pages (6,000 records) per source. On a big post that usually cuts the tail of the likes and leaves replies and quotes whole, and the result says when it cut.
+- **Read everything on a viral post.** Collection stops at 60 pages (6,000 records) per source. On a big post that usually cuts the tail of the likes and leaves replies and quotes whole, and the result says when it cut. A scan reads at most 10 sources outside Bluesky's own likes, reposts, replies, quotes and reply settings, and says when it skipped any.
 - **Auto-block.** Nothing is added without you: a typed command, an approval, a 👍, a watch you told to block the hostile ones, or agent mode acting on your message under the write check.
 - **More than one list.** Commands act on `MOD_LIST_URI` only.
