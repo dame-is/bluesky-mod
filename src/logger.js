@@ -1,14 +1,16 @@
-// A small leveled logger with no dependencies.
+// A small leveled logger with no package dependencies.
 //
 // Per-event lines stay at debug, so the default info level is quiet enough to
 // leave running on a small disk.
+
+import { readFlag } from './flags.js';
 
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3, trace: 4 };
 
 const asked = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const level = Object.hasOwn(LEVELS, asked) ? asked : 'info';
 const threshold = LEVELS[level];
-const asJson = String(process.env.LOG_JSON || 'false').toLowerCase() === 'true';
+const asJson = readFlag('LOG_JSON', false);
 
 /**
  * A field value JSON can hold. An Error becomes its message, since

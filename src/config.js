@@ -7,6 +7,7 @@
 import { OWNER_DID } from './constants.js';
 import { normaliseMode } from './bot/dmLoop.js';
 import { rosterFromEnv, parseDids } from './lib/senders.js';
+import { readFlag, badFlags } from './flags.js';
 import { modelProblems, modelsEnabled, PROVIDER } from './models.js';
 
 /** Number settings that did not parse, reported by assertConfig. */
@@ -55,8 +56,6 @@ function wanted({ positive, min, max, whole }) {
 const delay = (name, fallback, opts = {}) =>
   num(name, fallback, { ...opts, max: MAX_TIMER_MS });
 
-const flag = (v, d) =>
-  v == null || v === '' ? d : String(v).trim().toLowerCase() === 'true';
 
 export const config = {
   /** The account the bot works for. Always answered, always may write. */
@@ -128,7 +127,7 @@ export const config = {
    * true = classify and log, never post or DM. The DM loop and the timed
    * jobs that write or send stay off (index.js).
    */
-  dryRun: flag(process.env.DRY_RUN, false),
+  dryRun: readFlag('DRY_RUN', false),
 
   /**
    * The Atmosphere MCP server, which gives the analyst the rest of the
@@ -136,7 +135,7 @@ export const config = {
    * atproto docs. Off leaves the bot's own scoring tools, which still answer
    * every scoring question.
    */
-  atmosphere: flag(process.env.ATMOSPHERE, true) && modelsEnabled(),
+  atmosphere: readFlag('ATMOSPHERE', true) && modelsEnabled(),
   atmosphereUrl: process.env.ATMOSPHERE_URL || 'https://aturi.to/api/mcp',
   /** How long the tool list is reused before it is fetched again. */
   atmosphereTtlMs: num('ATMOSPHERE_TTL_MS', 6 * 60 * 60_000, {
@@ -169,12 +168,11 @@ export const config = {
     : 0,
   /**
    * How often the owner's own recent posts are checked for a sudden run of
-   * quotes and replies, which gets a DM offering to watch it. MOD_ALERTS=off
+   * quotes and replies, which gets a DM offering to watch it. MOD_ALERTS=false
    * stops it; MOD_ALERT_THRESHOLD (default 15 in an hour) sets what counts.
    */
   alertEveryMs:
-    String(process.env.MOD_ALERTS || 'on').toLowerCase() === 'off' ||
-    !modelsEnabled()
+    !readFlag('MOD_ALERTS', true) || !modelsEnabled()
       ? 0
       : delay('MOD_ALERT_EVERY_MS', 10 * 60_000, { min: 60_000 }),
 
@@ -198,6 +196,8 @@ delay('MOD_OPERATOR_TIMEOUT_MS', null, { positive: true, whole: true });
 delay('MOD_OPERATOR_CALL_TIMEOUT_MS', null, { whole: true });
 delay('MOD_ESCALATION_CALL_TIMEOUT_MS', null, { whole: true });
 delay('MOD_MODEL_TIMEOUT_MS', null, { positive: true, whole: true });
+// logger.js reads LOG_JSON itself, for the same reason.
+readFlag('LOG_JSON', false);
 
 const DID = /^did:(plc|web):[a-zA-Z0-9._:%-]+$/;
 const LIST = /^at:\/\/(did:[^/]+)\/app\.bsky\.graph\.list\/[^/]+$/;
@@ -243,6 +243,10 @@ export function assertConfig(env = process.env) {
     );
   }
   problems.push(...modelProblems(env));
+  const mode = String(env.MOD_DM_MODE ?? '').trim().toLowerCase();
+  if (mode && mode !== 'classic' && mode !== 'agent') {
+    problems.push(`MOD_DM_MODE must be classic or agent, not "${env.MOD_DM_MODE}"`);
+  }
   if (config.dmMode === 'agent' && !modelsEnabled()) {
     problems.push('MOD_DM_MODE=agent needs a model provider; set one or use classic mode');
   }
@@ -262,7 +266,7 @@ export function assertConfig(env = process.env) {
   if (env.MOD_IDENTIFIER && config.roster.all.includes(env.MOD_IDENTIFIER)) {
     problems.push('the bot account is on its own roster, so it would answer itself');
   }
-  problems.push(...badNumbers);
+  problems.push(...badNumbers, ...new Set(badFlags));
   if (problems.length) {
     throw new Error(
       `the configuration is not usable:\n  - ${problems.join('\n  - ')}`,

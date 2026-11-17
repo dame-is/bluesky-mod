@@ -120,3 +120,34 @@ describe('number settings', () => {
     expect(problems).toEqual([expect.stringMatching(/^DM_POLL_MS must be /)]);
   });
 });
+
+describe('on/off settings', () => {
+  it.each(['DRY_RUN', 'ATMOSPHERE', 'MOD_ALERTS', 'LOG_JSON'])(
+    'take true/false, 1/0, yes/no and on/off for %s, and refuse anything else',
+    async (name) => {
+      for (const v of ['true', 'FALSE', '1', '0', 'yes', 'no', 'on', 'off']) {
+        expect(await problemsWith({ [name]: v })).toEqual([]);
+      }
+      expect(await problemsWith({ [name]: 'ture' })).toEqual([
+        `${name} must be true or false, not "ture"`,
+      ]);
+    },
+  );
+
+  it('read 1 as on, so DRY_RUN=1 is a dry run', async () => {
+    process.env = { ...savedEnv, ...USABLE, DRY_RUN: '1', MOD_ALERTS: 'no' };
+    vi.resetModules();
+    const { config } = await import('./config.js');
+    expect(config.dryRun).toBe(true);
+    expect(config.alertEveryMs).toBe(0);
+  });
+});
+
+describe('the DM mode', () => {
+  it('takes classic or agent and refuses a typo', async () => {
+    expect(await problemsWith({ MOD_DM_MODE: 'classic' })).toEqual([]);
+    expect(await problemsWith({ MOD_DM_MODE: 'agnet' })).toEqual([
+      'MOD_DM_MODE must be classic or agent, not "agnet"',
+    ]);
+  });
+});
