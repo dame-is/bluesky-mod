@@ -40,7 +40,7 @@ PROTECTED is checked in the scorer, again where plans are approved, and again in
 
 ### The snapshot
 
-Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call, and that a decision can be replayed later against the graph as it stood that day.
+Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. Each decision row records what the gate saw (band, trust, distance and vouches), and the vouch counts behind it are kept for the last four snapshots.
 
 Known limits:
 
