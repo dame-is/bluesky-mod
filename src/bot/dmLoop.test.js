@@ -143,6 +143,22 @@ describe('a verb with no plan code', () => {
   }
 });
 
+describe('an approval the parser refused', () => {
+  it('says which word it could not place, and adds nobody', async () => {
+    const write = { com: { atproto: { repo: {} } } };
+    const out = await runCommand(
+      parseCommand('approve 1c2d3e4f hostile except @friend.test'),
+      write,
+      { canWrite: true },
+    );
+    expect(out.text).toBe(
+      parseCommand('approve 1c2d3e4f hostile except @friend.test').refusal,
+    );
+    expect(out.text).toMatch(/"except"/);
+    expect(out.options).toBe(null);
+  });
+});
+
 describe('agent mode routing', () => {
   it('is classic unless asked for by name', () => {
     expect(normaliseMode(undefined)).toBe('classic');

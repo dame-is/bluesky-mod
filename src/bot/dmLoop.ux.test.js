@@ -441,6 +441,25 @@ describe('questions a thumbs-up answers', () => {
     expect(listWrite.applyCommand).toHaveBeenCalledTimes(1);
   });
 
+  it('runs it on a thumbs-up in any skin tone', async () => {
+    let { chat } = chatWith([msg('m1', 'should I block @a.test?')]);
+    await pass(chat, { generate: asking });
+    const asked = db.dm_choice[0].pending.message_ids[0];
+    ({ chat } = chatWith([thumbs(asked, '👍🏽')]));
+    await pass(chat);
+    expect(listWrite.applyCommand).toHaveBeenCalledTimes(1);
+
+    ({ chat } = chatWith([msg('m3', 'should I block @a.test?')]));
+    await pass(chat, { generate: asking });
+    let sent;
+    ({ chat, sent } = chatWith([
+      thumbs(db.dm_choice[0].pending.message_ids[0], '👎🏾'),
+    ]));
+    await pass(chat);
+    expect(sent).toEqual(['Okay, nothing changed.']);
+    expect(listWrite.applyCommand).toHaveBeenCalledTimes(1);
+  });
+
   it('lets the question lapse when the conversation moves on', async () => {
     let { chat } = chatWith([msg('m1', 'should I block @a.test?')]);
     await pass(chat, { generate: asking });

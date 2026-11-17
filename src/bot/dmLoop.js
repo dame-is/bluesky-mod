@@ -50,6 +50,7 @@ import {
   parseWatchCommand,
   isYes,
   isNo,
+  bareEmoji,
   isWrite,
   readOnlyReply,
   facetLinks,
@@ -447,6 +448,9 @@ export async function runCommand(
   // `undo` lands here only when handed a token meant as a code that is not
   // one: the answer names the token instead of undoing a plan nobody named.
   if (cmd.needsTarget) {
+    // An approval the parser could not read one way: its sentence names the
+    // word or the mix it refused.
+    if (cmd.refusal) return say(cmd.refusal);
     if (cmd.action === 'plan') {
       return say(nudge('post'));
     }
@@ -1785,7 +1789,8 @@ export async function runDmPass({
   // cleared before it runs.
   for (const r of reactions) {
     try {
-      const value = r.reaction?.value;
+      // A skin tone or the emoji selector does not change what a thumb means.
+      const value = bareEmoji(r.reaction?.value);
       if (!YES_REACTIONS.has(value) && !NO_REACTIONS.has(value)) continue;
       const pending = await readPending(r.convoId);
       if (!pending?.message_ids?.includes(r.message?.id)) continue;
