@@ -58,8 +58,8 @@ const keyFor = (name, env) =>
 /** True when a model can be called at all. */
 export const modelsEnabled = (name = PROVIDER) => name !== 'none';
 
-/** The default model, where the provider names it the same way. */
-export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash';
+/** The agent model when none is set, on the providers that name it this way. */
+const FALLBACK_AGENT_MODEL = 'deepseek/deepseek-v4.1-flash';
 
 /**
  * The model ids in use, from the environment over the defaults.
@@ -76,7 +76,7 @@ export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash';
  */
 export function modelIds(env = process.env, name = providerName(env)) {
   const fallback =
-    name === 'gateway' || name === 'openrouter' ? DEFAULT_MODEL : null;
+    name === 'gateway' || name === 'openrouter' ? FALLBACK_AGENT_MODEL : null;
   const agent = env.MOD_AGENT_MODEL || fallback;
   return {
     agent,

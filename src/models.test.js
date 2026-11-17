@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { generateText } from 'ai';
-import { createProvider, installProvider, modelProblems } from './models.js';
+import * as models from './models.js';
+import {
+  createProvider,
+  installProvider,
+  modelIds,
+  modelProblems,
+} from './models.js';
 
 /**
  * A fetch that records each request and answers 401, so a model call fails
@@ -56,6 +62,20 @@ describe('where each key is sent', () => {
       });
       expect(problems).toContain(`${key} is not set`);
     }
+  });
+});
+
+describe('modelIds', () => {
+  it('falls back to one agent model on the gateway and OpenRouter only', () => {
+    for (const name of ['gateway', 'openrouter']) {
+      expect(modelIds({}, name).agent).toBe('deepseek/deepseek-v4.1-flash');
+    }
+    expect(modelIds({}, 'anthropic').agent).toBeNull();
+    expect(modelIds({ MOD_AGENT_MODEL: 'm' }, 'gateway').agent).toBe('m');
+  });
+
+  it('leaves DEFAULT_MODEL to lib/agent.js, where it is the configured agent model', () => {
+    expect('DEFAULT_MODEL' in models).toBe(false);
   });
 });
 
