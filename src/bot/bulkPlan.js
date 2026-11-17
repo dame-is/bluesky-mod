@@ -69,6 +69,24 @@ export const shortCode = (uuid) => uuid.replace(/-/g, '').slice(0, 8);
  */
 const viaFor = (basis, by) => (by ? `${by}:${basis}` : basis);
 
+/**
+ * The plan's note with the words that asked for an approval added after it,
+ * or null when there are none or the note already ends with them, as it does
+ * when the same approval is sent again to continue.
+ *
+ * `reason` is the typed command, or the owner's message with the agent's
+ * reason after it (noteFor in operator.js). It goes on the plan rather than
+ * on each row because one plan can be approved several times; `approved_via`
+ * on a row says which kind of approval added it.
+ */
+function noteWithReason(plan, reason) {
+  const words = String(reason ?? '').trim();
+  if (!words) return null;
+  const add = `; approved: ${words}`;
+  const note = String(plan.note || '');
+  return note.endsWith(add) ? null : `${note}${add}`;
+}
+
 /** Does this participant match the requested engagement kind? */
 function matchesKind(row, kind) {
   const wanted = KINDS[kind];
@@ -284,13 +302,14 @@ export async function findPlan(code) {
  *
  * Resumable and idempotent: rows already carrying `acted_at` are skipped, so
  * running `approve` again continues rather than duplicating. Stops at
- * PER_APPROVAL and says how many are left.
+ * PER_APPROVAL and says how many are left. `reason` is kept in the plan's
+ * note (see noteWithReason).
  */
 export async function applyPlan(
   agent,
   plan,
   bands,
-  { by = null, kinds = null } = {},
+  { by = null, kinds = null, reason = null } = {},
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
@@ -340,6 +359,7 @@ export async function applyPlan(
 
   // Recorded as soon as anything was attempted, rate limit or not. Bands
   // approved earlier stay in the record.
+  const withReason = noteWithReason(plan, reason);
   await update(
     'plan',
     { eq: { id: plan.id } },
@@ -348,6 +368,7 @@ export async function applyPlan(
       approved_bands: [
         ...new Set([...(plan.approved_bands || []), ...wanted]),
       ],
+      ...(withReason ? { note: withReason } : {}),
     },
   );
   const live = await liveCount(plan);
@@ -581,13 +602,14 @@ function stampRows(plan, rows, via = null) {
  *
  * Recorded as `approved_via: triage:<label>`, never as a band. A band is
  * reproducible from the snapshot; this is a model reading that nobody can
- * reproduce, so the log says which one it was.
+ * reproduce, so the log says which one it was. `reason` is kept in the plan's
+ * note (see noteWithReason).
  */
 export async function applyPlanToTriage(
   agent,
   plan,
   label,
-  { by = null, skipBands = [] } = {},
+  { by = null, skipBands = [], reason = null } = {},
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
@@ -628,6 +650,10 @@ export async function applyPlanToTriage(
       bot,
       via: viaFor(`triage:${label}`, by),
     });
+  const withReason = noteWithReason(plan, reason);
+  if (withReason) {
+    await update('plan', { eq: { id: plan.id } }, { note: withReason });
+  }
   const live = await liveCount(plan);
 
   // The batch the limit stopped is still pending, so it is not taken off
@@ -816,13 +842,14 @@ export async function reviewPlan(plan, { bands = null, limit = 15 } = {}) {
  *
  * Recorded as approved_via 'individual' rather than 'band'. Both write the
  * same listitem; only one means the owner looked at the account, and the log
- * has to say which.
+ * has to say which. `reason` is kept in the plan's note (see noteWithReason)
+ * when there was anyone to add.
  */
 export async function applyPlanToActors(
   agent,
   plan,
   actors,
-  { by = null } = {},
+  { by = null, reason = null } = {},
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
@@ -867,6 +894,10 @@ export async function applyPlanToActors(
       bot,
       via: viaFor('individual', by),
     });
+  const withReason = toWrite.length ? noteWithReason(plan, reason) : null;
+  if (withReason) {
+    await update('plan', { eq: { id: plan.id } }, { note: withReason });
+  }
 
   // As for a band approval: the batch the limit stopped is still pending.
   const remaining = rateLimited

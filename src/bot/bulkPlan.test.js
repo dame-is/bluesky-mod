@@ -825,6 +825,71 @@ describe('a rate limit', () => {
   });
 });
 
+describe('the words of an approval', () => {
+  const POST = 'at://did:plc:op/app.bsky.feed.post/3post';
+  beforeEach(() => {
+    db.plan[0].note = `bulk quoters from ${POST}`;
+  });
+
+  it('are kept in the plan note for a band, a label and a name, so history shows them', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:u', 'UNKNOWN'),
+      { ...scanned(PLAN_A, 'did:plc:h', 'PERIPHERAL'), triage: 'hostile' },
+      scanned(PLAN_A, 'did:plc:n', 'NOTABLE'),
+    ];
+    await applyPlan(bot(), await findPlan('1c2d3e4f'), ['UNKNOWN'], {
+      reason: 'approve 1c2d3e4f UNKNOWN',
+    });
+    await applyPlanToTriage(bot(), await findPlan('1c2d3e4f'), 'hostile', {
+      by: 'agent',
+      reason: 'block the hostile ones [agent: the owner asked for hostile quoters]',
+    });
+    await applyPlanToActors(bot(), await findPlan('1c2d3e4f'), ['did:plc:n'], {
+      reason: 'approve 1c2d3e4f did:plc:n',
+    });
+
+    expect(db.plan[0].note).toBe(
+      `bulk quoters from ${POST}` +
+        '; approved: approve 1c2d3e4f UNKNOWN' +
+        '; approved: block the hostile ones [agent: the owner asked for hostile quoters]' +
+        '; approved: approve 1c2d3e4f did:plc:n',
+    );
+    const h = await historyFor('did:plc:h');
+    expect(h.rows[0]).toMatchObject({
+      approved_via: 'agent:triage:hostile',
+      plan: { note: db.plan[0].note },
+    });
+  });
+
+  it('are kept once when the same approval is sent again to continue', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:u', 'UNKNOWN')];
+    const limited = bot();
+    limited.com.atproto.repo.applyWrites.mockRejectedValueOnce(
+      new Error('Rate Limit Exceeded'),
+    );
+    const words = { reason: 'approve 1c2d3e4f UNKNOWN' };
+    await applyPlan(limited, await findPlan('1c2d3e4f'), ['UNKNOWN'], words);
+    await applyPlan(limited, await findPlan('1c2d3e4f'), ['UNKNOWN'], words);
+
+    expect(repo.size).toBe(1);
+    expect(db.plan[0].note).toBe(
+      `bulk quoters from ${POST}; approved: approve 1c2d3e4f UNKNOWN`,
+    );
+  });
+
+  it('are not kept for an approval that had nothing to add', async () => {
+    db.decision = [added(PLAN_A, 'did:plc:u', '2026-10-01T10:00:00Z')];
+    await applyPlan(bot(), db.plan[0], ['UNKNOWN'], { reason: 'approve again' });
+    await applyPlanToTriage(bot(), db.plan[0], 'hostile', {
+      reason: 'approve again',
+    });
+    await applyPlanToActors(bot(), db.plan[0], ['did:plc:u'], {
+      reason: 'approve again',
+    });
+    expect(db.plan[0].note).toBe(`bulk quoters from ${POST}`);
+  });
+});
+
 describe('history', () => {
   it('reads the newest few, counts the rest, and fetches their plans in one go', async () => {
     db.decision = [
