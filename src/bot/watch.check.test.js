@@ -288,6 +288,18 @@ describe('a watch reads what arrives while it runs', () => {
     expect(second).toMatchObject({ fresh: 0, hostile: 1, added: 2 });
     expect(w.stats).toMatchObject({ unread: [], newTotal: 2, addedTotal: 2 });
   });
+
+  it('counts a batch it finds already written as added', async () => {
+    // An earlier check's applyWrites reply was lost; this check finds the
+    // batch on the list and records it rather than writing it again.
+    harvest.participants = [person('eve', 'one')];
+    const w = watchRow('auto');
+    applyPlanToTriage.mockResolvedValueOnce({ ok: true, added: 0, recorded: 1 });
+
+    const out = await checkWatch(w, deps());
+    expect(out).toMatchObject({ hostile: 1, added: 1 });
+    expect(w.stats).toMatchObject({ addedSinceDigest: 1, addedTotal: 1 });
+  });
 });
 
 describe('an auto watch reads each post alone', () => {

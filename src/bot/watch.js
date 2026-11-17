@@ -280,7 +280,9 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
       });
       return { added: 0 };
     });
-    added = out.added || 0;
+    // A batch whose earlier reply was lost and that this check found on the
+    // list counts as added here, since no earlier digest counted it.
+    added = (out.added || 0) + (out.recorded || 0);
   }
   const held =
     watch.mode === 'auto'
