@@ -109,6 +109,18 @@ const { resetQuiet } = await import('./chatUx.js');
 
 const OWNER = 'did:plc:ownertestownertestowners';
 const BOT = 'did:plc:bot';
+
+/** The chat service's answer for a one-to-one conversation. */
+const directConvo = async ({ convoId }) => ({
+  data: {
+    convo: {
+      id: convoId,
+      members: [{ did: BOT }, { did: OWNER }],
+      kind: { $type: 'chat.bsky.convo.defs#directConvo' },
+    },
+  },
+});
+
 const POST = 'at://did:plc:author/app.bsky.feed.post/3abc';
 const roster = {
   owner: OWNER,
@@ -128,6 +140,7 @@ function chatWith(logs) {
         convo: {
           getLog: async () => ({ data: { cursor: 'c1', logs } }),
           getMessages: async () => ({ data: { messages: [] } }),
+          getConvo: directConvo,
           sendMessage: async ({ message }) => {
             sent.push(message.text);
             nextId += 1;

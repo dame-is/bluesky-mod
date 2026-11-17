@@ -37,6 +37,18 @@ const { runDmPass } = await import('./dmLoop.js');
 
 const OWNER = 'did:plc:ownertestownertestowners';
 const BOT = 'did:plc:bot';
+
+/** The chat service's answer for a one-to-one conversation. */
+const directConvo = async ({ convoId }) => ({
+  data: {
+    convo: {
+      id: convoId,
+      members: [{ did: BOT }, { did: OWNER }],
+      kind: { $type: 'chat.bsky.convo.defs#directConvo' },
+    },
+  },
+});
+
 const roster = {
   owner: OWNER,
   answers: (d) => d === OWNER,
@@ -71,6 +83,7 @@ function chatWith(text) {
               },
             }),
             getMessages: async () => ({ data: { messages: [] } }),
+            getConvo: directConvo,
             sendMessage: async ({ message }) => {
               sent.push(message.text);
             },
@@ -293,6 +306,7 @@ describe('a DM pass in agent mode', () => {
             getLog: async () =>
               logs.length ? { data: { cursor: 'c1', logs } } : { data: { logs } },
             getMessages: async () => ({ data: { messages: [] } }),
+            getConvo: directConvo,
             sendMessage: async ({ message: m }) => {
               sent.push(m.text);
             },
