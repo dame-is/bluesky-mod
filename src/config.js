@@ -95,6 +95,15 @@ export const config = {
   }),
 
   /**
+   * Spacedust (spacedust.js): replies, quotes and mentions aimed at the owner,
+   * as they happen. Feeds the alert on a post taking off, lets a watch skip a
+   * read when nothing new arrived, and is what the shield counts. MOD_STREAM
+   * =false turns it off, and those fall back to polling.
+   */
+  stream: readFlag('MOD_STREAM', true),
+  spacedustHost: process.env.SPACEDUST_HOST || 'spacedust.microcosm.blue',
+
+  /**
    * Force a reconnect on this interval. The subscription is silent for hours
    * at a time, so "no traffic" cannot be told apart from "the connection died
    * quietly". Reconnecting resumes from the stored cursor and misses nothing.

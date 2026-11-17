@@ -37,6 +37,19 @@ const SCHEMA_FILE = path.join(
   'schema.sql',
 );
 
+/**
+ * Columns added to tables after they first shipped. `create table if not
+ * exists` leaves a table that is already there as it is, so a store made by an
+ * older version gets these added at open. Nullable with no default, so rows
+ * written before they existed read as null, which every reader takes as "the
+ * way it was before". Types are written as schema.sql writes them.
+ */
+export const ADDED_COLUMNS = [
+  // Which list a plan's writes went to. Null is MOD_LIST_URI, the only list
+  // there was before multi-list mode.
+  { table: 'plan', column: 'list_uri', type: 'text' },
+];
+
 /** Tables whose `id` is a UUID filled in here when a row arrives without one. */
 const UUID_ID = new Set(['plan', 'audit', 'brief', 'memory', 'watch']);
 
@@ -104,6 +117,7 @@ export function openDb(target = process.env.DATABASE_URL || databasePath()) {
   const db = new DatabaseSync(file);
   db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 5000;');
   db.exec(fs.readFileSync(SCHEMA_FILE, 'utf8'));
+  addColumnsSqlite(db);
   info = new Map();
   for (const { name } of db
     .prepare("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'")
@@ -156,6 +170,25 @@ function ready() {
   return b.kind === 'pg' ? b.ready.then(() => b) : b;
 }
 
+/** ADDED_COLUMNS for SQLite, which has no "add column if not exists". */
+function addColumnsSqlite(db) {
+  for (const { table, column, type } of ADDED_COLUMNS) {
+    const have = db
+      .prepare(`pragma table_info("${table}")`)
+      .all()
+      .some((c) => c.name === column);
+    if (!have) db.exec(`alter table "${table}" add column "${column}" ${type}`);
+  }
+}
+
+/** ADDED_COLUMNS for Postgres, as statements run inside the schema's transaction. */
+export function addColumnsPg() {
+  return ADDED_COLUMNS.map(
+    ({ table, column, type }) =>
+      `alter table "${table}" add column if not exists "${column}" ${pgDdl(type)}`,
+  );
+}
+
 // --- Postgres -----------------------------------------------------------------
 
 /**
@@ -198,6 +231,7 @@ async function openPostgres(url, schema) {
       await client.query(`create schema if not exists "${schema}"`);
       await client.query(`set local search_path to "${schema}"`);
       await client.query(pgDdl(fs.readFileSync(SCHEMA_FILE, 'utf8')));
+      for (const sql of addColumnsPg()) await client.query(sql);
     });
     const cols = await pool.query(
       `select table_name, column_name, data_type

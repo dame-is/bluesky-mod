@@ -10,6 +10,10 @@
 //   3. Jetstream, for the owner's own new follows and list items, so they are
 //      protected before the next snapshot (ownerGraph.js). This one writes a
 //      row and needs no queue.
+//   4. Spacedust, for replies, quotes and mentions aimed at the owner as they
+//      happen (spacedust.js). Held in memory (ownerActivity.js) for the
+//      alerts, watches and the shield to read; nothing is written from it
+//      directly.
 //
 // The bot never posts in public. Everything it says goes to a DM.
 //
@@ -31,6 +35,8 @@ import { botAgent, chatView } from './bot/botAgent.js';
 import { openDb, closeDb, usingPostgres, rpc } from './bot/db.js';
 import { snapshotStep, usableSnapshot, UNPROTECTED_LISTS } from './snapshot.js';
 import { connectJetstream } from './jetstream.js';
+import { connectSpacedust } from './spacedust.js';
+import { activity } from './ownerActivity.js';
 import { loadState, setCursor } from './state.js';
 import { ownerGraphHandler, OWNER_GRAPH_COLLECTIONS } from './ownerGraph.js';
 import { installProvider, MODELS, modelsEnabled } from './models.js';
@@ -507,6 +513,7 @@ function logStats() {
   logger.info('stats', {
     ...stats,
     reference: cached ? 'held' : 'released',
+    streamed: activity.size(),
     queued: pending,
     rss_mb: (process.memoryUsage().rss / 1048576).toFixed(1),
     heap_mb: (process.memoryUsage().heapUsed / 1048576).toFixed(1),
@@ -516,6 +523,7 @@ function logStats() {
 // --- start -------------------------------------------------------------------
 let statsTimer = null;
 let stream = null;
+let dust = null;
 let lease = null;
 
 /**
@@ -641,6 +649,15 @@ async function start() {
     },
   });
 
+  if (config.stream) {
+    dust = connectSpacedust({
+      subjectDids: [config.ownerDid],
+      onLink: (msg) => activity.record(msg),
+      // No replay: what was said while the socket was down is not known.
+      onOpen: () => activity.gap(),
+    });
+  }
+
   if (config.statsIntervalMs > 0) {
     statsTimer = setInterval(logStats, config.statsIntervalMs);
     if (statsTimer.unref) statsTimer.unref();
@@ -689,6 +706,7 @@ async function shutdown(signal) {
   if (diskTimer) clearInterval(diskTimer);
   if (retentionTimer) clearTimeout(retentionTimer);
   stream?.close();
+  dust?.close();
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),
   // systemd 90s.
