@@ -2645,7 +2645,14 @@ export async function runDmPass({
       let io;
       try {
         io = await getIo();
-        const history = await readHistory(chat, entry, { botDid, limits });
+        // A fixed question (read, pulse, thread) needs no earlier turns, and
+        // these are the turns that read strangers' posts: leaving the DM
+        // history out keeps it from reaching any lookup a post talks the
+        // model into.
+        const fixed = Boolean(reading || pulsing || threading);
+        const history = fixed
+          ? []
+          : await readHistory(chat, entry, { botDid, limits });
         reply = await answer({
           generate,
           message: reading

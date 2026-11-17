@@ -1258,3 +1258,32 @@ describe('a yes with nothing open', () => {
     expect(generate).toHaveBeenCalled();
   });
 });
+
+describe('a fixed question', () => {
+  it('goes to the model without the DM history', async () => {
+    const at = (s) => new Date(Date.now() - s * 1000).toISOString();
+    const { chat } = chatWith([msg('m2', 'pulse')]);
+    let historyRead = false;
+    chat.chat.bsky.convo.getMessages = async () => {
+      historyRead = true;
+      return {
+        data: {
+          messages: [
+            {
+              id: 'm1',
+              text: 'my private note about someone',
+              sender: { did: OWNER },
+              sentAt: at(60),
+            },
+          ],
+        },
+      };
+    };
+    const generate = vi.fn(async () => ({ text: 'model said ok', steps: [] }));
+    await pass(chat, { generate });
+    expect(generate).toHaveBeenCalled();
+    const said = JSON.stringify(generate.mock.calls[0][0].messages);
+    expect(said).not.toContain('my private note');
+    expect(historyRead).toBe(false);
+  });
+});
