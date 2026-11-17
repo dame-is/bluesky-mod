@@ -6,7 +6,8 @@
 // Two optional settings add a second model:
 //
 //   - MOD_CHECK_MODEL answers the write check below. Unset, the agent model
-//     answers it, in a separate call that never sees what the agent read.
+//     answers it (the config file's `model` when it names one), in a
+//     separate call that never sees what the agent read.
 //   - MOD_ESCALATION_MODEL takes over an agent turn that hands off, stalls or
 //     fails, or that starts with "^", and re-reads every post triage would
 //     label hostile. Unset, everything stays on the agent model.
@@ -29,8 +30,17 @@ const off = (v) =>
     .trim()
     .toLowerCase() === 'off';
 
-/** The model that answers the write check. */
+/** The model that answers the write check, from the environment alone. */
 export const CHECK_MODEL = MODELS.check;
+
+/**
+ * The model that answers the write check for a turn whose agent model is
+ * `agentModel`: MOD_CHECK_MODEL when it is set, otherwise that agent model,
+ * which is the config file's `model` when the file names one.
+ */
+export function checkModelFor(agentModel, env = process.env) {
+  return env.MOD_CHECK_MODEL || agentModel || CHECK_MODEL;
+}
 
 /** The second model for agent turns and hostile labels, or "off". */
 export const ESCALATION_MODEL = MODELS.escalation;

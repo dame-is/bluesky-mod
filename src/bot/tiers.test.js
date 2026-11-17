@@ -2,7 +2,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { generateText } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 
-import { checkIntent, intentState, CHECK_PROMPT } from './tiers.js';
+import {
+  checkIntent,
+  checkModelFor,
+  intentState,
+  CHECK_PROMPT,
+} from './tiers.js';
 
 const input = {
   said: 'block the hostile ones',
@@ -89,6 +94,18 @@ describe('the write check', () => {
     );
     expect(previous).toHaveLength(1);
     expect(previous[0].match(/"/g)).toHaveLength(2);
+  });
+});
+
+describe('which model answers the check', () => {
+  it('is the agent model the turn runs on when MOD_CHECK_MODEL is unset', () => {
+    expect(checkModelFor('from/config-file', {})).toBe('from/config-file');
+  });
+
+  it('is MOD_CHECK_MODEL when it is set, whatever the agent runs on', () => {
+    expect(
+      checkModelFor('from/config-file', { MOD_CHECK_MODEL: 'm/check' }),
+    ).toBe('m/check');
   });
 });
 

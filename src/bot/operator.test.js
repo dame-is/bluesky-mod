@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { generateText } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 
@@ -520,6 +520,61 @@ describe('the real SDK accepts the agent', () => {
     expect(reply.escalated.reason).toBe('the first model stopped responding');
     const [, stepUp] = logs.find(([msg]) => /Stepping up/.test(msg));
     expect(stepUp.first).toMatch(/^\d+\.\ds no answer$/);
+  });
+
+  it('counts the tokens of the calls that came back before a stall', async () => {
+    let call = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: ({ abortSignal }) => {
+        call += 1;
+        if (call === 4) {
+          return new Promise((_, reject) =>
+            abortSignal.addEventListener('abort', () =>
+              reject(abortSignal.reason),
+            ),
+          );
+        }
+        return Promise.resolve({
+          finishReason: { unified: 'tool-calls', raw: 'tool_use' },
+          // The provider-side shape the SDK reads usage from.
+          usage: {
+            inputTokens: { total: 40_000 },
+            outputTokens: { total: 100 },
+          },
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: `t${call}`,
+              toolName: 'reference_status',
+              input: '{}',
+            },
+          ],
+          warnings: [],
+        });
+      },
+    });
+    const reply = await operate({
+      generate: generateText,
+      model,
+      escalation: 'off',
+      callTimeoutMs: 30,
+      message: 'how fresh is the data',
+      io: {
+        preflight: async () => ({}),
+        lookUp: async () => null,
+        referenceStatus: () => ({}),
+      },
+      deps: fakeDeps(),
+    });
+    expect(reply.ok).toBe(false);
+    expect(reply.stalled).toBe(true);
+    expect(reply.usages).toEqual([
+      expect.objectContaining({
+        kind: 'dm-agent',
+        inputTokens: 120_000,
+        outputTokens: 300,
+      }),
+    ]);
   });
 });
 
@@ -1223,6 +1278,77 @@ describe('two waves', () => {
     const reply = await operate({ ...base, generate, deps: fakeDeps() });
     expect(reply.text).toBe('recovered');
     expect(reply.escalated.reason).toMatch(/failed/);
+  });
+
+  describe('the write check model', () => {
+    const writing = {
+      ...base,
+      canWrite: true,
+      writeAgent: { session: { did: 'did:plc:bot' } },
+      raw: 'block @a.test',
+      generate: vi.fn(async (opts) => {
+        await opts.tools.add_to_list.execute({ accounts: ['@a.test'] });
+        return { text: 'Added @a.test.', steps: [{}] };
+      }),
+    };
+    const checkedOn = (deps) =>
+      deps.checkIntent.mock.calls.map(([, opts]) => opts.model);
+
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('is the turn agent model when MOD_CHECK_MODEL is unset, in either wave', async () => {
+      vi.stubEnv('MOD_CHECK_MODEL', '');
+      // The model the DM loop hands in, which is the config file's when it
+      // names one.
+      const first = fakeDeps();
+      await operate({ ...writing, model: 'from/config-file', deps: first });
+      expect(checkedOn(first)).toEqual(['from/config-file']);
+      // The second wave runs on the escalation model; its writes are still
+      // checked on the agent model.
+      const second = fakeDeps();
+      await operate({ ...writing, escalate: true, deps: second });
+      expect(checkedOn(second)).toEqual(['cheap/model']);
+    });
+
+    it('is MOD_CHECK_MODEL when it is set', async () => {
+      vi.stubEnv('MOD_CHECK_MODEL', 'm/check');
+      const deps = fakeDeps();
+      await operate({ ...writing, model: 'from/config-file', deps });
+      expect(checkedOn(deps)).toEqual(['m/check']);
+    });
+  });
+
+  it('keeps what a failed first wave spent beside the second wave', async () => {
+    const generate = vi.fn(async (opts) => {
+      if (opts.model === 'cheap/model') {
+        opts.onLanguageModelCallStart();
+        opts.onLanguageModelCallEnd({
+          usage: { inputTokens: 30, outputTokens: 2 },
+        });
+        throw new Error('gateway 502');
+      }
+      return {
+        text: 'recovered',
+        steps: [{}],
+        usage: { inputTokens: 20, outputTokens: 5 },
+      };
+    });
+    const reply = await operate({ ...base, generate, deps: fakeDeps() });
+    expect(reply.text).toBe('recovered');
+    expect(reply.usages).toEqual([
+      {
+        kind: 'dm-agent',
+        model: 'cheap/model',
+        inputTokens: 30,
+        outputTokens: 2,
+      },
+      {
+        kind: 'dm-agent-escalated',
+        model: 'strong/model',
+        inputTokens: 20,
+        outputTokens: 5,
+      },
+    ]);
   });
 
   it('does not retry a first wave that timed out', async () => {

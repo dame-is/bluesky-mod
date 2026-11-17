@@ -72,6 +72,7 @@ import { startWatch, stopWatch, liveWatches } from './watch.js';
 import { runTriage, reviewTriage } from './triage.js';
 import {
   checkIntent,
+  checkModelFor,
   ESCALATION_MODEL,
   escalationEnabled,
   shortModel,
@@ -620,6 +621,7 @@ export function actionText(
  * @param {string}  [ctx.convoText]     the whole conversation so far, as text
  * @param {string}  [ctx.ownerText]     the asker's own earlier messages, as text
  * @param {boolean} [ctx.checkWrites]   put every write to the intent check
+ * @param {string}  [ctx.checkModel]    the model that answers it
  * @param {'only'|'first'|'second'} [ctx.stage]
  */
 export function buildActionTools(ctx, deps = DEPS) {
@@ -813,7 +815,7 @@ export function buildActionTools(ctx, deps = DEPS) {
     try {
       out = await deps.checkIntent(
         { said: ctx.said, earlier: ctx.earlier, action },
-        { log: ctx.log },
+        { model: ctx.checkModel, log: ctx.log },
       );
     } catch (err) {
       // checkIntent fails closed on its own; this is for one that throws.
@@ -1455,6 +1457,7 @@ async function runTurn({
   log,
   deps,
   checkWrites,
+  checkModel,
   stage,
   reason = '',
   prior = [],
@@ -1464,10 +1467,15 @@ async function runTurn({
 }) {
   // The per-call watchdog (see OPERATOR_CALL_TIMEOUT_MS). Model time is
   // measured from these hooks too, so the trace can say which part was slow.
+  // Tokens are added up here as each call comes back: a turn that stalls or
+  // fails returns no result, and the provider billed those calls all the same.
   const stall = new AbortController();
   let watchdog = null;
   let callAt = 0;
   let modelMs = 0;
+  const spent = { inputTokens: 0, outputTokens: 0 };
+  const spentSoFar = () =>
+    spent.inputTokens || spent.outputTokens ? { ...spent } : null;
   const trace = [];
   const callStarted = () => {
     callAt = Date.now();
@@ -1479,9 +1487,11 @@ async function runTurn({
       );
     }
   };
-  const callEnded = () => {
+  const callEnded = (call) => {
     clearTimeout(watchdog);
     modelMs = Date.now() - callAt;
+    spent.inputTokens += call?.usage?.inputTokens ?? 0;
+    spent.outputTokens += call?.usage?.outputTokens ?? 0;
   };
 
   const ctx = {
@@ -1509,6 +1519,7 @@ async function runTurn({
       .map((h) => h.content)
       .join('\n'),
     checkWrites,
+    checkModel,
     checks: [],
     usages: [],
     stage,
@@ -1597,7 +1608,7 @@ async function runTurn({
       text: cutOff ? '' : (result.text || '').trim(),
       steps,
       outOfSteps: steps >= maxSteps,
-      usage: result.usage ?? null,
+      usage: result.usage ?? spentSoFar(),
       pulses: pulseCallsIn(result.steps),
     });
   } catch (error) {
@@ -1614,7 +1625,7 @@ async function runTurn({
       error: stalled ? stall.signal.reason : error,
       stalled,
       steps: trace.length - 1,
-      usage: null,
+      usage: spentSoFar(),
       pulses: [],
     });
   } finally {
@@ -1664,6 +1675,9 @@ export async function operate({
   escalation = ESCALATION_MODEL,
   escalate = false,
   checkWrites = true,
+  // On the agent model in both waves, so a write the second wave makes is
+  // checked by the same model as one the first wave makes.
+  checkModel = checkModelFor(model),
   notes = '',
   convoId = null,
 }) {
@@ -1689,6 +1703,7 @@ export async function operate({
     log,
     deps,
     checkWrites,
+    checkModel,
     notes,
     convoId,
   };
