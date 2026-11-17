@@ -267,7 +267,9 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
   } else if (missing) {
     lines.push(`Could not read ${missing}. Send it again to retry.`);
   } else if (plan.truncated) {
-    // Nothing failed, so the cut is a cap a retry meets again.
+    // Nothing failed outright. The cut is a cap, which a retry meets again,
+    // or a source that failed part way, which the harvest does not tell
+    // apart; the partial-read line above gives no retry advice either.
     lines.push('Nobody found so far, and not every engagement was read.');
   } else {
     lines.push('Nobody has engaged with it yet.');
