@@ -24,7 +24,7 @@ import {
 } from './lib/mcp.js';
 import { loadReference, makeIo } from './bot/reference.js';
 import { loadAgentConfig } from './bot/agentConfig.js';
-import { runDmPass } from './bot/dmLoop.js';
+import { runDmPass, runContinuation } from './bot/dmLoop.js';
 import { stopWrites } from './bot/bulkPlan.js';
 import { checkModelFor, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
@@ -238,6 +238,29 @@ function scheduleDmPoll() {
     enqueue('dm', pollDms);
   }, config.dmPollMs);
   if (dmTimer.unref) dmTimer.unref();
+}
+
+// --- approvals carrying on by themselves -------------------------------------
+let carryTimer = null;
+/** How often to look for the next batch of a big approval. */
+const CARRY_EVERY_MS = 15_000;
+
+/**
+ * One batch at a time, and only with nothing else queued, so DMs come first.
+ * Not held for a quiet minute: the owner asked for this and is waiting on it.
+ */
+function scheduleContinuations() {
+  carryTimer = setInterval(() => {
+    if (pending > 0 || shuttingDown) return;
+    enqueue('continue', () =>
+      runContinuation({
+        chat,
+        writeAgent: agent,
+        log: (msg, fields) => logger.info(msg, fields),
+      }),
+    );
+  }, CARRY_EVERY_MS);
+  if (carryTimer.unref) carryTimer.unref();
 }
 
 // --- the slow jobs wait for a quiet minute -----------------------------------
@@ -466,6 +489,7 @@ async function start() {
     // rather than filed as history.
     enqueue('dm', pollDms);
     scheduleDmPoll();
+    scheduleContinuations();
     scheduleDrift();
     scheduleWatching();
   }
@@ -538,6 +562,7 @@ async function shutdown(signal) {
   stopWrites();
   logger.info('Shutting down', { signal });
   if (dmTimer) clearInterval(dmTimer);
+  if (carryTimer) clearInterval(carryTimer);
   if (driftTimer) clearInterval(driftTimer);
   if (snapshotTimer) clearInterval(snapshotTimer);
   if (watchTimer) clearInterval(watchTimer);

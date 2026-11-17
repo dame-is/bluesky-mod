@@ -144,6 +144,19 @@ create table if not exists dm_choice (
   pending JSON
 );
 
+-- An approval too big for one message, carried on by itself in batches:
+-- `command` continues it, `next_at` is when, and `added` counts what all its
+-- batches added so far, for the message that says it is done.
+create table if not exists continuation (
+  plan_id text primary key,
+  convo_id text not null,
+  command text not null,
+  next_at text not null,
+  added integer not null default 0,
+  failures integer not null default 0,
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 -- "remember: ..." notes, in the literal words of the owner or a writer;
 -- author_did says which.
 create table if not exists memory (

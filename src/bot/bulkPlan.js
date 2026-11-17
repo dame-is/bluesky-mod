@@ -25,6 +25,7 @@
 
 import crypto from 'node:crypto';
 
+import { stopContinuation } from './continuation.js';
 import { APPVIEW, OWNER_DID } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
 import { resolveActor, resolveTarget, TargetError } from '../lib/target.js';
@@ -97,6 +98,25 @@ const viaFor = (basis, by) => (by ? `${by}:${basis}` : basis);
  * on each row because one plan can be approved several times; `approved_via`
  * on a row says which kind of approval added it.
  */
+/**
+ * What an approval that stopped short says about the rest: the command to
+ * send again, or, when the caller carries it on (`carryOn`), that it goes on
+ * by itself.
+ */
+function restLine({ left, again, rateLimited, carryOn }) {
+  if (!left) return '';
+  if (carryOn) {
+    return rateLimited
+      ? ` Bluesky's write limit is reached, so the other ${nf(left)} go on in about an hour by themselves.`
+      : ` The other ${nf(left)} go on by themselves, and I'll message you when they're done.`;
+  }
+  return rateLimited
+    ? ` Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`
+    : ` ${left} left. Send "${again}" again to continue.`;
+}
+
+const nf = (n) => Number(n || 0).toLocaleString('en-US');
+
 function noteWithReason(plan, reason) {
   const words = String(reason ?? '').trim();
   if (!words) return null;
@@ -368,13 +388,14 @@ export async function findPlan(code) {
  * Resumable and idempotent: rows already carrying `acted_at` are skipped, so
  * running `approve` again continues rather than duplicating. Stops at
  * PER_APPROVAL and says how many are left. `reason` is kept in the plan's
- * note (see noteWithReason).
+ * note (see noteWithReason). `again` on the result is the command that
+ * continues it, and `carryOn` says the caller will run it (continuations).
  */
 export async function applyPlan(
   agent,
   plan,
   bands,
-  { by = null, kinds = null, reason = null } = {},
+  { by = null, kinds = null, reason = null, carryOn = false } = {},
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
@@ -446,8 +467,10 @@ export async function applyPlan(
       recorded,
       already,
       remaining: left,
+      rateLimited: true,
+      again,
       live,
-      message: `Added ${added}.${recordedNote(recorded)} Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
+      message: `Added ${added}.${recordedNote(recorded)}${restLine({ left, again, rateLimited, carryOn })}`,
     };
   }
 
@@ -460,6 +483,7 @@ export async function applyPlan(
     failed,
     already,
     remaining,
+    again,
     live,
     message:
       `Added ${added} to the list${failed ? `, ${failed} failed` : ''}.` +
@@ -467,9 +491,7 @@ export async function applyPlan(
       alreadyNote(already) +
       vetoNote(vetoed + refused) +
       note +
-      (remaining
-        ? ` ${remaining} left. Send "${again}" again to continue.`
-        : ''),
+      restLine({ left: remaining, again, carryOn }),
   };
 }
 
@@ -788,6 +810,7 @@ export async function applyPlanToTriage(
     bands = null,
     asOf = null,
     reason = null,
+    carryOn = false,
   } = {},
 ) {
   const uri = listUri();
@@ -860,8 +883,10 @@ export async function applyPlanToTriage(
       recorded,
       already,
       remaining: left,
+      rateLimited: true,
+      again,
       live,
-      message: `Added ${added} that a model read as ${label}.${recordedNote(recorded)} Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
+      message: `Added ${added} that a model read as ${label}.${recordedNote(recorded)}${restLine({ left, again, rateLimited, carryOn })}`,
     };
   }
 
@@ -875,6 +900,7 @@ export async function applyPlanToTriage(
     failed,
     already,
     remaining,
+    again,
     live,
     message:
       `Added ${added} that a model read as ${label}${failed ? `, ${failed} failed` : ''}.` +
@@ -882,7 +908,7 @@ export async function applyPlanToTriage(
       alreadyNote(already) +
       vetoNote(vetoed + refused) +
       note +
-      (remaining ? ` ${remaining} left, send "${again}" again.` : ''),
+      restLine({ left: remaining, again, carryOn }),
   };
 }
 
@@ -967,6 +993,7 @@ export async function decisionsFor(plan, dids) {
  * @returns {Promise<{ live: number, watching: number, message: string }>}
  */
 export async function cancelPlan(plan, { now = Date.now() } = {}) {
+  await stopContinuation(plan.id).catch(() => {});
   const [{ recorded, unconfirmed }, watches] = await Promise.all([
     openAdds(plan),
     select('watch', {
@@ -1435,6 +1462,8 @@ export async function undoPlan(
   plan,
   { max = 1000, reason = 'undo' } = {},
 ) {
+  // Nothing more is added to a plan being taken back.
+  await stopContinuation(plan.id).catch(() => {});
   const uri = listUri();
   const bot = agent.session?.did;
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };

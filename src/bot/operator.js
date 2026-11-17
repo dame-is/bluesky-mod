@@ -80,6 +80,7 @@ import {
   shortModel,
 } from './tiers.js';
 import { select } from './db.js';
+import { continueLater } from './continuation.js';
 
 /**
  * A number from the environment, or the default when unset, not a number, or
@@ -326,6 +327,7 @@ const DEPS = {
   stopWatch,
   liveWatches,
   activitySince,
+  continueLater,
 };
 
 /**
@@ -1326,6 +1328,8 @@ export function buildActionTools(ctx, deps = DEPS) {
         );
         if (stopped) return stopped;
         const why = noteFor(ctx.raw, reason);
+        // Past the batch cap the rest goes on by itself, in this conversation.
+        const carryOn = Boolean(ctx.convoId);
         const out = named
           ? await deps.applyPlanToActors(ctx.writeAgent, plan, actors, {
               by: 'agent',
@@ -1337,11 +1341,22 @@ export function buildActionTools(ctx, deps = DEPS) {
                 asOf,
                 reason: why,
                 skipBands: HELD_BANDS,
+                carryOn,
               })
             : await deps.applyPlan(ctx.writeAgent, plan, bands, {
                 by: 'agent',
                 reason: why,
+                carryOn,
               });
+        if (carryOn && !named && out.ok && out.remaining > 0 && out.again) {
+          await deps.continueLater({
+            planId: plan.id,
+            convoId: ctx.convoId,
+            command: out.again,
+            added: (out.added ?? 0) + (out.recorded ?? 0),
+            rateLimited: Boolean(out.rateLimited),
+          });
+        }
         // A batch an earlier approval sent and this one only recorded is
         // still a change to the record, so it is said like an add.
         if (out.added || out.recorded) {

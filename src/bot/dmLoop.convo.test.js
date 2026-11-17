@@ -97,7 +97,9 @@ vi.mock('./triage.js', async (importOriginal) => {
 });
 
 const db = await import('./db.js');
-const { runDmPass, resetConvoKinds } = await import('./dmLoop.js');
+const { runDmPass, resetConvoKinds, runContinuation } = await import(
+  './dmLoop.js',
+);
 const { savePending, resetQuiet } = await import('./chatUx.js');
 const { makeRoster } = await import('../lib/senders.js');
 
@@ -1285,5 +1287,53 @@ describe('a fixed question', () => {
     const said = JSON.stringify(generate.mock.calls[0][0].messages);
     expect(said).not.toContain('my private note');
     expect(historyRead).toBe(false);
+  });
+});
+
+describe('an approval past the batch cap', () => {
+  it('carries on by itself and says when it is done', async () => {
+    const batch = (added, remaining) => ({
+      ok: true,
+      added,
+      remaining,
+      again: 'approve 1c2d3e4f UNKNOWN',
+      message: `Added ${added} to the list.`,
+    });
+    plans.applyPlan
+      .mockResolvedValueOnce(batch(500, 700))
+      .mockResolvedValueOnce(batch(500, 200))
+      .mockResolvedValueOnce(batch(200, 0));
+    const { chat, sent } = chatWith([msg('m1', 'approve 1c2d3e4f UNKNOWN')]);
+    await pass(chat);
+    expect(plans.applyPlan.mock.calls[0][3]).toMatchObject({ carryOn: true });
+
+    // Two more batches, then nothing left to carry on.
+    await runContinuation({ chat, writeAgent: { session: { did: BOT } } });
+    await runContinuation({ chat, writeAgent: { session: { did: BOT } } });
+    expect(
+      await runContinuation({ chat, writeAgent: { session: { did: BOT } } }),
+    ).toBe(null);
+    expect(plans.applyPlan).toHaveBeenCalledTimes(3);
+    const done = sent.at(-1).text;
+    expect(done).toMatch(/^Done with plan 1c2d3e4f: added 1,200 in all\./);
+    expect(done).toContain('1. Undo all 1,200');
+  });
+
+  it('stops when the plan is cancelled', async () => {
+    plans.applyPlan.mockResolvedValueOnce({
+      ok: true,
+      added: 500,
+      remaining: 700,
+      again: 'approve 1c2d3e4f UNKNOWN',
+      message: 'Added 500 to the list.',
+    });
+    const { chat } = chatWith([msg('m1', 'approve 1c2d3e4f UNKNOWN')]);
+    await pass(chat);
+    const { stopContinuation } = await import('./continuation.js');
+    await stopContinuation(PLAN_ID);
+    expect(
+      await runContinuation({ chat, writeAgent: { session: { did: BOT } } }),
+    ).toBe(null);
+    expect(plans.applyPlan).toHaveBeenCalledTimes(1);
   });
 });

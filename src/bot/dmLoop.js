@@ -23,6 +23,12 @@
 // and a restart in the middle of a pass picks up at the message after it.
 // Advancing after would turn one poisoned message into an endless loop of DMs.
 
+import {
+  continueLater,
+  dueContinuation,
+  retryLater,
+  stopContinuation,
+} from './continuation.js';
 import { generateText } from 'ai';
 import { modelsEnabled } from '../models.js';
 
@@ -564,8 +570,26 @@ export async function runCommand(
     generate,
     model,
     log = () => {},
+    convoId = null,
   } = {},
 ) {
+  // An approval that stops at the batch cap goes on by itself when there is
+  // a conversation to tell when it is done (continuation.js).
+  const carryOn = Boolean(convoId);
+  const carry = async (plan, out) => {
+    if (!carryOn || !out?.ok || !(out.remaining > 0) || !out.again) return;
+    await continueLater({
+      planId: plan.id,
+      convoId,
+      command: out.again,
+      added: addedOrRecorded(out),
+      rateLimited: Boolean(out.rateLimited),
+    }).catch((err) =>
+      log('Could not store the rest of an approval', {
+        err: String(err?.message || err),
+      }),
+    );
+  };
   const say = (text, options = null, outcome = null) => ({
     text,
     options,
@@ -893,7 +917,9 @@ export async function runCommand(
         bands: cmd.bands,
         asOf: cmd.asOf,
         reason: cmd.raw,
+        carryOn,
       });
+      await carry(plan, out);
       return say(
         out.message,
         addedOrRecorded(out)
@@ -924,7 +950,9 @@ export async function runCommand(
     const out = await applyPlan(writeAgent, plan, bands, {
       kinds: cmd.kinds?.length ? cmd.kinds : null,
       reason: cmd.raw,
+      carryOn,
     });
+    await carry(plan, out);
     // Offer the way back with the receipt, while the code is still in front of
     // them. An undo you have to go and look up is one you will not use.
     return say(
@@ -1549,6 +1577,7 @@ async function runPending(
         generate,
         model,
         log,
+        convoId,
       });
       lines.push(reply.text);
       failed ||= Boolean(cmd.needsTarget) || reply.outcome === 'failed';
@@ -2053,6 +2082,98 @@ async function seekToTail(chat, { log = () => {} } = {}) {
  * @param {Function} [opts.generate]  injected for tests
  * @returns {Promise<{ answered: number, scanned: number, turns: Array }>}
  */
+/**
+ * Run the next batch of an approval that is carrying on by itself, and tell
+ * the conversation that asked for it once it is done. One batch per call, so
+ * a long approval holds the job queue no longer than one message does.
+ *
+ * @returns {Promise<null | { planId: string, done: boolean, added: number }>}
+ */
+export async function runContinuation({
+  chat,
+  writeAgent,
+  log = () => {},
+  now = Date.now(),
+}) {
+  const row = await dueContinuation({ now });
+  if (!row) return null;
+  const cmd = parseCommand(row.command);
+  const plan = cmd?.action === 'approve' ? await findPlan(cmd.code) : null;
+  if (!plan) {
+    await stopContinuation(row.plan_id);
+    return null;
+  }
+  const code = shortCode(plan.id);
+  const send = async (text, options = null) => {
+    await clearChoices(row.convo_id);
+    const body = withMenu(text, options);
+    for (const chunk of chunkForDm(body)) {
+      await chat.chat.bsky.convo.sendMessage({
+        convoId: row.convo_id,
+        message: { text: chunk },
+      });
+    }
+    if (options?.length) await offerChoices(row.convo_id, options);
+  };
+  let out;
+  try {
+    out = cmd.labels?.length
+      ? await applyPlanToTriage(writeAgent, plan, cmd.labels[0], {
+          bands: cmd.bands,
+          asOf: cmd.asOf,
+          carryOn: true,
+        })
+      : await applyPlan(
+          writeAgent,
+          plan,
+          cmd.bands.length ? cmd.bands : ALL_BANDS,
+          { kinds: cmd.kinds?.length ? cmd.kinds : null, carryOn: true },
+        );
+  } catch (err) {
+    const why = String(err?.message || err).slice(0, 200);
+    log('A carried-on approval failed', { plan: code, err: why });
+    const { gaveUp } = await retryLater(row.plan_id, { now });
+    if (gaveUp) {
+      await send(
+        `I stopped adding the rest of plan ${code}: ${why}. Send "${row.command.replace(/ asof=\S+/, '')}" to try again.`,
+      ).catch(() => {});
+    }
+    return { planId: row.plan_id, done: gaveUp, added: 0 };
+  }
+  const added = addedOrRecorded(out);
+  if (out.ok && out.remaining > 0) {
+    await continueLater(
+      {
+        planId: row.plan_id,
+        convoId: row.convo_id,
+        command: out.again || row.command,
+        added,
+        rateLimited: Boolean(out.rateLimited),
+      },
+      { now },
+    );
+    log('Carried an approval on', { plan: code, added, left: out.remaining });
+    return { planId: row.plan_id, done: false, added };
+  }
+  await stopContinuation(row.plan_id);
+  const total = row.added + added;
+  const text = out.ok
+    ? `Done with plan ${code}: added ${total.toLocaleString('en-US')} in all.`
+    : `I stopped adding the rest of plan ${code}: ${out.message}`;
+  await send(
+    text,
+    out.ok && total
+      ? [{ label: `Undo all ${total.toLocaleString('en-US')}`, command: `undo ${code}` }]
+      : null,
+  ).catch((err) =>
+    log('Could not say an approval is done', {
+      err: String(err?.message || err),
+    }),
+  );
+  log('Finished a carried-on approval', { plan: code, total });
+  return { planId: row.plan_id, done: true, added };
+}
+
 export async function runDmPass({
   chat,
   writeAgent,
@@ -2615,6 +2736,7 @@ export async function runDmPass({
             generate,
             model: activeModel,
             log,
+            convoId: entry.convoId,
           });
         } catch (err) {
           reply = {

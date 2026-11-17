@@ -418,6 +418,33 @@ describe('the write tools', () => {
     ]);
   });
 
+  it('carries an approval past the batch cap on by itself', async () => {
+    const deps = fakeDeps({
+      applyPlan: vi.fn(async () => ({
+        ok: true,
+        added: 500,
+        remaining: 700,
+        again: 'approve 3f9a2c1b UNKNOWN',
+        message: 'Added 500 to the list. The other 700 go on by themselves.',
+      })),
+      continueLater: vi.fn(async () => {}),
+    });
+    const ctx = ctxFor({ convoId: 'c1' });
+    const out = await buildActionTools(ctx, deps).approve_plan.execute({
+      code: '3f9a2c1b',
+      bands: ['UNKNOWN'],
+    });
+    expect(deps.applyPlan.mock.calls[0][3]).toMatchObject({ carryOn: true });
+    expect(deps.continueLater).toHaveBeenCalledWith({
+      planId: expect.any(String),
+      convoId: 'c1',
+      command: 'approve 3f9a2c1b UNKNOWN',
+      added: 500,
+      rateLimited: false,
+    });
+    expect(out.result).toMatch(/go on by themselves/);
+  });
+
   it('marks every bulk route as the agent', async () => {
     const deps = fakeDeps();
     const tools = buildActionTools(ctxFor(), deps);
@@ -429,12 +456,18 @@ describe('the write tools', () => {
     });
     // Each keeps the owner's words for the plan's note.
     const reason = 'block the nasty quoters on this';
-    expect(deps.applyPlan.mock.calls[0][3]).toEqual({ by: 'agent', reason });
+    // No conversation here, so nothing carries on by itself.
+    expect(deps.applyPlan.mock.calls[0][3]).toEqual({
+      by: 'agent',
+      reason,
+      carryOn: false,
+    });
     expect(deps.applyPlanToTriage.mock.calls[0][3]).toEqual({
       by: 'agent',
       asOf: expect.any(String),
       reason,
       skipBands: ['PROTECTED', 'CONNECTED', 'NOTABLE'],
+      carryOn: false,
     });
     expect(deps.applyPlanToActors.mock.calls[0][3]).toEqual({
       by: 'agent',

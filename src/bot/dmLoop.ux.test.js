@@ -377,9 +377,11 @@ describe('the post card', () => {
       'CONNECTED',
     ]);
     // The command the card ran is the words kept for the plan's note.
+    // It goes on by itself past the batch cap, so nobody says "go on".
     expect(plans.applyPlan.mock.calls[0][3]).toEqual({
       kinds: ['likers'],
       reason: 'approve 1c2d3e4f likers',
+      carryOn: true,
     });
     expect(sent[0]).toMatch(/Added 12/);
   });

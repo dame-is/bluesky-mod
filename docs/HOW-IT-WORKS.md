@@ -209,7 +209,7 @@ Mount it read-only, as `compose.yaml` does, so that whoever takes over the bot p
 
 ## What writes cost
 
-Bluesky rate-limits writes per account and per PDS, and a create costs more than a delete. `estimateWrites()` in `src/bot/bulkPlan.js` quotes whichever limit is tighter before you approve, so a large batch says something like "8,000 writes, 24,000 points, about 4.8 hours" up front instead of stalling halfway. An approval writes at most 500 accounts per message and an undo removes at most 1,000; send the same command again to continue.
+Bluesky rate-limits writes per account and per PDS, and a create costs more than a delete. `estimateWrites()` in `src/bot/bulkPlan.js` quotes whichever limit is tighter before you approve, so a large batch says something like "8,000 writes, 24,000 points, about 4.8 hours" up front instead of stalling halfway. An approval writes 500 accounts at a time. Past that the rest carries on by itself in the background, between your DMs, waits out the write limit when it is reached, and messages you when it is done; `cancel <code>` or `undo <code>` stops it. An undo removes at most 1,000 per message; send it again to continue.
 
 Logging in is capped separately (`createSession`), which is why the bot stores and resumes its session instead of logging in each time.
 
