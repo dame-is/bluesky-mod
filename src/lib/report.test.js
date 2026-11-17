@@ -375,6 +375,21 @@ describe('the post scan', () => {
     expect(own).toMatch(/^Plan 3f9a2c1b\. Cut: yes, /);
     expect(own.split('\n')).toHaveLength(1);
   });
+
+  it('names what went unread when it knows', async () => {
+    const { renderPlanReport } = await import('./report.js');
+    const cut = renderPlanReport({
+      ...plan,
+      truncated: true,
+      unread: [
+        { kind: 'like', count: 900 },
+        { kind: 'threadReply', count: 1 },
+      ],
+    });
+    expect(cut).toContain(
+      'Cut short: not every engagement was read (900 likes, 1 reply in the thread could not be), so these counts cover part of the post.',
+    );
+  });
 });
 
 describe('estimateWrites', () => {

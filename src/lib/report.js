@@ -239,6 +239,38 @@ export const DEFAULT_PLAN_TEMPLATE = [
 const CUT_SHORT =
   'not every engagement was read, so these counts cover part of the post';
 
+/** Engagement kinds as a reply names them, one and many. */
+const KIND_NAMES = {
+  like: ['like', 'likes'],
+  repost: ['repost', 'reposts'],
+  reply: ['reply', 'replies'],
+  threadReply: ['reply in the thread', 'replies in the thread'],
+  quote: ['quote', 'quotes'],
+  gate: ['reply setting', 'reply settings'],
+  other: ['other engagement', 'other engagements'],
+};
+
+/**
+ * What a harvest could not read, as words: "900 likes, 12 other
+ * engagements". Empty when it read everything it found.
+ */
+export function unreadText(unread) {
+  return (unread || [])
+    .map(({ kind, count }) => {
+      const [one, many] = KIND_NAMES[kind] || KIND_NAMES.other;
+      return `${Number(count || 0).toLocaleString('en-US')} ${count === 1 ? one : many}`;
+    })
+    .join(', ');
+}
+
+/** Why a scan is cut short, with what went unread when that is known. */
+function cutShort(plan) {
+  const missing = unreadText(plan.unread);
+  return missing
+    ? `not every engagement was read (${missing} could not be), so these counts cover part of the post`
+    : CUT_SHORT;
+}
+
 /** Every variable a post-scan template may use. */
 function planVariablesFor(plan) {
   const byBand = plan.byBand || {};
@@ -262,7 +294,7 @@ function planVariablesFor(plan) {
     participants: plan.total,
     engagements: engagements || EMPTY,
     needsLook: needsLook || 'none',
-    truncated: plan.truncated ? `yes, ${CUT_SHORT}` : 'no',
+    truncated: plan.truncated ? `yes, ${cutShort(plan)}` : 'no',
     cost: plan.cost || '',
     ...byBand,
   };
@@ -281,7 +313,7 @@ export function renderPlanReport(plan, { template } = {}) {
   const used = template || DEFAULT_PLAN_TEMPLATE;
   const body = fill(used, DEFAULT_PLAN_TEMPLATE, planVariablesFor(plan), 120);
   if (!plan.truncated || String(used).includes('{truncated}')) return body;
-  return `${body}\n\nCut short: ${CUT_SHORT}.`;
+  return `${body}\n\nCut short: ${cutShort(plan)}.`;
 }
 
 /**

@@ -43,6 +43,7 @@ vi.mock('../lib/target.js', async (importOriginal) => {
 });
 const harvested = [];
 const participants = [];
+const unread = [];
 const stopDuringHarvest = { controller: null };
 vi.mock('../lib/harvest.js', () => ({
   harvestPost: async (uri) => {
@@ -61,7 +62,8 @@ vi.mock('../lib/harvest.js', () => ({
       harvestedAt: '2026-10-01T00:00:00Z',
       participants,
       totals: { participants: participants.length, engagements, records: 0 },
-      truncated: false,
+      truncated: unread.length > 0,
+      unread: [...unread],
     };
   },
 }));
@@ -83,6 +85,7 @@ beforeEach(() => {
   stored.decision.length = 0;
   participants.length = 0;
   harvested.length = 0;
+  unread.length = 0;
   stopDuringHarvest.controller = null;
 });
 
@@ -142,5 +145,20 @@ describe('a scan the turn ran out of time for', () => {
     ).rejects.toThrow('That took too long');
     expect(stored.plan).toEqual([]);
     expect(stored.decision).toEqual([]);
+  });
+});
+
+describe('a scan that could not read everything', () => {
+  it('says which kinds went unread, on the plan and in what it returns', async () => {
+    participants.push(engaged('did:plc:s1', { quote: 1 }));
+    unread.push({ kind: 'like', count: 900 });
+    const out = await proposePlan({ link: POST, kind: 'everyone' });
+    expect(out).toMatchObject({
+      truncated: true,
+      unread: [{ kind: 'like', count: 900 }],
+    });
+    expect(stored.plan[0].totals.unread).toEqual([
+      { kind: 'like', count: 900 },
+    ]);
   });
 });

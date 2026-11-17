@@ -17,6 +17,7 @@
 //   THE POST CARD. A post with no words gets one compact summary and answers to
 //   words (author, likers, unknowns, everyone, hostile) instead of numbers.
 
+import { unreadText } from '../lib/report.js';
 import { select, upsert } from './db.js';
 
 export const REACTION = { working: '👀', done: '✅', failed: '❌' };
@@ -249,6 +250,18 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
     lines.push(
       `${plural(plan.total, 'account', 'accounts')} engaged${parts.length ? `: ${parts.join(', ')}` : ''}.`,
     );
+    // A card that leaves out "likers" because the likes could not be read
+    // says why, and any cut harvest says the counts are partial.
+    const missing = unreadText(plan.unread);
+    if (missing) {
+      lines.push(
+        `Could not read ${missing}, so these counts cover part of the post. Send it again to retry.`,
+      );
+    } else if (plan.truncated) {
+      lines.push(
+        'Not every engagement was read, so these counts cover part of the post.',
+      );
+    }
     const b = plan.byBand || {};
     const bands = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED', 'PROTECTED']
       .filter((k) => b[k])

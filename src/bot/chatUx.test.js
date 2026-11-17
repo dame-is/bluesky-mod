@@ -63,6 +63,25 @@ describe('the post card', () => {
     expect(text.length).toBeLessThan(400);
   });
 
+  it('says what it could not read, or that the read was cut short', () => {
+    expect(renderCard(PLAN)).not.toContain('part of the post');
+    expect(
+      renderCard({
+        ...PLAN,
+        truncated: true,
+        unread: [
+          { kind: 'like', count: 900 },
+          { kind: 'other', count: 1 },
+        ],
+      }),
+    ).toContain(
+      'Could not read 900 likes, 1 other engagement, so these counts cover part of the post. Send it again to retry.',
+    );
+    expect(renderCard({ ...PLAN, truncated: true, unread: [] })).toContain(
+      'Not every engagement was read, so these counts cover part of the post.',
+    );
+  });
+
   it('counts a direct reply once', () => {
     // A direct reply to a first post links to it as parent and as root.
     const text = renderCard({

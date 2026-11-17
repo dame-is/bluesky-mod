@@ -870,6 +870,8 @@ export function buildActionTools(ctx, deps = DEPS) {
             engagements: plan.engagements,
             withWords: plan.withText,
             truncated: plan.truncated,
+            // Fixed kind names and counts only, so no fence is needed.
+            unread: plan.unread,
             protectedCount: plan.protectedCount,
             writeCost: plan.cost,
             author: plan.author

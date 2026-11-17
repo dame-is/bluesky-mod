@@ -206,6 +206,7 @@ export async function proposePlan({ link, kind, signal }) {
         blocksYou,
         snapshot: takenAt,
         truncated: summary.truncated,
+        unread: summary.unread,
       },
       note: `bulk ${kind} from ${target.uri}`,
     },
@@ -253,6 +254,8 @@ export async function proposePlan({ link, kind, signal }) {
     // front. Counts only who an approval could still add.
     cost: estimateWrites(fresh.total),
     truncated: summary.truncated,
+    // The kinds the harvest could not read, with how many records each held.
+    unread: summary.unread,
     protectedCount: byBand.PROTECTED || 0,
     alreadyListed,
     blocksYou,
