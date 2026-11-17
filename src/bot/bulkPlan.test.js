@@ -899,6 +899,93 @@ describe('undo last', () => {
   });
 });
 
+describe('a batch written but never confirmed', () => {
+  // Plan B was approved earlier and its add is still on the list.
+  const old = () => {
+    repo.set('rk-old', 'did:plc:old');
+    constellation.set('did:plc:old', ['rk-old']);
+    return added(PLAN_B, 'did:plc:old', '2026-10-01T09:00:00Z', {
+      approved_via: 'band',
+      acted_seq: 1,
+    });
+  };
+
+  it('is the change a bare undo takes back when its record could not be written', async () => {
+    db.decision = [old(), scanned(PLAN_A, 'did:plc:x', 'UNKNOWN')];
+    db.failStamp = 'database is locked';
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(out.message).toMatch(/could not be recorded/);
+    db.failStamp = null;
+
+    expect((await lastChange()).plan.id).toBe(PLAN_A);
+    expect(await countDecisions(db.plan[0], { state: 'live' })).toBe(1);
+
+    const undo = await undoPlan(bot(), db.plan[0]);
+    expect(undo).toMatchObject({ removed: 1, remaining: 0 });
+    expect([...repo.values()]).toEqual(['did:plc:old']);
+  });
+
+  it('tries the record twice before it gives up', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:x', 'UNKNOWN')];
+    const { upsert } = await import('./db.js');
+    const real = upsert.getMockImplementation();
+    let refused = 0;
+    upsert.mockImplementation(async (table, rows) => {
+      if (table === 'decision' && rows.some((r) => r.acted_at) && !refused) {
+        refused += 1;
+        throw new Error('database is locked');
+      }
+      return real(table, rows);
+    });
+    try {
+      const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+      expect(out.message).toBe('Added 1 to the list.');
+      expect(row(PLAN_A, 'did:plc:x').acted_at).toBeTruthy();
+    } finally {
+      upsert.mockImplementation(real);
+    }
+  });
+
+  it('is told apart by a cancel, which offers the undo that looks for it', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:x', 'UNKNOWN')];
+    await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
+
+    const out = await cancelPlan(db.plan[0]);
+
+    expect(out.live).toBe(1);
+    expect(out.message).toBe(
+      'Cancelled 1c2d3e4f. 1 it sent may be on the list but was never recorded; "undo 1c2d3e4f" looks for it and takes it off.',
+    );
+  });
+
+  it('is passed over by the next bare undo once an undo finds it never reached the list', async () => {
+    db.decision = [old(), scanned(PLAN_A, 'did:plc:x', 'UNKNOWN')];
+    const agent = bot();
+    // The connection drops before the PDS has the batch.
+    agent.com.atproto.repo.applyWrites.mockRejectedValueOnce(
+      new Error('socket hang up'),
+    );
+    await applyPlan(agent, db.plan[0], ['UNKNOWN']);
+    expect((await lastChange()).plan.id).toBe(PLAN_A);
+
+    const undo = await undoPlan(bot(), db.plan[0]);
+
+    expect(undo.message).toBe('Nothing from that plan is still on the list.');
+    expect(row(PLAN_A, 'did:plc:x').action).toBe(null);
+    expect((await lastChange()).plan.id).toBe(PLAN_B);
+  });
+
+  it('does not shadow an older change when the PDS refused it', async () => {
+    db.decision = [old(), scanned(PLAN_A, 'did:plc:x', 'UNKNOWN')];
+    const agent = bot();
+    agent.com.atproto.repo.applyWrites.mockRejectedValueOnce(
+      new Error('Rate Limit Exceeded'),
+    );
+    await applyPlan(agent, db.plan[0], ['UNKNOWN']);
+    expect((await lastChange()).plan.id).toBe(PLAN_B);
+  });
+});
+
 describe('approving one plan twice', () => {
   it('says how many an undo of the plan takes off, earlier approvals included', async () => {
     db.decision = [

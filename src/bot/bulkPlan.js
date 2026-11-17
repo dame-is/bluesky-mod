@@ -504,6 +504,7 @@ const unmarked = (plan, r) => ({
   band: r.band,
   action: null,
   approved_via: null,
+  acted_seq: null,
 });
 
 /**
@@ -520,12 +521,16 @@ const unmarked = (plan, r) => ({
  * failing throws, so nothing is written.
  *
  * Each batch is marked as asked for (`action` set, `acted_at` not yet) before
- * it is sent, and stamped `acted_at` once the PDS has taken it. A batch the
- * PDS refused has its mark taken off again. A batch whose reply was lost, or
- * whose stamp failed, is then found on the list by the next approval or undo
- * and recorded as this plan's add, rather than as someone another plan put
- * there, unless another plan holds a live add of that account. A stamp that
- * fails stops the run, since every batch after it would go unrecorded too.
+ * it is sent, with the next number in the order of changes, and stamped
+ * `acted_at` once the PDS has taken it. A batch the PDS refused has its mark
+ * taken off again. A batch whose reply was lost, or whose stamp failed, keeps
+ * its mark: a bare undo counts it as a change (lastChange), an undo's count
+ * includes it (countDecisions), and the next approval or undo looks for it on
+ * the list. Found there, it is recorded as this plan's add, rather than as
+ * someone another plan put there, unless another plan holds a live add of
+ * that account. Not found by a walk of the whole repo, it never reached the
+ * list, and an undo takes the mark off. A stamp that fails twice stops the
+ * run, since every batch after it would go unrecorded too.
  *
  * `note` is a sentence for the reply when the run stopped early for a reason
  * other than the rate limit.
@@ -558,7 +563,9 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
   const already = others.length;
   for (let i = 0; i < fresh.length && !stopping; i += BATCH) {
     const batch = fresh.slice(i, i + BATCH);
+    let seq;
     try {
+      seq = await nextActedSeq();
       await upsert(
         'decision',
         batch.map((r) => ({
@@ -567,6 +574,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
           band: r.band,
           action: 'list_add',
           approved_via: via,
+          acted_seq: seq,
         })),
       );
     } catch (err) {
@@ -619,10 +627,20 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       ),
     );
     added += batch.length;
-    try {
-      await upsert('decision', await stampRows(plan, batch, via));
-    } catch (err) {
-      note = ` ${batch.length} of them could not be recorded (${brief(err)}), so I stopped there. The same approval sent again records them.`;
+    // Tried twice, like the log of a single write: a lock another writer
+    // held may have cleared by the second try.
+    let unrecorded = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await upsert('decision', await stampRows(plan, batch, via, seq));
+        unrecorded = null;
+        break;
+      } catch (err) {
+        unrecorded = err;
+      }
+    }
+    if (unrecorded) {
+      note = ` ${batch.length} of them could not be recorded (${brief(unrecorded)}), so I stopped there. The same approval sent again records them.`;
       break;
     }
   }
@@ -631,13 +649,13 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
 
 /**
  * Decision rows saying these accounts were added by this plan, stamped with
- * the current time and the next number in the order of changes (see
- * nextActedSeq). Without `via`, each row keeps the one it was marked with
- * when it was sent.
+ * the current time and `seq`, the number the batch was marked with when it
+ * was sent, or else the next number in the order of changes (see
+ * nextActedSeq). Without `via`, each row keeps the one it was marked with.
  */
-async function stampRows(plan, rows, via = null) {
+async function stampRows(plan, rows, via = null, seq = null) {
   const now = new Date().toISOString();
-  const seq = await nextActedSeq();
+  seq ??= await nextActedSeq();
   return rows.map((r) => ({
     plan_id: plan.id,
     did: r.did,
@@ -767,8 +785,8 @@ export async function applyPlanToTriage(
  * itself counts them: `pending` is what an approval would still add (never
  * PROTECTED, by the plan's band or by the protected table as it stands, never
  * anyone already acted on, and with `asOf` nothing labelled after it), `live`
- * is what an undo would take back. Read before a write so the check on it
- * can see the size of it.
+ * is the most an undo would take back (see openAdds). Read before a write so
+ * the check on it can see the size of it.
  */
 export async function countDecisions(
   plan,
@@ -780,19 +798,16 @@ export async function countDecisions(
     asOf = null,
   } = {},
 ) {
+  if (state === 'live') {
+    const { recorded, unconfirmed } = await openAdds(plan);
+    return recorded + unconfirmed;
+  }
   const rows = await selectAll('decision', {
     select:
       'did,band,triage,triage_at,action,acted_at,undone_at,engaged,already_listed',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
-  // This plan's recorded adds, the most an undo of it takes off. It takes
-  // fewer when another plan also added someone by name.
-  if (state === 'live') {
-    return rows.filter(
-      (r) => r.acted_at && r.action === 'list_add' && !r.undone_at,
-    ).length;
-  }
   const pending = rows.filter((r) => {
     if (r.acted_at || r.band === 'PROTECTED' || r.already_listed) return false;
     if (bands?.length && !bands.includes(r.band)) return false;
@@ -801,6 +816,24 @@ export async function countDecisions(
     return engagedAs(r, kinds);
   });
   return (await withoutProtected(pending)).rows.length;
+}
+
+/**
+ * This plan's adds that are still open: `recorded` were confirmed, and
+ * `unconfirmed` were sent but never confirmed (see writeRows), so they may or
+ * may not be on the list. Together they are the most an undo of the plan
+ * takes off. It takes fewer when another plan also added someone by name, or
+ * when an unconfirmed add never reached the list.
+ */
+async function openAdds(plan) {
+  const rows = await selectAll('decision', {
+    select: 'did,action,acted_at,undone_at',
+    eq: { plan_id: plan.id },
+    order: 'did.asc',
+  });
+  const open = rows.filter((r) => r.action === 'list_add' && !r.undone_at);
+  const recorded = open.filter((r) => r.acted_at).length;
+  return { recorded, unconfirmed: open.length - recorded };
 }
 
 /** What a plan holds for these DIDs: band, triage label, whether acted on. */
@@ -822,13 +855,14 @@ export async function decisionsFor(plan, dids) {
  * are left as they are: they record what the owner consented to, and the
  * accounts added under it are still there. The reply says how many of them
  * are, and whether an auto watch is still adding to the plan, since a cancel
- * stops neither.
+ * stops neither. `live` is the most an undo takes off, adds that were sent
+ * but never confirmed included.
  *
  * @returns {Promise<{ live: number, watching: number, message: string }>}
  */
 export async function cancelPlan(plan, { now = Date.now() } = {}) {
-  const [live, watches] = await Promise.all([
-    countDecisions(plan, { state: 'live' }),
+  const [{ recorded, unconfirmed }, watches] = await Promise.all([
+    openAdds(plan),
     select('watch', {
       select: 'id,mode,until',
       eq: { plan_id: plan.id },
@@ -844,9 +878,15 @@ export async function cancelPlan(plan, { now = Date.now() } = {}) {
     (w) => w.mode === 'auto' && Date.parse(w.until) > now,
   ).length;
   const code = shortCode(plan.id);
-  const onList = live
-    ? `${live} it added ${live === 1 ? 'is' : 'are'} still on the list; "undo ${code}" takes ${live === 1 ? 'it' : 'them'} off.`
-    : 'Nothing was added.';
+  const live = recorded + unconfirmed;
+  const them = live === 1 ? 'it' : 'them';
+  const onList = recorded
+    ? `${recorded} it added ${recorded === 1 ? 'is' : 'are'} still on the list` +
+      (unconfirmed ? `, and ${unconfirmed} more it sent may be` : '') +
+      `; "undo ${code}" takes ${them} off.`
+    : unconfirmed
+      ? `${unconfirmed} it sent may be on the list but ${unconfirmed === 1 ? 'was' : 'were'} never recorded; "undo ${code}" looks for ${them} and takes ${them} off.`
+      : 'Nothing was added.';
   return {
     live,
     watching,
@@ -1043,16 +1083,49 @@ export function estimateWrites(n, { kind = 'create' } = {}) {
  * change before it. So is a typed block of someone already listed while an
  * add that wrote their listitem still holds them: it changed nothing, and is
  * logged only so an undo of that add leaves them on the list (heldByName).
- * Usually one row from the database.
+ *
+ * A batch sent but never confirmed (see writeRows) counts as a change in the
+ * order it was sent, so its plan is named when it is the newest, and the
+ * undo of that plan looks for it on the list.
  *
  * @returns {Promise<{ plan: object|null,
  *   removed: { did: string, planId: string, at: string }|null }>}
  */
 export async function lastChange() {
-  let last = null;
-  for (let offset = 0; !last; offset += 1) {
+  const last = await newestChange();
+  const [mark] =
+    (await select('decision', {
+      select: 'plan_id,acted_seq',
+      eq: { action: 'list_add' },
+      where: {
+        acted_at: 'is.null',
+        acted_seq: 'not.is.null',
+        undone_at: 'is.null',
+      },
+      order: 'acted_seq.desc',
+      limit: 1,
+    })) || [];
+  if (mark && !(last?.acted_seq > mark.acted_seq)) {
+    return { plan: await planById(mark.plan_id), removed: null };
+  }
+  if (!last) return { plan: null, removed: null };
+  if (last.action === 'list_remove') {
+    return {
+      plan: null,
+      removed: { did: last.did, planId: last.plan_id, at: last.acted_at },
+    };
+  }
+  return { plan: await planById(last.plan_id), removed: null };
+}
+
+const planById = async (id) =>
+  (await select('plan', { select: PLAN_COLUMNS, eq: { id } }))?.[0] ?? null;
+
+/** The newest recorded change lastChange counts, or null. */
+async function newestChange() {
+  for (let offset = 0; ; offset += 1) {
     const rows = await select('decision', {
-      select: 'plan_id,did,action,acted_at,already_listed',
+      select: 'plan_id,did,action,acted_at,acted_seq,already_listed',
       where: {
         action: 'in.(list_add,list_remove)',
         acted_at: 'not.is.null',
@@ -1065,20 +1138,9 @@ export async function lastChange() {
       ...(offset ? { offset } : {}),
     });
     const row = rows?.[0];
-    if (!row) return { plan: null, removed: null };
-    if (!row.already_listed || !(await heldByWrite(row))) last = row;
+    if (!row) return null;
+    if (!row.already_listed || !(await heldByWrite(row))) return row;
   }
-  if (last.action === 'list_remove') {
-    return {
-      plan: null,
-      removed: { did: last.did, planId: last.plan_id, at: last.acted_at },
-    };
-  }
-  const plans = await select('plan', {
-    select: PLAN_COLUMNS,
-    eq: { id: last.plan_id },
-  });
-  return { plan: plans?.[0] ?? null, removed: null };
 }
 
 /**
@@ -1298,8 +1360,18 @@ export async function undoPlan(
   if (landed.length) {
     await upsert('decision', await stampRows(plan, landed));
   }
-  // An unconfirmed add not found on the list is left as it is: a later
-  // approval writes it.
+  // An unconfirmed add that a walk of the whole repo did not find never
+  // reached the list, so its mark comes off: a later approval writes it, and
+  // a bare undo steps back past it. Without a whole walk it is left as it is.
+  const absent = exhaustive
+    ? open.filter((r) => !r.acted_at && !found.includes(r))
+    : [];
+  if (absent.length) {
+    await upsert(
+      'decision',
+      absent.map((r) => unmarked(plan, r)),
+    );
+  }
   const live = open.filter((r) => r.acted_at || landed.includes(r));
   if (!live.length) return nothing;
 
