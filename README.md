@@ -9,6 +9,7 @@ You send it a handle, a link or a shared post and say "block". It adds that acco
 - **The list isn't yours.** It belongs to the bot, so it doesn't show up among lists you made. Give the bot and the list plain names that don't point back to you.
 - **Your password stays with you.** The bot holds an app password for its own account only.
 - **What stays visible:** subscribing to a list as a *block* list writes a public record in your repo that points at the list. Anyone who looks at your repo directly can see you subscribe to it. Subscribing as a *mute* list is private. Choose with that in mind.
+- **The one exception is the shield.** Who may reply to your post and whether it can be quoted are records in your own repo, so closing replies needs a session for your account: `MOD_OWNER_APP_PASSWORD`, an app password you make for this and can revoke at any time. It is off unless you set it. The bot refuses your account password, refuses a password for any other account, and hands the session to one module that can only read your posts and write those two kinds of record. Whoever can read the bot's settings or database could still act as that app password, so leave it unset if that is not a trade you want; the shield then only tells you. [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#the-shield-replies-quotes-and-attack-mode) has the details.
 
 ## What it does
 
@@ -26,6 +27,12 @@ With a model:
 - **Agent mode.** Talk to it in sentences ("block whoever wrote this, and anyone in the quotes being hostile") instead of commands. Each write is first checked by a separate call that sees your words but not the posts the agent read, and the PROTECTED veto still holds.
 - **Sort replies by tone.** Reads the replies and quotes on a post and labels each `hostile`, `arguing` or `neutral`, so you can add only the hostile ones, with their own words kept next to each label.
 - **Watch a post.** Re-reads a post's new quotes and replies every few minutes for a day and tells you what came in. It can also offer to watch one of your posts when it suddenly takes off.
+
+The shield (optional, needs an app password for your own account):
+
+- **Close replies and quotes when strangers pile on.** Past a threshold on one of your posts (12 accounts outside your circle replying in 15 minutes, 6 quoting), the bot closes replies to people you follow and mention, or turns quotes off, and asks first unless you set it to act. It puts them back by itself a day later once the post has gone quiet.
+- **Attack mode.** A circuit breaker for harassment: when 40 strangers reply to, quote or mention you within half an hour, or when you DM "shields up", it closes replies and turns quotes off on every recent post, detaches strangers' quotes from the posts under fire, gates new posts as you make them, and starts watches so the usual review decides who is blocked. "shields down", or the end of the day, puts everything back exactly as it was, except anything you changed yourself in the meantime.
+- **Only strangers count.** UNKNOWN and NOTABLE accounts, by the same scoring as everything else. Friends replying in a hurry never trip it.
 
 ## How it decides who is close to you
 
