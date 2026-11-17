@@ -223,6 +223,14 @@ export const DEFAULT_PLAN_TEMPLATE = [
   'If you add all: {cost}',
 ].join('\n');
 
+/**
+ * What a cut harvest means for the numbers above it. The harvest is cut when
+ * a source hits the page cap, never answers, or is one of too many unfamiliar
+ * kinds to page.
+ */
+const CUT_SHORT =
+  'not every engagement was read, so these counts cover part of the post';
+
 /** Every variable a post-scan template may use. */
 function planVariablesFor(plan) {
   const byBand = plan.byBand || {};
@@ -246,15 +254,26 @@ function planVariablesFor(plan) {
     participants: plan.total,
     engagements: engagements || EMPTY,
     needsLook: needsLook || 'none',
-    truncated: plan.truncated ? 'yes, the harvest hit a page cap' : 'no',
+    truncated: plan.truncated ? `yes, ${CUT_SHORT}` : 'no',
     cost: plan.cost || '',
     ...byBand,
   };
 }
 
-/** Fill the post-scan template. */
+/**
+ * Fill the post-scan template.
+ *
+ * A cut harvest gets a line of its own, because "UNKNOWN: 5,800" from a
+ * viral post otherwise reads as everyone who engaged. The template has no
+ * conditionals and "Cut short: no" on every scan is a line nobody reads, so
+ * the line is added only when it is true, unless the template places
+ * {truncated} itself.
+ */
 export function renderPlanReport(plan, { template } = {}) {
-  return fill(template, DEFAULT_PLAN_TEMPLATE, planVariablesFor(plan), 120);
+  const used = template || DEFAULT_PLAN_TEMPLATE;
+  const body = fill(used, DEFAULT_PLAN_TEMPLATE, planVariablesFor(plan), 120);
+  if (!plan.truncated || String(used).includes('{truncated}')) return body;
+  return `${body}\n\nCut short: ${CUT_SHORT}.`;
 }
 
 /**
@@ -298,24 +317,36 @@ export function planActions(plan, { hasModel = true } = {}) {
     });
   }
 
-  if (byBand.UNKNOWN) {
+  // An add is counted by who it could still add, as the card counts it. The
+  // write skips anyone already on the list, so on a second scan of a post
+  // "Add the 300" would add 10. The review shows every scored account in the
+  // plan, listed or not, so its count stays the whole plan's.
+  const canAdd = plan.fresh?.byBand || byBand;
+  const addTotal = plan.fresh?.total ?? plan.total - (byBand.PROTECTED || 0);
+  const namedIn = (counts) =>
+    Object.entries(counts)
+      .filter(([b, n]) => b !== 'UNKNOWN' && b !== 'PROTECTED' && n)
+      .reduce((t, [, n]) => t + n, 0);
+
+  if (canAdd.UNKNOWN) {
     out.push({
-      label: `Add the ${byBand.UNKNOWN} UNKNOWN accounts`,
+      label: `Add the ${canAdd.UNKNOWN} UNKNOWN accounts`,
       command: `approve ${plan.code} UNKNOWN`,
     });
   }
-  const named = Object.entries(byBand)
-    .filter(([b, n]) => b !== 'UNKNOWN' && b !== 'PROTECTED' && n)
-    .reduce((t, [, n]) => t + n, 0);
+  const named = namedIn(byBand);
   if (named) {
     out.push({
       label: `Show me the ${named} that need a look`,
       command: `review ${plan.code}`,
     });
+  }
+  // Without a named band left to add, "Add all" is the UNKNOWN option again.
+  if (namedIn(canAdd)) {
     out.push({
-      label: `Add all ${plan.total - (byBand.PROTECTED || 0)}, every band`,
-      command: `approve ${plan.code} ${Object.keys(byBand)
-        .filter((b) => b !== 'PROTECTED' && byBand[b])
+      label: `Add all ${addTotal}, every band`,
+      command: `approve ${plan.code} ${Object.keys(canAdd)
+        .filter((b) => b !== 'PROTECTED' && canAdd[b])
         .join(',')}`,
     });
   }

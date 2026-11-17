@@ -296,6 +296,73 @@ describe('the post scan', () => {
       expect(o.command).not.toContain('PROTECTED');
     }
   });
+
+  it('counts an add by who it could still add, not who is already listed', async () => {
+    // A second scan of the same post: most engagers went on the list the
+    // first time, and the write skips them. "Add the 300" that adds 10 is a
+    // label promising what the button does not do.
+    const { planActions } = await import('./report.js');
+    const rescan = {
+      ...plan,
+      total: 310,
+      byBand: {
+        PROTECTED: 1,
+        CONNECTED: 4,
+        PERIPHERAL: 5,
+        NOTABLE: 0,
+        UNKNOWN: 300,
+      },
+      fresh: {
+        total: 12,
+        byBand: {
+          PROTECTED: 0,
+          CONNECTED: 0,
+          PERIPHERAL: 2,
+          NOTABLE: 0,
+          UNKNOWN: 10,
+        },
+        likers: 12,
+      },
+    };
+    const out = planActions(rescan);
+    expect(out.map((o) => o.label)).toEqual([
+      'Add the 10 UNKNOWN accounts',
+      'Show me the 9 that need a look',
+      'Add all 12, every band',
+      'Do nothing',
+    ]);
+    expect(out[2].command).toBe('approve 3f9a2c1b PERIPHERAL,UNKNOWN');
+  });
+
+  it('offers no add when everyone is already on the list', async () => {
+    const { planActions } = await import('./report.js');
+    const listed = {
+      ...plan,
+      total: 7,
+      byBand: { CONNECTED: 2, UNKNOWN: 5 },
+      fresh: { total: 0, byBand: { CONNECTED: 0, UNKNOWN: 0 }, likers: 0 },
+    };
+    expect(planActions(listed).map((o) => o.command)).toEqual([
+      'review 3f9a2c1b',
+      'cancel 3f9a2c1b',
+    ]);
+  });
+
+  it('says when the harvest was cut short', async () => {
+    // A viral post stops at the page cap. Without a line saying so, "UNKNOWN:
+    // 5,800" reads as everyone who engaged.
+    const { renderPlanReport } = await import('./report.js');
+    expect(renderPlanReport(plan)).not.toMatch(/cut short/i);
+    const cut = renderPlanReport({ ...plan, truncated: true });
+    expect(cut).toMatch(/^Cut short: .*part of the post\.$/m);
+    // A template that places {truncated} itself gets no second line.
+    const own = renderPlanReport(
+      { ...plan, truncated: true },
+      { template: 'Plan {code}. Cut: {truncated}' },
+    );
+    expect(own).toMatch(/^Plan 3f9a2c1b\. Cut: yes, /);
+    expect(own.split('\n')).toHaveLength(1);
+  });
 });
 
 describe('estimateWrites', () => {
