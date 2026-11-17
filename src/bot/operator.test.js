@@ -1020,7 +1020,7 @@ describe('checked writes', () => {
     });
     const { action } = deps.checkIntent.mock.calls[0][0];
     expect(action).toMatch(
-      /^Watch a post not mentioned anywhere in this conversation for 24 hours/,
+      /^Watch a post not found in the recent messages for 24 hours/,
     );
     expect(action).not.toContain('owner-asked');
   });
@@ -1139,7 +1139,7 @@ describe('where a target came from', () => {
       bands: ['UNKNOWN'],
     });
     expect(actionOf(deps)).toContain(
-      'plan 3f9a2c1b, which holds the post\'s likers (created while answering this message; the plan for a post not mentioned anywhere in this conversation',
+      'plan 3f9a2c1b, which holds the post\'s likers (created while answering this message; the plan for a post not found in the recent messages',
     );
     expect(out.waitingOnOwner).toBeUndefined();
     expect(ctx.pending).toEqual([]);
@@ -1359,6 +1359,81 @@ describe('where a target came from', () => {
       expect(ctx.pending).toEqual([]);
     });
   }
+
+  // History keeps each message's text, and dmLoop adds a line naming the
+  // post sent last. Neither says which posts the owner shared before that.
+  describe('a post the owner shared in an earlier message', () => {
+    const A = 'at://did:plc:alice/app.bsky.feed.post/3laaaaaaaaaa2';
+    const B = 'at://did:plc:bob/app.bsky.feed.post/3lbbbbbbbbbb2';
+    const planA = planOn(A, 'aaaaaaaa-0000-4000-8000-000000000000');
+
+    it('is not called a different post because another one was sent since', async () => {
+      const deps = refusing({ findPlan: vi.fn(async () => planA) });
+      const ctx = ctxFor({
+        checkWrites: true,
+        said: `block the hostile ones on both\n\n[The post last sent in this conversation: ${B}]`,
+        earlier: 'Plan bbbbbbbb: 30 quoters, 12 read as hostile.',
+        ownerText: "what's going on in the quotes here?\nand on this one?",
+        pending: [],
+      });
+      await buildActionTools(ctx, deps).approve_plan.execute({
+        code: 'aaaaaaaa',
+        label: 'hostile',
+      });
+      expect(actionOf(deps)).not.toContain('a different post');
+      expect(actionOf(deps)).toContain(
+        'the plan for a post not found in the recent messages',
+      );
+    });
+
+    it('is read as sent by the owner when their earlier message names it', async () => {
+      const deps = refusing({ findPlan: vi.fn(async () => planA) });
+      const ctx = ctxFor({
+        checkWrites: true,
+        said: 'ok block the hostile ones on that',
+        ownerText: `what's going on in the quotes here?\n\n[The post the owner shared: ${A}]`,
+        pending: [],
+      });
+      const out = await buildActionTools(ctx, deps).approve_plan.execute({
+        code: 'aaaaaaaa',
+        label: 'hostile',
+      });
+      expect(actionOf(deps)).toContain(
+        'the plan for a post the owner sent earlier in this conversation',
+      );
+      expect(out.waitingOnOwner).toBe(true);
+    });
+
+    it('gets no post clause when a link to the same key could not be resolved', async () => {
+      const deps = refusing({
+        findPlan: vi.fn(async () => planA),
+        resolveActor: vi.fn(async () => {
+          throw new Error('AppView 502');
+        }),
+      });
+      const ctx = ctxFor({
+        checkWrites: true,
+        convoId: 'c1',
+        said: 'block the hostile quoters on https://bsky.app/profile/alice.test/post/3laaaaaaaaaa2',
+        plans: ['aaaaaaaa'],
+        pending: [],
+      });
+      const tools = buildActionTools(ctx, deps);
+      const out = await tools.approve_plan.execute({
+        code: 'aaaaaaaa',
+        label: 'hostile',
+      });
+      expect(actionOf(deps)).not.toContain('a different post');
+      expect(actionOf(deps)).not.toContain('not found');
+      expect(actionOf(deps)).not.toContain('owner attached');
+      expect(out.waitingOnOwner).toBeUndefined();
+      await tools.watch_post.execute({ post: A, block_hostile: true });
+      expect(deps.checkIntent.mock.calls[1][0].action).toMatch(
+        /^Watch a post for 24 hours/,
+      );
+      expect(ctx.pending).toEqual([]);
+    });
+  });
 
   it('does not offer a bare undo nobody pointed at', async () => {
     const deps = refusing();

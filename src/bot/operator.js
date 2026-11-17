@@ -450,6 +450,12 @@ const keyOf = (raw) => raw.replace(/[.:]+$/, '');
 const POST_URI = /^at:\/\/([^/]+)\/app\.bsky\.feed\.post\/([^/?#]+)$/;
 
 /**
+ * The line dmLoop adds to a message to name the post sent last in the
+ * conversation. That post came with an earlier message, not this one.
+ */
+const REMEMBERED = /\[The post last sent in this conversation: [^\]]*\]/g;
+
+/**
  * Posts referred to in a message: at:// post URIs, and post links from any
  * client, which all serve the same /profile/<actor>/post/<rkey> path. The
  * author is a DID or a handle, as written.
@@ -516,7 +522,7 @@ const PLAN_SOURCE = {
   otherPost: 'the plan for a different post, not the one the owner attached',
   earlierPost: "the plan for a post named in the assistant's previous message",
   convoPost: 'the plan for a post mentioned earlier in this conversation',
-  unnamedPost: 'the plan for a post not mentioned anywhere in this conversation',
+  unnamedPost: 'the plan for a post not found in the recent messages',
   said: "named in the owner's message",
   earlier: "named in the assistant's previous message",
   ownerEarlier: "named in one of the owner's earlier messages",
@@ -531,7 +537,7 @@ const WATCHED = {
   otherPost: 'a different post, not the one the owner attached,',
   earlierPost: "a post named in the assistant's previous message",
   convoPost: 'a post mentioned earlier in this conversation',
-  unnamedPost: 'a post not mentioned anywhere in this conversation',
+  unnamedPost: 'a post not found in the recent messages',
 };
 
 function stamp(iso) {
@@ -725,11 +731,16 @@ export function buildActionTools(ctx, deps = DEPS) {
 
   /**
    * Where a post sits in the conversation: one of the post clauses in
-   * PLAN_SOURCE, or null for anything but a post's at:// URI. Matched on
-   * author DID and record key together, because anyone can give a post of
-   * their own the same key as someone else's. The key is taken exactly, so a
-   * post whose key is another's plus a full stop does not match where that
-   * other post is named.
+   * PLAN_SOURCE, or null for anything but a post's at:// URI, or when code
+   * cannot tell. Matched on author DID and record key together, because
+   * anyone can give a post of their own the same key as someone else's. The
+   * key is taken exactly, so a post whose key is another's plus a full stop
+   * does not match where that other post is named.
+   *
+   * It is a different post only when this message carries posts and each
+   * is known to be another one. The post named as sent last does not count,
+   * because it came with an earlier message. A link with the same key whose
+   * author did not resolve leaves it unknown.
    */
   const postPlace = async (uri) => {
     const m = POST_URI.exec(String(uri ?? ''));
@@ -738,10 +749,15 @@ export function buildActionTools(ctx, deps = DEPS) {
     const post = { did, rkey: m[2] };
     if (await refersTo(ctx.said, post)) return 'attached';
     if (await refersTo(ctx.ownerText, post)) return 'ownerPost';
-    if (postRefs(ctx.said).length) return 'otherPost';
+    let unsure = false;
+    for (const ref of postRefs(ctx.said)) {
+      if (ref.rkey === post.rkey && !(await didOf(ref.author))) unsure = true;
+    }
+    const sent = postRefs(String(ctx.said ?? '').replace(REMEMBERED, ''));
+    if (sent.length && !unsure) return 'otherPost';
     if (await refersTo(ctx.earlier, post)) return 'earlierPost';
     if (await refersTo(ctx.convoText, post)) return 'convoPost';
-    return 'unnamedPost';
+    return unsure ? null : 'unnamedPost';
   };
 
   /**
@@ -1424,10 +1440,11 @@ export function buildActionTools(ctx, deps = DEPS) {
         }
         if (auto) {
           // Named by where it came from, never by the model's argument, so the
-          // check reads only words code wrote.
-          const place = (await postPlace(uri)) ?? 'unnamedPost';
+          // check reads only words code wrote, and just "a post" when code
+          // cannot tell.
+          const place = await postPlace(uri);
           const pointedAt = place === 'attached' || place === 'ownerPost';
-          const which = WATCHED[place];
+          const which = WATCHED[place] ?? 'a post';
           const stopped = await gate(
             `Watch ${which} for ${hours} hours, and add the accounts triage reads as hostile in its new quotes and replies as they arrive (CONNECTED and NOTABLE held for the owner).`,
             {
