@@ -166,6 +166,43 @@ describe('indexCircleFollows', () => {
     }
   });
 
+  it('goes on where the deadline stopped it, so a list longer than one budget still finishes', async () => {
+    // Fifteen pages at 400ms against a one-second budget: every run is cut
+    // short. Started again from the first page each time, it would never end.
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async (url) => {
+        const at = Number(new URL(url).searchParams.get('cursor') ?? -1) + 1;
+        vi.advanceTimersByTime(400);
+        return {
+          ok: true,
+          json: async () =>
+            page([`did:plc:t${at}`], at < 14 ? String(at) : null),
+        };
+      });
+      const resume = new Map();
+      const written = [];
+      const done = [];
+      for (let run = 0; run < 10 && !done.length; run += 1) {
+        await indexCircleFollows({
+          pending: ['did:plc:m1'],
+          budgetMs: 1000,
+          resume,
+          fetchImpl,
+          writeEdges: async (rows) => written.push(...rows),
+          markDone: async (m) => done.push(m),
+        });
+      }
+      expect(done).toEqual(['did:plc:m1']);
+      expect(new Set(written.map((e) => e.target)).size).toBe(15);
+      // No page was read twice, and nothing is held once it is done.
+      expect(fetchImpl).toHaveBeenCalledTimes(15);
+      expect(resume.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('leaves a member unmarked when the read fails outright', async () => {
     const done = [];
     const out = await indexCircleFollows({

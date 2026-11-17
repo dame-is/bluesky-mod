@@ -163,6 +163,27 @@ describe('a snapshot already there', () => {
   });
 });
 
+describe('a follow list longer than one step', () => {
+  it('is handed to the next step of the same snapshot to go on with, and dropped with it', async () => {
+    db.takenAt = new Date(Date.now() - 3_600_000).toISOString();
+    db.counts.circle = 1;
+    db.pending = [{ did: 'did:plc:big', attempts: 0 }];
+    await snapshotStep();
+    await snapshotStep();
+    const [first, second] = indexCircleFollows.mock.calls.map(
+      ([opts]) => opts.resume,
+    );
+    expect(first).toBeInstanceOf(Map);
+    expect(second).toBe(first);
+
+    first.set('did:plc:big', { dids: [], cursor: 'c3', pages: 3 });
+    db.takenAt = new Date(Date.now() - 60_000).toISOString();
+    await snapshotStep();
+    const third = indexCircleFollows.mock.calls[2][0].resume;
+    expect(third.has('did:plc:big')).toBe(false);
+  });
+});
+
 describe('a member that cannot be read for now', () => {
   const FLAKY = 'did:plc:flaky';
   const start = Date.parse('2026-11-10T00:00:00.000Z');

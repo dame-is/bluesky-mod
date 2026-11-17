@@ -15,7 +15,7 @@ import { OWNER_DID } from './constants.js';
 import { createScorer } from './lib/score.js';
 import { loadReference } from './bot/reference.js';
 import { listUri } from './bot/listWrite.js';
-import { select, selectAll, upsert } from './bot/db.js';
+import { select, selectAll, update, upsert } from './bot/db.js';
 import { chunkForDm } from './lib/agent.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
@@ -31,6 +31,9 @@ const NOT_A_STRANGER = new Set([
   'PERIPHERAL',
   'NOTABLE',
 ]);
+
+/** The body recorded for a run that had nothing to say, and sent nothing. */
+const NO_DRIFT = 'No drift.';
 
 /**
  * listRecords pages to read before stopping: half a million listitems. A list
@@ -70,10 +73,15 @@ async function listMembers(agent) {
 }
 
 /**
- * The band each account had at the last audit of this list that FINISHED and
- * scored something. A run writes its row before it scores anything, so one
+ * What each account was at the last audit of this list that FINISHED and
+ * scored something: its band, and whether it was gone. An item with no handle
+ * is one the AppView had no profile for.
+ *
+ * An audit is finished once its brief has gone out, or once it had nothing to
+ * say (maybeRunDrift). A run writes its row before it scores anything, so one
  * killed partway would otherwise become the baseline, and the next brief would
- * call every account "added since the last audit".
+ * call every account "added since the last audit". One whose brief was never
+ * delivered would hide what that brief said for good.
  */
 async function previousBands() {
   const [last] = await select('audit', {
@@ -85,15 +93,41 @@ async function previousBands() {
   });
   if (!last) return new Map();
   const items = await selectAll('audit_item', {
-    select: 'did,band',
+    select: 'did,band,handle',
     eq: { audit_id: last.id },
     order: 'did.asc',
   });
-  return new Map(items.map((i) => [i.did, i.band]));
+  return new Map(
+    items.map((i) => [i.did, { band: i.band, missing: i.handle == null }]),
+  );
+}
+
+/**
+ * The band each of these accounts was added under, from the newest add of it
+ * that still stands. An add typed with no score is logged as UNSCORED.
+ */
+async function bandsAtAdd(dids) {
+  if (!dids.length) return new Map();
+  const rows = await selectAll('decision', {
+    select: 'did,band,acted_at',
+    eq: { action: 'list_add' },
+    where: {
+      did: { in: dids },
+      acted_at: 'not.is.null',
+      undone_at: 'is.null',
+    },
+    order: 'acted_at.desc',
+  });
+  const out = new Map();
+  for (const r of rows) if (!out.has(r.did)) out.set(r.did, r.band);
+  return out;
 }
 
 /**
  * Score the list, store the audit, and return what changed.
+ *
+ * The audit is left unfinished, and so is not yet anyone's baseline, until
+ * maybeRunDrift has delivered its brief.
  *
  * @returns {Promise<{scored:number, drifted:Array, gone:Array, added:number, auditId:string}>}
  */
@@ -125,9 +159,10 @@ export async function runDrift(agent) {
   for (let i = 0; i < members.length; i += 200) {
     const batch = members.slice(i, i + 200);
     // Throws when the AppView cannot be read, which leaves this audit with no
-    // finished_at: no brief goes out, it is never a baseline, and the next
-    // check runs it again.
+    // finished_at and no brief: nothing goes out, it is never a baseline, and
+    // the next check runs it again.
     const scores = await scorer.score(batch);
+    const atAdd = await bandsAtAdd(batch.filter((did) => !before.has(did)));
     const rows = [];
     for (const did of batch) {
       const a = scores.get(did);
@@ -143,10 +178,20 @@ export async function runDrift(agent) {
         protected_reason: a.protectedReason ?? null,
       });
 
-      const was = before.get(did);
-      if (was === undefined) added += 1;
-      else if (was === 'UNKNOWN' && NOT_A_STRANGER.has(a.band)) {
+      const prev = before.get(did);
+      if (!prev) added += 1;
+      // An account with no earlier audit is compared with the band it was
+      // added under. One added with no score, or with no record of the add,
+      // counts as a stranger.
+      const at = prev ? prev.band : atAdd.get(did);
+      const was = !at || at === 'UNSCORED' ? 'UNKNOWN' : at;
+      if (
         // The one that matters: a stranger who is not one any more.
+        (was === 'UNKNOWN' && NOT_A_STRANGER.has(a.band)) ||
+        // Or one who has become PROTECTED, from any band. No automated path
+        // may add them, so one on the list is always news.
+        (a.band === 'PROTECTED' && was !== 'PROTECTED')
+      ) {
         drifted.push({
           did,
           handle: a.handle,
@@ -157,8 +202,8 @@ export async function runDrift(agent) {
       }
       // `missing` means the AppView answered and has no profile for them:
       // deactivated, taken down, or deleted. Dead weight on a list, and worth
-      // saying so.
-      if (a.missing) gone.push({ did, handle: a.handle });
+      // saying once, so one already gone at the last audit is left out.
+      if (a.missing && !prev?.missing) gone.push({ did, handle: a.handle });
     }
     await upsert('audit_item', rows);
     scored += rows.length;
@@ -170,7 +215,6 @@ export async function runDrift(agent) {
       list_uri: listUri(),
       total: members.length,
       scored,
-      finished_at: new Date().toISOString(),
     },
   ]);
 
@@ -225,47 +269,76 @@ export function renderBrief({ scored, drifted, gone, added }) {
   return lines.join('\n').trim();
 }
 
+/** Make an audit the baseline for the next one. */
+async function finishAudit(auditId) {
+  await update(
+    'audit',
+    { eq: { id: auditId } },
+    { finished_at: new Date().toISOString() },
+  );
+}
+
+/**
+ * Send a recorded brief, then stamp it sent and finish its audit. A send that
+ * throws leaves both for the next check to try again; one that fails partway
+ * sends the earlier parts a second time then.
+ */
+async function deliver(chat, convoId, brief) {
+  for (const chunk of chunkForDm(brief.body)) {
+    await chat.chat.bsky.convo.sendMessage({
+      convoId,
+      message: { text: chunk },
+    });
+  }
+  await upsert('brief', [{ ...brief, sent_at: new Date().toISOString() }]);
+  await finishAudit(brief.id);
+  return brief.body;
+}
+
 /**
  * Run if it is due, and tell the owner if anything moved. Silence is the
  * correct output most weeks.
  *
- * The brief is recorded before it is sent, and a failed record stops the run,
- * so a week's brief goes out at most once.
+ * A brief is recorded under its audit's id before it is sent, and stamped
+ * sent once every part has gone. Until then each check tries it again, and
+ * its audit stays out of the baseline, so a run that falls due meanwhile
+ * compares with the audit before it and finds the same things.
  */
 export async function maybeRunDrift(agent, chat, convoId) {
   // Nowhere to send it: wait for the next check rather than spend the week's
   // run on a brief nobody receives.
   if (!convoId) return null;
   const [latest] = await select('brief', {
-    select: 'for_date',
+    select: 'id,for_date,body,sent_at',
     order: 'for_date.desc',
     limit: 1,
   });
+  // `for_date` is the moment of the run, so a run every few hours is due
+  // from then and not from the start of its day.
   const last = latest?.for_date ? Date.parse(latest.for_date) : 0;
   const dueAfter = config.driftEveryHours * 3600_000;
-  if (Date.now() - last < dueAfter) return null;
+  if (Date.now() - last < dueAfter) {
+    if (latest && !latest.sent_at && latest.body !== NO_DRIFT) {
+      return deliver(chat, convoId, latest);
+    }
+    return null;
+  }
 
   const result = await runDrift(agent);
   const body = renderBrief(result);
+  const brief = {
+    id: result.auditId ?? crypto.randomUUID(),
+    for_date: new Date().toISOString(),
+    body: body ?? NO_DRIFT,
+    sent_at: null,
+  };
+  await upsert('brief', [brief]);
 
-  await upsert('brief', [
-    {
-      id: crypto.randomUUID(),
-      for_date: new Date().toISOString().slice(0, 10),
-      body: body ?? 'No drift.',
-      sent_at: body ? new Date().toISOString() : null,
-    },
-  ]);
-
-  if (body) {
-    for (const chunk of chunkForDm(body)) {
-      await chat.chat.bsky.convo.sendMessage({
-        convoId,
-        message: { text: chunk },
-      });
-    }
+  if (!body) {
+    if (result.auditId) await finishAudit(result.auditId);
+    return null;
   }
-  return body;
+  return deliver(chat, convoId, brief);
 }
 
 /** The conversation to send a brief into: the owner's, or none. */

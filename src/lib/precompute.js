@@ -76,6 +76,8 @@ async function getJson(url, fetchImpl, signal, tries = 3) {
  *
  * `failed` is set when a page could not be read, the first or a later one.
  * `complete: false` without it means the page cap or the deadline cut it.
+ * When the deadline cut it, `resume` holds what was read and where to go on
+ * from, and passing it back as `from` continues the same read.
  */
 export async function followsOf(
   did,
@@ -84,17 +86,24 @@ export async function followsOf(
     signal,
     appview = APPVIEW,
     deadline = Infinity,
+    from = null,
   } = {},
 ) {
-  const out = [];
-  let cursor;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  const out = [...(from?.dids ?? [])];
+  let cursor = from?.cursor;
+  for (let page = from?.pages ?? 0; page < MAX_PAGES; page += 1) {
     // Checked per page, not per member. A long follow list is fifteen
     // sequential requests with retries behind each, so a budget enforced only
     // between members could overrun by tens of seconds, and every DM queued
     // behind the step would wait that long too.
     if (Date.now() >= deadline)
-      return { dids: out, complete: false, aborted: true, permanent: false };
+      return {
+        dids: out,
+        complete: false,
+        aborted: true,
+        permanent: false,
+        resume: { dids: out, cursor, pages: page },
+      };
     const url =
       `${appview}/xrpc/app.bsky.graph.getFollows?actor=${encodeURIComponent(did)}&limit=${PAGE}` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
@@ -172,11 +181,17 @@ export async function readCircle({
  * Their edges are kept and they are marked done. A member with a page that
  * kept failing is reported in `unreadable` instead, with nothing written.
  *
+ * A member the time budget stops partway is left in `resume`, with what was
+ * read of it, and a later run given the same map goes on from there. So a
+ * follow list longer than one budget is read over several runs, a page or
+ * more each, rather than from its first page every time.
+ *
  * @param {object} opts
  * @param {string[]} opts.pending           circle members with no follow list yet
  * @param {(edges: Array<{member: string, target: string}>) => Promise<void>} opts.writeEdges
  * @param {(member: string) => Promise<void>} opts.markDone
  * @param {number} [opts.budgetMs]          wall-clock budget for this run
+ * @param {Map<string, object>} [opts.resume] member -> a read the budget cut short
  * @returns {Promise<{indexed: number, remaining: number, edges: number, partial: string[], unreadable: Array<{member: string, permanent: boolean}>}>}
  */
 export async function indexCircleFollows({
@@ -184,12 +199,18 @@ export async function indexCircleFollows({
   writeEdges,
   markDone,
   budgetMs = 45_000,
+  resume = new Map(),
   fetchImpl = fetchWithTimeout,
   signal,
   onProgress,
 }) {
   const started = Date.now();
-  const queue = [...pending];
+  // Members already part-read go first, so what is held for them is finished
+  // and let go.
+  const queue = [
+    ...pending.filter((m) => resume.has(m)),
+    ...pending.filter((m) => !resume.has(m)),
+  ];
   const partial = [];
   const unreadable = [];
   let indexed = 0;
@@ -206,17 +227,22 @@ export async function indexCircleFollows({
       }
       const member = queue.shift();
       if (!member) return;
-      const { dids, complete, aborted, permanent, failed } = await followsOf(
-        member,
-        { fetchImpl, signal, deadline },
-      );
+      const read = await followsOf(member, {
+        fetchImpl,
+        signal,
+        deadline,
+        from: resume.get(member),
+      });
+      const { dids, complete, aborted, permanent, failed } = read;
       if (aborted) {
         // Out of budget mid-member. Write and mark nothing: a follow list cut
         // short by the clock would understate this member's vouches for the
-        // life of the snapshot, and leaving the row pending costs one retry.
+        // life of the snapshot. What was read is held for the next run.
+        resume.set(member, read.resume);
         stopped = true;
         return;
       }
+      resume.delete(member);
       if (failed) {
         // A page could not be read, the first or a later one. Write and mark
         // nothing, for the same reason as the clock: a follow list cut short

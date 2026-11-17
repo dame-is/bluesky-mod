@@ -154,13 +154,26 @@ async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
 
 let held = null;
 let loading = null;
-/** did -> { at, rkey } for adds this process made; did -> at for removals. */
+/**
+ * did -> { at, rkey } for adds this process made; did -> at for removals.
+ * Each is kept in the order written, oldest first, so the ones too old to be
+ * read are dropped from the front on every write.
+ */
 const ownAdds = new Map();
 const ownRemovals = new Map();
 
+const writtenAt = (entry) => entry?.at ?? entry;
+
 function recent(map, did, now) {
-  const at = map.get(did)?.at ?? map.get(did);
+  const at = writtenAt(map.get(did));
   return typeof at === 'number' && now - at < OWN_WRITES_MS;
+}
+
+function dropOld(map, now) {
+  for (const [did, entry] of map) {
+    if (now - writtenAt(entry) < OWN_WRITES_MS) return;
+    map.delete(did);
+  }
 }
 
 /**
@@ -235,8 +248,12 @@ export function blockersView() {
 
 /** Record a write this process made, so reads and the next write see it. */
 export function noteListed(list, did, rkey = null) {
+  const now = Date.now();
   ownRemovals.delete(did);
-  ownAdds.set(did, { at: Date.now(), rkey });
+  ownAdds.delete(did);
+  ownAdds.set(did, { at: now, rkey });
+  dropOld(ownAdds, now);
+  dropOld(ownRemovals, now);
   if (held?.list === list && held.listed) {
     held.listed.set(
       did,
@@ -245,8 +262,12 @@ export function noteListed(list, did, rkey = null) {
   }
 }
 export function noteUnlisted(list, did) {
+  const now = Date.now();
   ownAdds.delete(did);
-  ownRemovals.set(did, Date.now());
+  ownRemovals.delete(did);
+  ownRemovals.set(did, now);
+  dropOld(ownAdds, now);
+  dropOld(ownRemovals, now);
   if (held?.list === list && held.listed) held.listed.delete(did);
 }
 
@@ -291,4 +312,9 @@ export function resetGraphFacts() {
   loading = null;
   ownAdds.clear();
   ownRemovals.clear();
+}
+
+/** For tests: how many of this process's own writes are held. */
+export function ownWritesHeld() {
+  return ownAdds.size + ownRemovals.size;
 }

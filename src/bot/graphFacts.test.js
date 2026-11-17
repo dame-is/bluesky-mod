@@ -190,3 +190,28 @@ describe('a list longer than the held copy reads', () => {
     expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
   });
 });
+
+describe("this process's own writes", () => {
+  it('are let go once they are too old to be read, so they do not pile up', () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: 1_000_000 });
+    try {
+      for (let i = 0; i < 500; i += 1) {
+        facts.noteListed(LIST, `did:plc:add${i}`, `r${i}`);
+        facts.noteUnlisted(LIST, `did:plc:off${i}`);
+      }
+      // Written again later, which also moves it to the back of the line.
+      vi.setSystemTime(1_000_000 + 9 * 60_000);
+      facts.noteListed(LIST, 'did:plc:add0', 'rAgain');
+      expect(facts.ownWritesHeld()).toBe(1000);
+
+      vi.setSystemTime(1_000_000 + 11 * 60_000);
+      facts.noteListed(LIST, 'did:plc:later', 'rLater');
+      // The 999 from eleven minutes ago are gone; the two since are kept.
+      expect(facts.ownWritesHeld()).toBe(2);
+      expect(facts.isListed(LIST, 'did:plc:add0')).toBe(true);
+      expect(facts.isListed(LIST, 'did:plc:later')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

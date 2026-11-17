@@ -69,6 +69,14 @@ const RETRY_GAP_MS = 10 * 60_000;
  */
 const lastFailed = { takenAt: null, at: new Map() };
 
+/**
+ * Follow lists a step's budget cut short, for the snapshot being built: each
+ * member's follows read so far and where to go on from. The next step resumes
+ * them there, so a list too long for one step still finishes. A restart
+ * forgets them, which costs a re-read from the first page.
+ */
+let readSoFar = new Map();
+
 async function currentSnapshot() {
   const rows = await select('circle', {
     select: 'taken_at',
@@ -208,6 +216,7 @@ export async function snapshotStep({
   if (lastFailed.takenAt !== takenAt) {
     lastFailed.takenAt = takenAt;
     lastFailed.at = new Map();
+    readSoFar = new Map();
   }
   // Fewest attempts first, so members not yet tried are not stuck behind
   // ones waiting out their pause.
@@ -242,6 +251,7 @@ export async function snapshotStep({
     const result = await indexCircleFollows({
       pending: due.map((r) => r.did),
       budgetMs,
+      resume: readSoFar,
       writeEdges: (edges) =>
         upsert(
           'circle_follow',
