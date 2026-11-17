@@ -242,20 +242,15 @@ beforeEach(() => {
   graph.graphFacts.mockResolvedValue(null);
 });
 
-/** The held copy of the list reads the fake repo, as it would after a reload. */
-function heldCopyReadsRepo() {
-  graph.graphFacts.mockResolvedValue({ listed: new Map() });
-  graph.isListed.mockImplementation((list, did) =>
-    [...repo.values()].includes(did),
-  );
-}
-
 /**
  * The held copy of the list as graphFacts.js keeps it: the repo as it stood
- * at the first read, and after that only the writes this process notes.
+ * at the first read, and after that only the writes this process notes. A
+ * write's lookup adds the listitems this process noted to Constellation's
+ * answer, as rkeysForWrite does.
  */
 function heldCopy() {
   let held = null;
+  const own = new Map();
   graph.graphFacts.mockImplementation(async () => {
     held ??= new Set(repo.values());
     return { listed: held };
@@ -263,13 +258,25 @@ function heldCopy() {
   graph.isListed.mockImplementation((list, did) =>
     held ? held.has(did) : null,
   );
-  graph.noteListed.mockImplementation((list, did) => {
+  graph.rkeysForWrite.mockImplementation(async (list, did) =>
+    unlisted.has(did)
+      ? []
+      : [
+          ...new Set([
+            ...(constellation.get(did) ?? []),
+            ...(own.get(did) ?? []),
+          ]),
+        ],
+  );
+  graph.noteListed.mockImplementation((list, did, rkey) => {
     unlisted.delete(did);
     held?.add(did);
+    if (rkey) own.set(did, [...(own.get(did) ?? []), rkey]);
   });
   graph.noteUnlisted.mockImplementation((list, did) => {
     unlisted.add(did);
     held?.delete(did);
+    own.delete(did);
   });
 }
 
@@ -348,7 +355,7 @@ describe('approve', () => {
   });
 
   it('records a batch the PDS took when the reply was lost, on the next approval, so undo finds it', async () => {
-    heldCopyReadsRepo();
+    heldCopy();
     db.decision = [
       scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
       scanned(PLAN_A, 'did:plc:c', 'UNKNOWN'),
@@ -373,6 +380,42 @@ describe('approve', () => {
     expect(repo.size).toBe(0);
   });
 
+  it('does not write a batch whose reply was lost a second time through another plan', async () => {
+    heldCopy();
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_B, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_B, 'did:plc:b', 'UNKNOWN'),
+    ];
+    await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
+    expect(repo.size).toBe(1);
+
+    const other = await applyPlan(bot(), db.plan[1], ['UNKNOWN']);
+
+    expect(other).toMatchObject({ added: 1, already: 1 });
+    expect([...repo.values()].sort()).toEqual(['did:plc:a', 'did:plc:b']);
+  });
+
+  it('asks Constellation about a batch whose reply was lost when the repo cannot be read', async () => {
+    heldCopy();
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:c', 'UNKNOWN'),
+    ];
+    await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
+    // Constellation has indexed one of the two.
+    const [rkey] = [...repo].find(([, did]) => did === 'did:plc:a');
+    constellation.set('did:plc:a', [rkey]);
+    const agent = bot();
+    agent.com.atproto.repo.listRecords.mockRejectedValue(new Error('502'));
+
+    const again = await applyPlan(agent, db.plan[0], ['UNKNOWN']);
+
+    expect(agent.com.atproto.repo.listRecords).toHaveBeenCalled();
+    expect(again).toMatchObject({ added: 2, already: 0 });
+    expect([...repo.values()].filter((d) => d === 'did:plc:a')).toHaveLength(1);
+  });
+
   it('undoes a batch the PDS took when the reply was lost, without approving again', async () => {
     db.decision = [
       scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
@@ -389,7 +432,7 @@ describe('approve', () => {
   });
 
   it('counts a batch it wrote but could not record as added, stops there, and records it on the next approval', async () => {
-    heldCopyReadsRepo();
+    heldCopy();
     db.decision = Array.from({ length: 60 }, (_, i) =>
       scanned(PLAN_A, `did:plc:u${String(i).padStart(2, '0')}`, 'UNKNOWN'),
     );
@@ -515,13 +558,17 @@ describe('a batch the PDS refused', () => {
     db.decision = [
       scanned(PLAN_A, 'did:plc:x1', 'UNKNOWN'),
       scanned(PLAN_A, 'did:plc:x2', 'UNKNOWN'),
-      scanned(PLAN_B, 'did:plc:x1', 'UNKNOWN'),
     ];
     await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
     expect(row(PLAN_A, 'did:plc:x1').action).toBe('list_add');
-    // The held copy never heard of the lost write, so plan B writes x1 again.
-    await applyPlan(bot(), db.plan[1], ['UNKNOWN']);
-    expect(repo.size).toBe(3);
+    // Plan B adds x1 again, through a check that could not see the lost
+    // write.
+    db.decision.push(
+      added(PLAN_B, 'did:plc:x1', '2026-10-01T11:00:00Z', {
+        approved_via: 'band',
+      }),
+    );
+    repo.set('rk-b', 'did:plc:x1');
 
     const undo = await undoPlan(bot(), db.plan[0]);
 

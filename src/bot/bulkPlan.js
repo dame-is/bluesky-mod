@@ -125,13 +125,35 @@ const NOT_OURS = 'That list is not owned by this account.';
  * is asked of Constellation, ten at a time. One Constellation cannot answer
  * for either is written: a duplicate is a cheaper mistake than a block that
  * silently did not happen.
+ *
+ * An account some approval sent but never saw confirmed (see writeRows) is
+ * looked up in the repo itself instead (listitemsFor). A lost reply never
+ * reaches the held copy, and Constellation may not have indexed the write
+ * yet, so either would answer that it is not on the list. When the lookup
+ * fails, Constellation is asked.
  */
-async function splitListed(uri, rows) {
-  const facts = await graphFacts({ list: uri }).catch(() => null);
+async function splitListed(uri, rows, { agent, bot }) {
+  const doubted = await sentUnconfirmed(rows.map((r) => r.did));
   const fresh = [];
   const listed = [];
   const unknown = [];
-  for (const r of rows) {
+  if (doubted.size) {
+    const found = await listitemsFor(agent, {
+      bot,
+      uri,
+      dids: [...doubted],
+    }).catch(() => null);
+    for (const r of rows.filter((x) => doubted.has(x.did))) {
+      if (found?.byDid.has(r.did)) listed.push(r);
+      else if (found?.exhaustive) fresh.push(r);
+      else unknown.push(r);
+    }
+  }
+  const rest = rows.filter((r) => !doubted.has(r.did));
+  const facts = rest.length
+    ? await graphFacts({ list: uri }).catch(() => null)
+    : null;
+  for (const r of rest) {
     const known = facts ? isListed(uri, r.did) : null;
     if (known === true) listed.push(r);
     else if (known === false) fresh.push(r);
@@ -147,6 +169,25 @@ async function splitListed(uri, rows) {
     batch.forEach((r, j) => (found[j]?.length ? listed : fresh).push(r));
   }
   return { fresh, listed };
+}
+
+/** Which of these accounts some plan sent an add of but never confirmed. */
+async function sentUnconfirmed(dids) {
+  const out = new Set();
+  for (let i = 0; i < dids.length; i += 50) {
+    const rows = await selectAll('decision', {
+      select: 'did',
+      eq: { action: 'list_add' },
+      where: {
+        did: { in: dids.slice(i, i + 50) },
+        acted_at: 'is.null',
+        undone_at: 'is.null',
+      },
+      order: 'did.asc',
+    });
+    for (const r of rows) out.add(r.did);
+  }
+  return out;
 }
 
 /**
@@ -542,7 +583,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
   const veto = await protectedAmong(rows.map((r) => r.did));
   const allowed = rows.filter((r) => !veto.has(r.did));
   const vetoed = rows.length - allowed.length;
-  const { fresh, listed } = await splitListed(uri, allowed);
+  const { fresh, listed } = await splitListed(uri, allowed, { agent, bot });
   const marked = listed.filter((r) => r.action === 'list_add' && !r.acted_at);
   const elsewhere = await addsElsewhere(
     plan,
