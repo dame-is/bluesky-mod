@@ -280,6 +280,28 @@ describe('an approval that reads one way or not at all', () => {
     refused('approve 1c2d3e4f hostile asof=yesterday');
   });
 
+  it('refuses a group narrowed only to PROTECTED rather than widening it', () => {
+    // PROTECTED is dropped from what the approval carries. With nothing left
+    // to narrow by, "hostile PROTECTED" would add the hostile ones in every
+    // other band, and "PROTECTED likers" every liker.
+    for (const text of [
+      'approve abcd1234 hostile PROTECTED',
+      'approve abcd1234 PROTECTED likers',
+      'approve abcd1234 PROTECTED',
+      'approve abcd1234 protected, PROTECTED toxic',
+    ]) {
+      expect(refused(text).refusal).toMatch(/PROTECTED is never added/);
+    }
+    // Another band named alongside keeps its narrowing.
+    const mixed = parseCommand('approve abcd1234 hostile PROTECTED UNKNOWN');
+    expect(mixed).toMatchObject({
+      bands: ['UNKNOWN'],
+      labels: ['hostile'],
+      refusal: null,
+      needsTarget: false,
+    });
+  });
+
   it('carries a label narrowed to bands, and the time a digest counted to', () => {
     const out = parseCommand(
       'approve 1c2d3e4f hostile CONNECTED,NOTABLE asof=2026-11-01T10:00:00.000Z',

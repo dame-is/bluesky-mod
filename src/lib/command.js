@@ -521,9 +521,20 @@ const APPROVE_FILLER = new Set([
  * kinds ("UNKNOWN likers"), or one tone label, which may be narrowed to bands
  * ("hostile UNKNOWN" is the hostile ones in UNKNOWN). Anything else is refused
  * rather than half read: a word with no place may be an exception ("hostile
- * except @friend"), and dropping it adds the opposite of what was asked.
+ * except @friend"), and dropping it adds the opposite of what was asked. So is
+ * a group whose only band is PROTECTED, which would otherwise widen to every
+ * band.
  */
 function approvalRefusal(code, { words, bands, labels, actors, kinds, asOf }) {
+  // PROTECTED is dropped from the bands an approval carries, and no bands
+  // means no narrowing, so "hostile PROTECTED" would add the hostile ones in
+  // every other band.
+  if (bands.length && bands.every((b) => b === 'PROTECTED')) {
+    return (
+      'PROTECTED is never added, so I have not added anyone. ' +
+      `Name another band, like "approve ${code} UNKNOWN", or name the accounts.`
+    );
+  }
   const unplaced = words.find(({ typed, token }) => {
     const lower = token.toLowerCase();
     return !(
