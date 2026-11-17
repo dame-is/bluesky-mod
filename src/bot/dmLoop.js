@@ -362,6 +362,10 @@ const failedReadsOf = (out) =>
 const failedReadsLine = (n, error) =>
   `${n} could not be read${error ? `: ${error.replace(/\.$/, '')}` : ''}.`;
 
+/** What anything past the commands gets when there is no model to read with. */
+const NO_MODEL =
+  'No AI model is set up for this bot, so I only understand commands. Send "help" for the list.';
+
 /** What a request to sort by tone gets when there is no model to read with. */
 const NO_MODEL_TO_SORT =
   'Sorting by tone needs an AI model, and this bot has none set up.';
@@ -1329,7 +1333,8 @@ const AUTO_WATCH_NEEDS_AGENT_MODE =
  * than letting the analyst claim it did: notes, which only the agent reads,
  * and a watch that blocks as it goes, which would add people on a model's
  * reading with no approval typed in classic. "!" in agent mode is agent mode,
- * so both run there.
+ * so both run there. With no model no watch starts, in either mode: nothing
+ * would read the post, so it would never report.
  *
  * @returns {Promise<object|null>} the turn record, or null when the message
  *   is neither
@@ -1340,6 +1345,7 @@ async function standingCommand({
   embedUri,
   msgLinks,
   mode,
+  hasModel,
   send,
   log,
 }) {
@@ -1384,6 +1390,10 @@ async function standingCommand({
       { allow: stopped ? [postWebUrl(stopped.uri)] : [] },
     );
     return { convoId, watch: 'stop', outcome: stopped ? 'done' : null };
+  }
+  if (!hasModel) {
+    await send(NO_MODEL);
+    return { convoId, watch: 'no-model', outcome: null };
   }
   if (watching.auto && mode !== 'agent') {
     await send(AUTO_WATCH_NEEDS_AGENT_MODE);
@@ -1451,6 +1461,7 @@ async function withoutModel({
       embedUri,
       msgLinks,
       mode: 'agent',
+      hasModel: Boolean(model) && modelsEnabled(),
       send,
       log,
     });
@@ -2083,6 +2094,7 @@ export async function runDmPass({
           embedUri,
           msgLinks,
           mode,
+          hasModel: Boolean(activeModel) && modelsEnabled(),
           send,
           log,
         });
@@ -2284,9 +2296,7 @@ export async function runDmPass({
       // With no model provider or no model id, everything past the commands is
       // out of reach. Say so, rather than fail on a call that cannot be made.
       if (!activeModel || !modelsEnabled()) {
-        await send(
-          'No AI model is set up for this bot, so I only understand commands. Send "help" for the list.',
-        );
+        await send(NO_MODEL);
         turns.push({ convoId: entry.convoId, command: 'no-model' });
         continue;
       }

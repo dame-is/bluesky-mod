@@ -5,6 +5,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// Whether a model is set up, as models.js would report it.
+const models = vi.hoisted(() => ({ on: true }));
+vi.mock('../models.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  modelsEnabled: () => models.on,
+}));
+
 const db = {
   dm_cursor: [{ id: 1, cursor: 'c0' }],
   dm_choice: [],
@@ -527,6 +534,26 @@ describe('memory and watching', () => {
       escalation.on = null;
     }
   });
+});
+
+describe('a watch with no model set up', () => {
+  // Nothing reads a watched post without a model, so a watch started then
+  // would never report.
+  for (const mode of ['classic', 'agent']) {
+    it(`${mode}: starts no watch and says why`, async () => {
+      models.on = false;
+      try {
+        const { chat, sent } = chatWith([shared('m1', 'watch this')]);
+        await pass(chat, { mode });
+        expect(watch.startWatch).not.toHaveBeenCalled();
+        expect(sent).toEqual([
+          'No AI model is set up for this bot, so I only understand commands. Send "help" for the list.',
+        ]);
+      } finally {
+        models.on = true;
+      }
+    });
+  }
 });
 
 describe('a classic question the model cannot answer', () => {
