@@ -92,6 +92,9 @@ vi.mock('./db.js', () => ({
 }));
 
 const constellation = new Map(); // did -> rkeys; absent means "none"
+// Accounts this process took off the list, which rkeysForWrite reports as
+// off whatever the index still shows, as graphFacts.js does.
+const unlisted = new Set();
 const graph = {
   rkeysForWrite: vi.fn(async (list, did) => constellation.get(did) ?? []),
   noteUnlisted: vi.fn(),
@@ -211,9 +214,12 @@ beforeEach(() => {
   constellation.clear();
   repo = new Map();
   for (const fn of Object.values(graph)) fn.mockReset();
-  graph.rkeysForWrite.mockImplementation(
-    async (list, did) => constellation.get(did) ?? [],
+  unlisted.clear();
+  graph.rkeysForWrite.mockImplementation(async (list, did) =>
+    unlisted.has(did) ? [] : (constellation.get(did) ?? []),
   );
+  graph.noteUnlisted.mockImplementation((list, did) => unlisted.add(did));
+  graph.noteListed.mockImplementation((list, did) => unlisted.delete(did));
   graph.isListed.mockReturnValue(null);
   graph.graphFacts.mockResolvedValue(null);
 });
@@ -567,6 +573,58 @@ describe('undo', () => {
 
     expect(agent.com.atproto.repo.deleteRecord).toHaveBeenCalled();
     expect(out).toMatchObject({ removed: 2, remaining: 0 });
+    expect(repo.size).toBe(0);
+  });
+});
+
+describe('a list longer than the held copy reads', () => {
+  it('asks Constellation about an account the held copy cannot answer for, and writes no second listitem', async () => {
+    // The walk stopped before the end, so the held copy answers neither yes
+    // nor no for these two.
+    graph.graphFacts.mockResolvedValue({ listed: new Map() });
+    graph.isListed.mockReturnValue(null);
+    constellation.set('did:plc:deep', ['rk-deep']);
+    repo.set('rk-deep', 'did:plc:deep');
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:deep', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:new', 'UNKNOWN'),
+    ];
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(out).toMatchObject({ added: 1, already: 1 });
+    expect([...repo.values()].sort()).toEqual(['did:plc:deep', 'did:plc:new']);
+  });
+
+  it('finishes an undo past where the walk of the repo stops', async () => {
+    const dids = Array.from(
+      { length: 51 },
+      (_, i) => `did:plc:w${String(i).padStart(2, '0')}`,
+    );
+    db.decision = dids.map((did) =>
+      added(PLAN_A, did, '2026-10-01T10:00:00Z'),
+    );
+    // On the list and indexed, all but the last, which came off elsewhere.
+    for (const did of dids.slice(0, 50)) {
+      constellation.set(did, [`rk-${did}`]);
+      repo.set(`rk-${did}`, did);
+    }
+    const agent = bot();
+    // Every page of the walk holds someone else's listitem, so 400 pages
+    // never reach the end.
+    agent.com.atproto.repo.listRecords.mockImplementation(async () => ({
+      data: {
+        cursor: 'more',
+        records: [
+          {
+            uri: 'at://did:plc:bot/app.bsky.graph.listitem/other',
+            value: { list: LIST, subject: 'did:plc:someoneelse' },
+          },
+        ],
+      },
+    }));
+
+    const out = await undoPlan(agent, db.plan[0]);
+
+    expect(out).toMatchObject({ removed: 50, alreadyOff: 1, remaining: 0 });
     expect(repo.size).toBe(0);
   });
 });

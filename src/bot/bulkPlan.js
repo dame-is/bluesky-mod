@@ -115,15 +115,32 @@ const NOT_OURS = 'That list is not owned by this account.';
  * in two plans gets one listitem.
  *
  * Read from the held copy (graphFacts.js), which this process's own writes
- * keep current. If the list cannot be read, everything is written: a
- * duplicate is a cheaper mistake than a block that silently did not happen.
+ * keep current. An account it cannot answer for (past the end of a walk cut
+ * short on a very long list, or every account when the copy cannot be read)
+ * is asked of Constellation, ten at a time. One Constellation cannot answer
+ * for either is written: a duplicate is a cheaper mistake than a block that
+ * silently did not happen.
  */
 async function splitListed(uri, rows) {
   const facts = await graphFacts({ list: uri }).catch(() => null);
-  if (!facts?.listed) return { fresh: rows, listed: [] };
   const fresh = [];
   const listed = [];
-  for (const r of rows) (isListed(uri, r.did) ? listed : fresh).push(r);
+  const unknown = [];
+  for (const r of rows) {
+    const known = facts ? isListed(uri, r.did) : null;
+    if (known === true) listed.push(r);
+    else if (known === false) fresh.push(r);
+    else unknown.push(r);
+  }
+  for (let i = 0; i < unknown.length; i += 10) {
+    const batch = unknown.slice(i, i + 10);
+    const found = await Promise.all(
+      batch.map((r) =>
+        rkeysForWrite(uri, r.did, { walk: false }).catch(() => null),
+      ),
+    );
+    batch.forEach((r, j) => (found[j]?.length ? listed : fresh).push(r));
+  }
   return { fresh, listed };
 }
 
@@ -1146,8 +1163,10 @@ async function heldByName(plan, dids) {
  *
  * An account already off the list is closed, not retried. When the walk has
  * seen the whole repo, an account it did not find is off the list (taken off
- * outside the bot, say), and the record says so. Left open, the plan would
- * stay live and every undo would answer "1 left, send undo again".
+ * outside the bot, say), and the record says so. When it stopped short, each
+ * account it did not reach is asked of Constellation instead. Left open, the
+ * plan would stay live and every undo would answer "1 left, send undo
+ * again".
  *
  * An add this plan sent but never saw confirmed (see writeRows) is looked for
  * too, and if it is on the list it is recorded and taken off with the rest.
@@ -1198,6 +1217,29 @@ export async function undoPlan(
     if (missing.length) {
       await closeAdds(missing, 'already off the list');
       alreadyOff = missing.length;
+    }
+  } else {
+    // The walk stopped before the end of a very long list. Constellation is
+    // asked about each account it did not reach, so an undo there finishes
+    // instead of answering "N left" forever. rkeysForWrite also holds this
+    // process's adds from the last ten minutes, which covers the index's lag.
+    const unseen = live.map((r) => r.did).filter((did) => !byDid.has(did));
+    const off = [];
+    for (let i = 0; i < unseen.length; i += 10) {
+      const batch = unseen.slice(i, i + 10);
+      const found = await Promise.all(
+        batch.map((did) =>
+          rkeysForWrite(uri, did, { walk: false }).catch(() => null),
+        ),
+      );
+      batch.forEach((did, j) => {
+        if (found[j]?.length) byDid.set(did, found[j]);
+        else if (found[j]) off.push(did);
+      });
+    }
+    if (off.length) {
+      await closeAdds(off, 'already off the list');
+      alreadyOff = off.length;
     }
   }
 

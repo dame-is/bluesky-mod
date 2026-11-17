@@ -23,6 +23,7 @@ vi.mock('../lib/constellation.js', () => ({
 }));
 
 const db = await import('./db.js');
+const { resetGraphFacts } = await import('./graphFacts.js');
 const { runCommand } = await import('./dmLoop.js');
 const { parseCommand, parseChoice } = await import('../lib/command.js');
 
@@ -92,6 +93,9 @@ function press(reply, n) {
 beforeEach(async () => {
   db.closeDb();
   db.openDb(':memory:');
+  // This process's own writes are remembered for ten minutes; each test
+  // starts with none.
+  resetGraphFacts();
   await seed();
 });
 
