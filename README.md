@@ -80,7 +80,9 @@ On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepse
 
 ## What it stores
 
-One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls from the last 90 days. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
+One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker), or a Postgres database if you set `DATABASE_URL` ([docs/DEPLOY.md](docs/DEPLOY.md#with-your-own-database)): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls from the last 90 days. It holds other people's posts where a batch was sorted by tone. Treat it as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
+
+How much it keeps is up to you: `MOD_SCORING=simple` skips the friends-of-friends half of the snapshot, which is nearly all of the file, and the `MOD_KEEP_*` settings say how long old scans, quotes and re-scores are kept.
 
 The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off). A post the analyst reads can try to steer those lookups. Lookups by URL or host are refused, but looking up a handle still reaches the host it names.
 
@@ -95,6 +97,8 @@ npm install
 npm test
 DRY_RUN=true npm run dev   # reads no DMs and writes nothing
 ```
+
+The store's tests run against SQLite, and against Postgres as well when `TEST_DATABASE_URL` names a database they may create schemas in.
 
 ## License
 

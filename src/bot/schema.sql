@@ -204,3 +204,12 @@ create table if not exists llm_usage (
   input_tokens integer,
   output_tokens integer
 );
+
+-- Which copy of the bot is running, when the database is Postgres and more
+-- than one host could reach it. With SQLite the lease is a file beside the
+-- database (src/lease.js).
+create table if not exists lease (
+  name text primary key,
+  holder text not null,
+  heartbeat_at text not null
+);

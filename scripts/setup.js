@@ -53,7 +53,7 @@ async function main() {
   const { ensureDmsOpen, moderationLists, createList, listProblem } =
     await import('../src/bootstrap.js');
 
-  db.openDb();
+  await db.openDb();
   const { agent } = await botAgent();
   const did = agent.session?.did;
   say(`Logged in as @${agent.session?.handle} (${did}).`);

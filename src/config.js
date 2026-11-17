@@ -290,6 +290,14 @@ export function assertConfig(env = process.env) {
   if (mode && mode !== 'classic' && mode !== 'agent') {
     problems.push(`MOD_DM_MODE must be classic or agent, not "${env.MOD_DM_MODE}"`);
   }
+  if (env.DATABASE_URL && !/^postgres(ql)?:\/\//i.test(env.DATABASE_URL)) {
+    problems.push(
+      'DATABASE_URL must be a Postgres connection string (postgres://...), or unset to use the SQLite file',
+    );
+  }
+  if (env.DATABASE_SCHEMA && !/^[a-z_][a-z0-9_]{0,62}$/.test(env.DATABASE_SCHEMA)) {
+    problems.push('DATABASE_SCHEMA must be lowercase letters, digits and underscores');
+  }
   const scoring = String(env.MOD_SCORING ?? '').trim().toLowerCase();
   if (scoring && scoring !== 'full' && scoring !== 'simple') {
     problems.push(`MOD_SCORING must be full or simple, not "${env.MOD_SCORING}"`);

@@ -28,7 +28,7 @@ import { runDmPass, runContinuation } from './bot/dmLoop.js';
 import { stopWrites } from './bot/bulkPlan.js';
 import { checkModelFor, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
-import { openDb, closeDb } from './bot/db.js';
+import { openDb, closeDb, usingPostgres, rpc } from './bot/db.js';
 import { snapshotStep, usableSnapshot, UNPROTECTED_LISTS } from './snapshot.js';
 import { connectJetstream } from './jetstream.js';
 import { loadState, setCursor } from './state.js';
@@ -41,7 +41,7 @@ import { logger } from './logger.js';
 import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { isAuthError, createReconnector } from './session.js';
-import { acquireLease, HEARTBEAT_MS } from './lease.js';
+import { acquireLease, acquireDbLease, HEARTBEAT_MS } from './lease.js';
 import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
 import { diskSpace, isLow, describe as describeDisk } from './disk.js';
 import { pruneData } from './retention.js';
@@ -519,17 +519,22 @@ let stream = null;
 let lease = null;
 
 /**
- * Wait until no other copy holds this data directory (lease.js). Waiting
- * rather than exiting, so a restart policy does not turn a second copy into a
- * loop of failed starts.
+ * Wait until no other copy holds this data directory, or this Postgres
+ * database (lease.js). Waiting rather than exiting, so a restart policy does
+ * not turn a second copy into a loop of failed starts.
  */
 async function holdLease() {
   fs.mkdirSync(config.dataDir, { recursive: true });
+  const shared = usingPostgres();
   for (;;) {
-    const got = acquireLease({ dir: config.dataDir });
+    const got = shared
+      ? await acquireDbLease({ call: rpc })
+      : acquireLease({ dir: config.dataDir });
     if (got.ok) return got;
     logger.error(
-      'Another copy of the bot is running on this data directory; waiting for it to stop',
+      shared
+        ? 'Another copy of the bot is running on this database; waiting for it to stop'
+        : 'Another copy of the bot is running on this data directory; waiting for it to stop',
       {
         host: got.holder?.host,
         pid: got.holder?.pid,
@@ -546,8 +551,8 @@ async function start() {
   // a readable list in the log instead of an ESM stack trace.
   assertConfig();
   installProvider();
+  await openDb();
   lease = await holdLease();
-  openDb();
   loadState();
 
   const session = await connectAtBoot();
@@ -688,8 +693,8 @@ async function shutdown(signal) {
   // Docker waits 10s by default before killing (compose.yaml sets 60s),
   // systemd 90s.
   await Promise.race([chain, new Promise((r) => setTimeout(r, 45_000))]);
-  closeDb();
-  lease?.release();
+  await lease?.release();
+  await closeDb();
   logStats();
   logger.info('Shutdown complete');
   process.exit(0);

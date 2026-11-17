@@ -88,7 +88,23 @@ A server you run yourself, with Docker. [SETUP-VPS.md](SETUP-VPS.md) walks throu
 
 ### With your own database
 
-The bot keeps everything in one SQLite file in its data directory, on the same disk as the bot. That is the fastest option and the one every guide here uses. It can't keep its data in Supabase or another Postgres database today: that would need a Postgres version of `src/bot/db.js`. If you want your data off the server, back the file up instead ([SETUP-VPS.md](SETUP-VPS.md#backups)). Supabase's free plan also caps a database at 500 MB, which is less than the snapshot alone for someone who follows a couple of thousand accounts.
+By default the bot keeps everything in one SQLite file in its data directory. That is the fastest option and the one every guide here uses. If you'd rather keep the data in a Postgres database you already run, such as Supabase, Neon or Postgres on the droplet itself, set `DATABASE_URL`:
+
+```bash
+DATABASE_URL=postgres://user:password@host:5432/dbname
+```
+
+The bot makes its tables in their own schema, `bluesky_mod` (`DATABASE_SCHEMA` to change it), so they never mix with yours. It still needs a small data directory for its Jetstream cursor and the pinned identity of your handles, but nothing in it is large. A second copy of the bot pointed at the same database waits for the first to stop, as it does on one disk.
+
+Things to know:
+
+- **The database holds the bot's login.** Its session, with a refresh token for the bot account, is stored in the `bot_session` table. Treat the database's password like the app password.
+- **Size.** The same figures as the disk table below apply. Supabase's free plan caps a database at 500 MB (as of November 2026), which is less than a full snapshot for someone who follows a couple of thousand accounts. Use `MOD_SCORING=simple` there, or a paid plan.
+- **Supabase.** Use the **Session pooler** connection string (port 5432) from **Connect** in the dashboard, which works over IPv4 everywhere; the direct connection needs IPv6 or Supabase's IPv4 add-on. Supabase signs its certificates with its own CA, so download it from **Database Settings > SSL Configuration**, put it in the bot's data directory, and point the connection string at it: `?sslmode=verify-full&sslrootcert=/app/data/prod-ca-2021.crt` under Docker. Without it the connection fails with "self-signed certificate in certificate chain". Don't turn verification off to get past that.
+- **Neon** and most other hosted Postgres use certificates Node already trusts, so `?sslmode=verify-full` is enough.
+- **Postgres on the same droplet** needs no SSL over `localhost`. That is simplest with the bot run without Docker ([SETUP-VPS.md](SETUP-VPS.md) has a systemd setup). From inside a container, `localhost` is the container itself, and reaching the droplet's Postgres means having it listen on Docker's network too.
+
+Moving an existing bot from the SQLite file to Postgres isn't automatic. A new database starts empty: the snapshot rebuilds itself, but the decision log and history stay in the old file.
 
 ## How much disk it needs
 

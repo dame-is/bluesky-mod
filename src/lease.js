@@ -83,3 +83,51 @@ export function acquireLease({
     },
   };
 }
+
+/**
+ * The same lease, held in the database, for a Postgres database that copies
+ * on different hosts can all reach. A file only stops copies that share a
+ * disk. `call` is db.js's rpc.
+ *
+ * @returns {Promise<{ ok: true, release: () => Promise<void> }
+ *         | { ok: false, holder: { host: string, pid: number, heartbeatAt: number } }>}
+ */
+export async function acquireDbLease({
+  call,
+  now = () => Date.now(),
+  host = os.hostname(),
+  pid = process.pid,
+  name = 'bot',
+} = {}) {
+  const holder = `${host}:${pid}`;
+  const iso = (ms) => new Date(ms).toISOString();
+  const held = await call('take_lease', {
+    name,
+    holder,
+    now: iso(now()),
+    staleBefore: iso(now() - STALE_MS),
+  });
+  if (held?.holder !== holder) {
+    const at = String(held?.holder ?? '').lastIndexOf(':');
+    return {
+      ok: false,
+      holder: {
+        host: at > 0 ? held.holder.slice(0, at) : held?.holder,
+        pid: at > 0 ? Number(held.holder.slice(at + 1)) : null,
+        heartbeatAt: Date.parse(held?.heartbeat_at),
+      },
+    };
+  }
+  const timer = setInterval(() => {
+    // A missed beat is retried on the next one; three in a row go stale.
+    call('beat_lease', { name, holder, now: iso(now()) }).catch(() => {});
+  }, HEARTBEAT_MS);
+  if (timer.unref) timer.unref();
+  return {
+    ok: true,
+    async release() {
+      clearInterval(timer);
+      await call('drop_lease', { name, holder }).catch(() => {});
+    },
+  };
+}
