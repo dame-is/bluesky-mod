@@ -587,28 +587,47 @@ function stampRows(plan, rows, via = null) {
 }
 
 /**
+ * Is this labelled row inside an approval's bounds: one of `bands` when any
+ * are named, and labelled no later than `asOf` when that is given. A watch
+ * digest's 👍 carries both, so it adds what the digest counted and nothing a
+ * later check labelled.
+ */
+const within = (r, { bands = null, asOf = null } = {}) =>
+  (!bands?.length || bands.includes(r.band)) &&
+  (!asOf || Date.parse(r.triage_at) <= Date.parse(asOf));
+
+/**
  * Add the accounts a content triage gave this label.
  *
  * Recorded as `approved_via: triage:<label>`, never as a band. A band is
  * reproducible from the snapshot; this is a model reading that nobody can
- * reproduce, so the log says which one it was. `reason` is kept in the plan's
- * note (see noteWithReason).
+ * reproduce, so the log says which one it was. `bands` and `asOf` narrow it
+ * (see within). `reason` is kept in the plan's note (see noteWithReason).
  */
 export async function applyPlanToTriage(
   agent,
   plan,
   label,
-  { by = null, skipBands = [], reason = null } = {},
+  {
+    by = null,
+    skipBands = [],
+    bands = null,
+    asOf = null,
+    reason = null,
+  } = {},
 ) {
   const uri = listUri();
   const bot = agent.session?.did;
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
-  const rows = await selectAll('decision', {
-    select: 'did,band,triage,action,acted_at,undone_at,already_listed',
-    eq: { plan_id: plan.id, triage: label },
-    order: 'did.asc',
-  });
+  const rows = (
+    await selectAll('decision', {
+      select:
+        'did,band,triage,triage_at,action,acted_at,undone_at,already_listed',
+      eq: { plan_id: plan.id, triage: label },
+      order: 'did.asc',
+    })
+  ).filter((r) => within(r, { bands, asOf }));
   // skipBands is how a watch holds CONNECTED and NOTABLE back for a 👍 even
   // when it was asked to add the hostile ones on its own.
   const { rows: pending, refused } = await withoutProtected(
@@ -631,7 +650,11 @@ export async function applyPlanToTriage(
     };
   }
 
-  const again = `approve ${shortCode(plan.id)} ${label}`;
+  const again = [
+    `approve ${shortCode(plan.id)} ${label}`,
+    ...(bands?.length ? [bands.join(',')] : []),
+    ...(asOf ? [`asof=${asOf}`] : []),
+  ].join(' ');
   const slice = pending.slice(0, PER_APPROVAL);
   const { added, failed, rateLimited, already, vetoed, note } =
     await writeRows(agent, plan, slice, {
@@ -680,15 +703,23 @@ export async function applyPlanToTriage(
  * How many accounts a plan action would touch, counted the way the action
  * itself counts them: `pending` is what an approval would still add (never
  * PROTECTED, by the plan's band or by the protected table as it stands, never
- * anyone already acted on), `live` is what an undo would take back. Read
- * before a write so the check on it can see the size of it.
+ * anyone already acted on, and with `asOf` nothing labelled after it), `live`
+ * is what an undo would take back. Read before a write so the check on it
+ * can see the size of it.
  */
 export async function countDecisions(
   plan,
-  { bands = null, label = null, state = 'pending', kinds = null } = {},
+  {
+    bands = null,
+    label = null,
+    state = 'pending',
+    kinds = null,
+    asOf = null,
+  } = {},
 ) {
   const rows = await selectAll('decision', {
-    select: 'did,band,triage,action,acted_at,undone_at,engaged,already_listed',
+    select:
+      'did,band,triage,triage_at,action,acted_at,undone_at,engaged,already_listed',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
@@ -703,6 +734,7 @@ export async function countDecisions(
     if (r.acted_at || r.band === 'PROTECTED' || r.already_listed) return false;
     if (bands?.length && !bands.includes(r.band)) return false;
     if (label && r.triage !== label) return false;
+    if (asOf && !within(r, { asOf })) return false;
     return engagedAs(r, kinds);
   });
   return (await withoutProtected(pending)).rows.length;

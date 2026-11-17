@@ -910,6 +910,66 @@ describe('history', () => {
   });
 });
 
+describe('a label approval with bounds', () => {
+  const labelled = (did, band, at) => ({
+    ...scanned(PLAN_A, did, band),
+    triage: 'hostile',
+    triage_at: at,
+  });
+
+  it('adds only the bands it names and what was labelled by its time', async () => {
+    // As a watch digest's 👍 sends it: the held bands, and the labels up to
+    // the check the digest counted.
+    db.decision = [
+      labelled('did:plc:c1', 'CONNECTED', '2026-11-01T10:00:00.000Z'),
+      labelled('did:plc:n1', 'NOTABLE', '2026-11-01T10:00:00.000Z'),
+      labelled('did:plc:u1', 'UNKNOWN', '2026-11-01T10:00:00.000Z'),
+      labelled('did:plc:c2', 'CONNECTED', '2026-11-01T11:00:00.000Z'),
+    ];
+    const bounds = {
+      bands: ['CONNECTED', 'NOTABLE'],
+      asOf: '2026-11-01T10:00:00.000Z',
+    };
+    expect(
+      await countDecisions(db.plan[0], { label: 'hostile', ...bounds }),
+    ).toBe(2);
+    const out = await applyPlanToTriage(bot(), db.plan[0], 'hostile', bounds);
+    expect(out).toMatchObject({ added: 2 });
+    expect(new Set(repo.values())).toEqual(
+      new Set(['did:plc:c1', 'did:plc:n1']),
+    );
+  });
+
+  it('counts only what was labelled by its time', async () => {
+    db.decision = [
+      labelled('did:plc:a', 'UNKNOWN', '2026-11-01T10:00:00.000Z'),
+      labelled('did:plc:b', 'UNKNOWN', '2026-11-01T10:05:00.000Z'),
+    ];
+    expect(
+      await countDecisions(db.plan[0], {
+        label: 'hostile',
+        asOf: '2026-11-01T10:00:00.000Z',
+      }),
+    ).toBe(1);
+    expect(await countDecisions(db.plan[0], { label: 'hostile' })).toBe(2);
+  });
+
+  it('repeats its bounds in the command to send again', async () => {
+    db.decision = [labelled('did:plc:c1', 'CONNECTED', '2026-11-01T10:00:00Z')];
+    const agent = bot();
+    agent.com.atproto.repo.applyWrites.mockRejectedValue(
+      new Error('Rate Limit Exceeded'),
+    );
+    const out = await applyPlanToTriage(agent, db.plan[0], 'hostile', {
+      bands: ['CONNECTED'],
+      asOf: '2026-11-01T10:00:00.000Z',
+    });
+    expect(out.message).toContain(
+      'Send "approve 1c2d3e4f hostile CONNECTED asof=2026-11-01T10:00:00.000Z" again',
+    );
+  });
+});
+
 // Last in the file: stopWrites holds for the rest of the process.
 describe('shutting down', () => {
   it('starts no new batch once the process is stopping, and records the one sent', async () => {

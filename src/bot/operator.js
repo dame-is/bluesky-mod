@@ -1167,9 +1167,18 @@ export function buildActionTools(ctx, deps = DEPS) {
         const named = actors.length
           ? await Promise.all(actors.map((a) => accountInfo(a, plan)))
           : null;
+        // A label approval covers what was labelled by now, so the count the
+        // check reads and what a 👍 later adds are the same accounts. Labels
+        // are stamped when a triage starts, and triages share the one job
+        // queue, so none counted here is later than this.
+        const asOf = label && !named ? new Date().toISOString() : null;
         const count = named
           ? named.length
-          : await deps.countDecisions(plan, { bands, label });
+          : await deps.countDecisions(plan, {
+              bands,
+              label,
+              ...(asOf ? { asOf } : {}),
+            });
         const action = named
           ? actionText('approve-names', {
               plan: where.phrase,
@@ -1193,7 +1202,11 @@ export function buildActionTools(ctx, deps = DEPS) {
                 named.every((i) => i.inPlan && i.inPlan !== 'not in this plan')),
             commands: [
               `approve ${which} ${
-                named ? actors.join(' ') : label || bands.join(',')
+                named
+                  ? actors.join(' ')
+                  : label
+                    ? `${label} asof=${asOf}`
+                    : bands.join(',')
               }`,
             ],
             describe: named
@@ -1212,6 +1225,7 @@ export function buildActionTools(ctx, deps = DEPS) {
           : label
             ? await deps.applyPlanToTriage(ctx.writeAgent, plan, label, {
                 by: 'agent',
+                asOf,
               })
             : await deps.applyPlan(ctx.writeAgent, plan, bands, {
                 by: 'agent',

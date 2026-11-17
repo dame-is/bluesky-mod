@@ -178,3 +178,47 @@ describe('review <code>', () => {
     });
   });
 });
+
+describe('a label approval that names bands or a time', () => {
+  /** Label `n` rows of `band` hostile, at `at`. */
+  async function label(band, n, at) {
+    const rows = await db.selectAll('decision', {
+      select: 'plan_id,did,band',
+      eq: { plan_id: ID, band },
+      order: 'did.asc',
+    });
+    await db.upsert(
+      'decision',
+      rows.slice(0, n).map((r) => ({ ...r, triage: 'hostile', triage_at: at })),
+    );
+  }
+
+  it('adds only the hostile ones in the bands it names', async () => {
+    await label('CONNECTED', 2, '2026-11-01T10:00:00.000Z');
+    await label('PERIPHERAL', 3, '2026-11-01T10:00:00.000Z');
+    const out = await runCommand(
+      parseCommand('approve abcd1234 hostile CONNECTED'),
+      agent,
+      {},
+    );
+    expect(out.text).toMatch(/^Added 2 that a model read as hostile\./);
+    const added = await db.selectAll('decision', {
+      select: 'did,band',
+      eq: { plan_id: ID },
+      where: { acted_at: 'not.is.null' },
+      order: 'did.asc',
+    });
+    expect(added.map((r) => r.band)).toEqual(['CONNECTED', 'CONNECTED']);
+  });
+
+  it('adds nothing labelled after the time it carries', async () => {
+    await label('NOTABLE', 2, '2026-11-01T10:00:00.000Z');
+    await label('CONNECTED', 1, '2026-11-01T11:00:00.000Z');
+    const out = await runCommand(
+      parseCommand('approve abcd1234 hostile asof=2026-11-01T10:30:00.000Z'),
+      agent,
+      {},
+    );
+    expect(out.text).toMatch(/^Added 2 that a model read as hostile\./);
+  });
+});

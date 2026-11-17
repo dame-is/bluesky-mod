@@ -304,7 +304,10 @@ describe('the write tools', () => {
       accounts: ['@a.test'],
     });
     expect(deps.applyPlan.mock.calls[0][3]).toEqual({ by: 'agent' });
-    expect(deps.applyPlanToTriage.mock.calls[0][3]).toEqual({ by: 'agent' });
+    expect(deps.applyPlanToTriage.mock.calls[0][3]).toEqual({
+      by: 'agent',
+      asOf: expect.any(String),
+    });
     expect(deps.applyPlanToActors.mock.calls[0][3]).toEqual({ by: 'agent' });
   });
 
@@ -1025,9 +1028,13 @@ describe('where a target came from', () => {
       '(created while answering this message; the plan for the post the owner attached',
     );
     expect(out.waitingOnOwner).toBe(true);
+    // Bounded to the labels counted, so a 👍 adds the 4 it describes and
+    // nothing a later triage labels.
+    const { asOf } = deps.countDecisions.mock.calls.at(-1)[1];
+    expect(Date.parse(asOf)).not.toBeNaN();
     expect(ctx.pending).toEqual([
       {
-        commands: ['approve 3f9a2c1b hostile'],
+        commands: [`approve 3f9a2c1b hostile asof=${asOf}`],
         describe: 'add the 4 read as hostile from plan 3f9a2c1b',
       },
     ]);
@@ -1060,7 +1067,7 @@ describe('where a target came from', () => {
       'the plan for the post the owner attached',
     );
     expect(ctx.pending.map((p) => p.commands)).toEqual([
-      ['approve aaaaaaaa hostile'],
+      [expect.stringMatching(/^approve aaaaaaaa hostile asof=\S+$/)],
     ]);
   });
 

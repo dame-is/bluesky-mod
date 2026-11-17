@@ -638,8 +638,13 @@ export async function runCommand(
       const out = await applyPlanToActors(writeAgent, plan, cmd.actors);
       return say(out.message);
     }
+    // Narrowed to the bands and the label time the command names, when it
+    // names them: a watch digest's 👍 adds what the digest counted.
     if (cmd.labels?.length) {
-      const out = await applyPlanToTriage(writeAgent, plan, cmd.labels[0]);
+      const out = await applyPlanToTriage(writeAgent, plan, cmd.labels[0], {
+        bands: cmd.bands,
+        asOf: cmd.asOf,
+      });
       return say(
         out.message,
         out.added
