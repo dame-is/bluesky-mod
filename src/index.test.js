@@ -323,11 +323,16 @@ describe('a data disk running low', () => {
 });
 
 describe('the Jetstream subscription', () => {
-  it("follows only the owner's own follows and list items", async () => {
+  it("follows only the owner's own follows, list items and posts", async () => {
+    // Posts, so attack mode can gate a new one as it lands (shield.js).
     await boot();
     expect(h.stream).toEqual({
       dids: ['did:plc:owner0000000000000000000'],
-      collections: ['app.bsky.graph.follow', 'app.bsky.graph.listitem'],
+      collections: [
+        'app.bsky.graph.follow',
+        'app.bsky.graph.listitem',
+        'app.bsky.feed.post',
+      ],
     });
   });
 });

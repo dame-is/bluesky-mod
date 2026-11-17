@@ -17,6 +17,7 @@ import { authorOf, extractTargets } from './target.js';
 import { handleInPostUrl } from './links.js';
 import { BANDS } from './score.js';
 import { MAX_WINDOW_HOURS } from './pulse.js';
+import { multiListOn, splitListChoice } from './listChoice.js';
 
 /**
  * Engagement kinds, as harvest.js labels them.
@@ -126,6 +127,14 @@ const VERBS = [
   // match here would answer "help me understand why they are connected" (a
   // real question) with a menu.
   { match: /^(?:help|commands|what can you do)[\s?!.]*$/i, action: 'help' },
+  // The bot's lists, numbered, and a new one. Multi-list mode only; with it
+  // off they say so. Before "list add", which they do not overlap, and
+  // anchored, so "lists of people who..." reaches the analyst.
+  {
+    match: /^(?:lists|my lists|show (?:me )?(?:my )?lists|which lists|what lists(?: are there| do (?:i|you) have)?)[\s?!.]*$/i,
+    action: 'lists',
+  },
+  { match: /^(?:new|make|create)\s+(?:a\s+)?list\b/i, action: 'new_list' },
   { match: /^cancel\b/i, action: 'cancel' },
   { match: /^list\s+add\b/i, action: 'list_add' },
   { match: /^list\s+remove\b/i, action: 'list_remove' },
@@ -223,10 +232,31 @@ export function parseActor(token) {
  *   back rather than guessed. "block them" is precisely the case that must not
  *   work.
  */
-export function parseCommand(
-  text,
-  { embedUri = null, links = [], mentions = [] } = {},
-) {
+export function parseCommand(text, opts = {}) {
+  const original = String(text ?? '').trim();
+  if (!original) return null;
+  const verb = VERBS.find((v) => v.match.test(original));
+  if (!verb) return null;
+  // In multi-list mode a write can name its list ("block @x to spam",
+  // "approve 1c2d3e4f UNKNOWN list:3k2..."). The words are taken off before
+  // the rest is read, so the target is read exactly as it is with one list,
+  // and the list rides along as typed for the registry to resolve.
+  if (!multiListOn() || !LISTED.has(verb.action)) return parseOne(original, opts);
+  const choice = splitListChoice(original);
+  const cmd = parseOne(choice.text, opts);
+  if (!cmd) return null;
+  return {
+    ...cmd,
+    raw: original,
+    list: choice.list,
+    ...(choice.conflict ? { listConflict: true } : {}),
+  };
+}
+
+/** The verbs that write to a list, and a scan whose menu will. */
+const LISTED = new Set(['list_add', 'list_remove', 'approve', 'plan']);
+
+function parseOne(text, { embedUri = null, links = [], mentions = [] } = {}) {
   const raw = String(text ?? '').trim();
   if (!raw) return null;
 
@@ -275,6 +305,19 @@ export function parseCommand(
 
   if (verb.action === 'help') {
     return { action: 'help', needsTarget: false, raw };
+  }
+
+  if (verb.action === 'lists') {
+    return { action: 'lists', needsTarget: false, raw };
+  }
+
+  // The name is everything after "new list", as typed.
+  if (verb.action === 'new_list') {
+    const name = raw
+      .replace(verb.match, '')
+      .replace(/^\s*(?:called|named|for)\s+/i, '')
+      .trim();
+    return { action: 'new_list', name, needsTarget: !name, raw };
   }
 
   // `pulse` names a slice, a window and how to cut it. Every part is optional
@@ -595,6 +638,7 @@ const WRITE_ACTIONS = new Set([
   'approve',
   'undo',
   'cancel',
+  'new_list',
 ]);
 
 /** Would running this change the list? */
@@ -1184,10 +1228,24 @@ const QUICK_VERBS = new Map([
  *
  * @returns {null | { action: 'list_add'|'list_remove', actor: string, fromPost: boolean, raw: string }}
  */
-export function parseQuick(
-  text,
-  { embedUri = null, links = [], mentions = [] } = {},
-) {
+export function parseQuick(text, opts = {}) {
+  const original = String(text ?? '').trim();
+  if (!original) return null;
+  // As parseCommand does: the list a block names comes off first, and the
+  // rest is read as it is with one list.
+  if (!multiListOn()) return quickOne(original, opts);
+  const choice = splitListChoice(original);
+  const quick = quickOne(choice.text, opts);
+  if (!quick) return null;
+  return {
+    ...quick,
+    raw: original,
+    list: choice.list,
+    ...(choice.conflict ? { listConflict: true } : {}),
+  };
+}
+
+function quickOne(text, { embedUri = null, links = [], mentions = [] } = {}) {
   const raw = String(text ?? '').trim();
   if (!raw) return null;
   let action = null;

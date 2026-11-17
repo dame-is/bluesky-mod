@@ -16,7 +16,10 @@ import {
   count,
   rpc,
   pgDdl,
+  addColumnsPg,
+  ADDED_COLUMNS,
 } from './db.js';
+import { DatabaseSync } from 'node:sqlite';
 import { storesFor, freshStore } from './testStores.js';
 
 const BACKENDS = storesFor('bm_test_db');
@@ -280,6 +283,55 @@ describe('the SQLite file', () => {
       closeDb();
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a store made by an older version', () => {
+  beforeEach(() => closeDb());
+
+  it('gains the columns added since, keeping its rows', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-db-'));
+    const file = path.join(dir, 'old.db');
+    try {
+      // The plan table as the first release made it, with a row in it.
+      const old = new DatabaseSync(file);
+      old.exec(
+        `create table plan (id text primary key, created_at text, approved_at text,
+          approved_bands JSON, totals JSON, note text)`,
+      );
+      old.exec(`insert into plan (id, note) values ('p-old', 'before')`);
+      old.close();
+
+      openDb(file);
+      const [row] = await select('plan', { eq: { id: 'p-old' } });
+      expect(row.note).toBe('before');
+      expect(row.list_uri).toBeNull();
+      await upsert('plan', [{ id: 'p-new', list_uri: 'at://did:plc:bot/app.bsky.graph.list/x' }]);
+      const [fresh] = await select('plan', { select: 'list_uri', eq: { id: 'p-new' } });
+      expect(fresh.list_uri).toBe('at://did:plc:bot/app.bsky.graph.list/x');
+    } finally {
+      closeDb();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('opens twice without adding a column twice', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-db-'));
+    const file = path.join(dir, 'twice.db');
+    try {
+      openDb(file);
+      closeDb();
+      expect(() => openDb(file)).not.toThrow();
+    } finally {
+      closeDb();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says each added column in Postgres terms, idempotently', () => {
+    const sql = addColumnsPg();
+    expect(sql).toHaveLength(ADDED_COLUMNS.length);
+    for (const s of sql) expect(s).toMatch(/^alter table "\w+" add column if not exists "\w+" /);
   });
 });
 

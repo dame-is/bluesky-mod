@@ -16,6 +16,7 @@
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
 import { fetchWithTimeout } from './atproto.js';
+import { mapLimit, chunks, APPVIEW_CONCURRENCY } from './limit.js';
 
 /** `getRelationships` takes at most 30 `others` per call. */
 const REL_BATCH = 30;
@@ -205,20 +206,21 @@ export function createScorer(
     thresholds = DEFAULT_THRESHOLDS,
   } = ref;
 
+  /**
+   * Profiles in batches of 25, a few batches at once. One batch after another
+   * made scoring a 2,000-account scan wait on 80 round trips in a row.
+   */
   async function profiles(dids, signal) {
     const out = new Map();
-    for (let i = 0; i < dids.length; i += PROFILE_BATCH) {
-      const q = dids
-        .slice(i, i + PROFILE_BATCH)
-        .map((d) => `actors=${encodeURIComponent(d)}`)
-        .join('&');
+    await mapLimit(chunks(dids, PROFILE_BATCH), APPVIEW_CONCURRENCY, async (batch) => {
+      const q = batch.map((d) => `actors=${encodeURIComponent(d)}`).join('&');
       const found = await getList(
         `${appview}/xrpc/app.bsky.actor.getProfiles?${q}`,
         'profiles',
         { fetchImpl, signal, delays: retryDelaysMs, what: 'profiles' },
       );
       for (const p of found) if (p?.did) out.set(p.did, p);
-    }
+    }, { signal });
     return out;
   }
 
@@ -230,8 +232,7 @@ export function createScorer(
    */
   async function relationships(dids, signal) {
     const out = new Map();
-    for (let i = 0; i < dids.length; i += REL_BATCH) {
-      const batch = dids.slice(i, i + REL_BATCH);
+    await mapLimit(chunks(dids, REL_BATCH), APPVIEW_CONCURRENCY, async (batch) => {
       const q = batch.map((d) => `others=${encodeURIComponent(d)}`).join('&');
       const found = await getList(
         `${appview}/xrpc/app.bsky.graph.getRelationships?actor=${encodeURIComponent(OWNER_DID)}&${q}`,
@@ -250,7 +251,7 @@ export function createScorer(
           followsYou: Boolean(r.followedBy),
         });
       }
-    }
+    }, { signal });
     return out;
   }
 

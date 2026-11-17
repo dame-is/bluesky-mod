@@ -3,6 +3,8 @@
 // bot following them, and a moderation list to write to. Everything here is
 // in the BOT's repo, and running it again changes nothing.
 
+import { multiListOn } from './lib/listChoice.js';
+
 const MODLIST = 'app.bsky.graph.defs#modlist';
 const DECLARATION = 'chat.bsky.actor.declaration';
 
@@ -37,7 +39,11 @@ export async function moderationLists(agent) {
   });
   return (res.data.records || [])
     .filter((r) => r.value?.purpose === MODLIST)
-    .map((r) => ({ uri: r.uri, name: r.value?.name || 'untitled' }));
+    .map((r) => ({
+      uri: r.uri,
+      name: r.value?.name || 'untitled',
+      createdAt: String(r.value?.createdAt || ''),
+    }));
 }
 
 /** Create a moderation list on the bot's account. */
@@ -62,9 +68,21 @@ export async function createList(agent, name) {
  *
  * @returns {Promise<{ uri: string, name: string, created: boolean }>}
  */
-export async function findOrCreateList(agent, { name = 'Block List' } = {}) {
+export async function findOrCreateList(
+  agent,
+  { name = 'Block List', multi = multiListOn() } = {},
+) {
   const lists = await moderationLists(agent);
   if (lists.length === 1) return { ...lists[0], created: false };
+  // In multi-list mode every one of them is used, and the oldest is list 1,
+  // the one the weekly re-score reads. MOD_LIST_URI still picks another.
+  if (lists.length > 1 && multi) {
+    const [oldest] = [...lists].sort(
+      (a, b) =>
+        a.createdAt.localeCompare(b.createdAt) || a.uri.localeCompare(b.uri),
+    );
+    return { uri: oldest.uri, name: oldest.name, created: false };
+  }
   if (lists.length > 1) {
     throw new Error(
       `the bot has ${lists.length} moderation lists, so set MOD_LIST_URI to the one to use:\n` +

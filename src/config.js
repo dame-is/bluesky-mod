@@ -8,6 +8,10 @@ import { OWNER_DID } from './constants.js';
 import { rosterFromEnv, parseDids } from './lib/senders.js';
 import { readFlag, badFlags } from './flags.js';
 import { modelProblems, modelsEnabled, PROVIDER } from './models.js';
+import { readShieldConfig } from './lib/shieldConfig.js';
+
+/** The shield's settings and what is wrong with them (lib/shieldConfig.js). */
+const shieldRead = readShieldConfig(process.env);
 
 /** Number settings that did not parse, reported by assertConfig. */
 const badNumbers = [];
@@ -95,6 +99,15 @@ export const config = {
   }),
 
   /**
+   * Spacedust (spacedust.js): replies, quotes and mentions aimed at the owner,
+   * as they happen. Feeds the alert on a post taking off, lets a watch skip a
+   * read when nothing new arrived, and is what the shield counts. MOD_STREAM
+   * =false turns it off, and those fall back to polling.
+   */
+  stream: readFlag('MOD_STREAM', true),
+  spacedustHost: process.env.SPACEDUST_HOST || 'spacedust.microcosm.blue',
+
+  /**
    * Force a reconnect on this interval. The subscription is silent for hours
    * at a time, so "no traffic" cannot be told apart from "the connection died
    * quietly". Reconnecting resumes from the stored cursor and misses nothing.
@@ -131,6 +144,14 @@ export const config = {
    * with "!" still takes the classic path.
    */
   dmMode: normaliseMode(process.env.MOD_DM_MODE),
+
+  /**
+   * Multi-list mode: every moderation list in the bot's repo is a list a
+   * write can go to, and a block or an approval that names none asks "Which
+   * list?" with a numbered menu (src/bot/lists.js). Off, there is one list,
+   * MOD_LIST_URI, and nothing asks.
+   */
+  multiList: readFlag('MOD_MULTI_LIST', false),
 
   /** Which model provider (src/models.js). */
   provider: PROVIDER,
@@ -210,10 +231,29 @@ export const config = {
    * quotes and replies, which gets a DM offering to watch it. MOD_ALERTS=false
    * stops it; MOD_ALERT_THRESHOLD (default 15 in an hour) sets what counts.
    */
+  //
+  // With the stream on, a check reads memory rather than the AppView, so it
+  // runs every two minutes instead of ten; the AppView is polled only while
+  // the stream has not covered the last hour.
   alertEveryMs:
     !readFlag('MOD_ALERTS', true) || !modelsEnabled()
       ? 0
-      : delay('MOD_ALERT_EVERY_MS', 10 * 60_000, { min: 60_000 }),
+      : delay(
+          'MOD_ALERT_EVERY_MS',
+          readFlag('MOD_STREAM', true) ? 2 * 60_000 : 10 * 60_000,
+          { min: 60_000 },
+        ),
+
+  /**
+   * The shield (shield.js): closing replies and turning quotes off on the
+   * owner's posts when people outside their circle pile on, and attack mode,
+   * which does that to every recent post at once. Counted from the Spacedust
+   * stream, so it needs MOD_STREAM on. Writing the gates needs
+   * MOD_OWNER_APP_PASSWORD, an app password for the owner's own account;
+   * without it the shield only tells the owner. See lib/shieldConfig.js for
+   * every setting and its default.
+   */
+  shield: shieldRead.shield,
 
   /**
    * How long a network digest may spend reading author feeds. When it runs
@@ -321,6 +361,7 @@ export function assertConfig(env = process.env) {
   if (env.MOD_IDENTIFIER && config.roster.all.includes(env.MOD_IDENTIFIER)) {
     problems.push('the bot account is on its own roster, so it would answer itself');
   }
+  problems.push(...shieldRead.problems);
   problems.push(...badNumbers, ...new Set(badFlags));
   if (problems.length) {
     throw new Error(

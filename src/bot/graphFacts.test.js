@@ -256,3 +256,45 @@ describe("this process's own writes", () => {
     }
   });
 });
+
+describe('several lists (multi-list mode)', () => {
+  const OTHER = 'at://did:plc:bot/app.bsky.graph.list/3other';
+
+  it("never offers one list's listitem for a write to another", async () => {
+    // Constellation has indexed neither yet.
+    constellation.getManyToMany.mockResolvedValue({ items: [], cursor: null });
+    facts.noteListed(OTHER, 'did:plc:a', 'rOnOther');
+    expect(await facts.rkeysForWrite(LIST, 'did:plc:a')).toEqual([]);
+    expect(await facts.rkeysForWrite(OTHER, 'did:plc:a')).toEqual(['rOnOther']);
+    expect(facts.isListed(OTHER, 'did:plc:a')).toBe(true);
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(null);
+  });
+
+  it('keeps a removal from one list off that list only', async () => {
+    constellation.getManyToMany.mockImplementation(
+      async (_did, _src, _path, { otherSubject }) => ({
+        items: [
+          listitem('did:plc:a', otherSubject === LIST ? 'r1' : 'r2', otherSubject),
+        ],
+        cursor: null,
+      }),
+    );
+    facts.noteUnlisted(LIST, 'did:plc:a');
+    expect(await facts.rkeysForWrite(LIST, 'did:plc:a')).toEqual([]);
+    expect(await facts.rkeysForWrite(OTHER, 'did:plc:a')).toEqual(['r2']);
+  });
+
+  it('holds a copy of each list, and reading one does not throw out the other', async () => {
+    constellation.getBacklinks.mockResolvedValue({ records: [], cursor: null });
+    atproto.fetchWithTimeout.mockImplementation(async () =>
+      page([record('r1', 'did:plc:a', LIST), record('r2', 'did:plc:b', OTHER)]),
+    );
+    await facts.graphFacts({ list: LIST });
+    await facts.graphFacts({ list: OTHER });
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
+    expect(facts.isListed(LIST, 'did:plc:b')).toBe(false);
+    expect(facts.isListed(OTHER, 'did:plc:b')).toBe(true);
+    expect(facts.listedOnAnyView([LIST, OTHER]).has('did:plc:b')).toBe(true);
+    expect(facts.listedOnAnyView([LIST]).has('did:plc:b')).toBe(false);
+  });
+});

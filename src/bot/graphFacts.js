@@ -153,28 +153,41 @@ async function readBlockers(target = OWNER_DID, { maxPages = 50 } = {}) {
 }
 
 // --- the held copy -----------------------------------------------------------
+//
+// One copy per list, so multi-list mode can read several lists without each
+// read throwing out the last, and one copy of the blockers, which are the
+// owner's whatever the list. This process's own writes are kept per list and
+// account too: an account added to one list is not on another, and the rkey
+// of its listitem on one list must never be offered for a delete on another.
 
-let held = null;
-let loading = null;
+/** list -> { listed, complete, listFailed, listAt } */
+const heldLists = new Map();
+/** { blockers, blockersFailed, blockersAt } */
+let heldBlockers = null;
+/** list -> the load in flight for it, shared by concurrent callers. */
+const loading = new Map();
 /**
- * did -> { at, rkey } for adds this process made; did -> at for removals.
- * Each is kept in the order written, oldest first, so the ones too old to be
- * read are dropped from the front on every write.
+ * `${list} ${did}` -> { at, rkey } for adds this process made; the same key ->
+ * at for removals. Each is kept in the order written, oldest first, so the
+ * ones too old to be read are dropped from the front on every write.
  */
 const ownAdds = new Map();
 const ownRemovals = new Map();
 
+/** The key own writes are kept under. A space is in neither a URI nor a DID. */
+const ownKey = (list, did) => `${list} ${did}`;
+
 const writtenAt = (entry) => entry?.at ?? entry;
 
-function recent(map, did, now) {
-  const at = writtenAt(map.get(did));
+function recent(map, key, now) {
+  const at = writtenAt(map.get(key));
   return typeof at === 'number' && now - at < OWN_WRITES_MS;
 }
 
 function dropOld(map, now) {
-  for (const [did, entry] of map) {
+  for (const [key, entry] of map) {
     if (now - writtenAt(entry) < OWN_WRITES_MS) return;
-    map.delete(did);
+    map.delete(key);
   }
 }
 
@@ -189,9 +202,12 @@ const settle = (promise) =>
     () => ({ failed: true }),
   );
 
+/** One list's held copy with the blockers beside it, as callers read it. */
+const view = (list) => ({ list, ...heldLists.get(list), ...heldBlockers });
+
 /**
  * The held list and blockers, each reloaded when it is stale. Concurrent
- * callers share one load.
+ * callers for the same list share one load.
  *
  * A list longer than the walk reads is held as far as it got, with
  * `complete: false`: an account it saw is listed, and one it did not reach is
@@ -199,47 +215,50 @@ const settle = (promise) =>
  */
 export async function graphFacts({ list, now = Date.now } = {}) {
   const t = now();
-  const listDue =
-    !held || held.list !== list || due(held.listAt, held.listFailed, t);
-  const blockersDue = !held || due(held.blockersAt, held.blockersFailed, t);
-  if (!listDue && !blockersDue) return held;
-  if (!loading) {
-    loading = (async () => {
-      const [walk, blockers] = await Promise.all([
-        listDue
-          ? settle(
-              walkListed(list, {
-                fetchImpl: fetchWithTimeout,
-                maxPages: LIST_MAX_PAGES,
-              }),
-            )
-          : null,
-        blockersDue ? settle(readBlockers(OWNER_DID)) : null,
-      ]);
-      const at = now();
-      held = { ...held };
-      if (walk) {
-        Object.assign(held, {
-          list,
-          listed: walk.value?.listed ?? null,
-          complete: Boolean(walk.value?.complete),
-          listFailed: Boolean(walk.failed),
-          listAt: at,
-        });
-      }
-      if (blockers) {
-        Object.assign(held, {
-          blockers: blockers.value ?? null,
-          blockersFailed: Boolean(blockers.failed),
-          blockersAt: at,
-        });
-      }
-      return held;
-    })().finally(() => {
-      loading = null;
-    });
+  const mine = heldLists.get(list);
+  const listDue = !mine || due(mine.listAt, mine.listFailed, t);
+  const blockersDue =
+    !heldBlockers ||
+    due(heldBlockers.blockersAt, heldBlockers.blockersFailed, t);
+  if (!listDue && !blockersDue) return view(list);
+  if (!loading.has(list)) {
+    loading.set(
+      list,
+      (async () => {
+        const [walk, blockers] = await Promise.all([
+          listDue
+            ? settle(
+                walkListed(list, {
+                  fetchImpl: fetchWithTimeout,
+                  maxPages: LIST_MAX_PAGES,
+                }),
+              )
+            : null,
+          blockersDue ? settle(readBlockers(OWNER_DID)) : null,
+        ]);
+        const at = now();
+        if (walk) {
+          heldLists.set(list, {
+            listed: walk.value?.listed ?? null,
+            complete: Boolean(walk.value?.complete),
+            listFailed: Boolean(walk.failed),
+            listAt: at,
+          });
+        }
+        if (blockers) {
+          heldBlockers = {
+            blockers: blockers.value ?? null,
+            blockersFailed: Boolean(blockers.failed),
+            blockersAt: at,
+          };
+        }
+        return view(list);
+      })().finally(() => {
+        loading.delete(list);
+      }),
+    );
   }
-  return loading;
+  return loading.get(list);
 }
 
 /**
@@ -247,22 +266,28 @@ export async function graphFacts({ list, now = Date.now } = {}) {
  * know? true, false, or null for could not tell. For reading, not for writing.
  */
 export function isListed(list, did, { now = Date.now() } = {}) {
-  if (recent(ownAdds, did, now)) return true;
-  if (recent(ownRemovals, did, now)) return false;
-  if (!held || held.list !== list || !held.listed) return null;
+  const key = ownKey(list, did);
+  if (recent(ownAdds, key, now)) return true;
+  if (recent(ownRemovals, key, now)) return false;
+  const held = heldLists.get(list);
+  if (!held?.listed) return null;
   if (held.listed.has(did)) return true;
   return held.complete ? false : null;
 }
 
 /** Does `did` block the owner, as far as the held copy knows? null if unknown. */
 export function blocksMe(did) {
-  if (!held?.blockers) return null;
-  return held.blockers.has(did);
+  if (!heldBlockers?.blockers) return null;
+  return heldBlockers.blockers.has(did);
 }
 
 /** Set-like views for the scorer, which only ever calls `.has`. */
 export function listedView(list) {
   return { has: (did) => isListed(list, did) === true };
+}
+/** On any of these lists, for a reader that counts every list as one. */
+export function listedOnAnyView(lists) {
+  return { has: (did) => lists.some((list) => isListed(list, did) === true) };
 }
 export function blockersView() {
   return { has: (did) => blocksMe(did) === true };
@@ -271,12 +296,14 @@ export function blockersView() {
 /** Record a write this process made, so reads and the next write see it. */
 export function noteListed(list, did, rkey = null) {
   const now = Date.now();
-  ownRemovals.delete(did);
-  ownAdds.delete(did);
-  ownAdds.set(did, { at: now, rkey });
+  const key = ownKey(list, did);
+  ownRemovals.delete(key);
+  ownAdds.delete(key);
+  ownAdds.set(key, { at: now, rkey });
   dropOld(ownAdds, now);
   dropOld(ownRemovals, now);
-  if (held?.list === list && held.listed) {
+  const held = heldLists.get(list);
+  if (held?.listed) {
     held.listed.set(
       did,
       [...(held.listed.get(did) || []), rkey].filter(Boolean),
@@ -285,12 +312,13 @@ export function noteListed(list, did, rkey = null) {
 }
 export function noteUnlisted(list, did) {
   const now = Date.now();
-  ownAdds.delete(did);
-  ownRemovals.delete(did);
-  ownRemovals.set(did, now);
+  const key = ownKey(list, did);
+  ownAdds.delete(key);
+  ownRemovals.delete(key);
+  ownRemovals.set(key, now);
   dropOld(ownAdds, now);
   dropOld(ownRemovals, now);
-  if (held?.list === list && held.listed) held.listed.delete(did);
+  heldLists.get(list)?.listed?.delete(did);
 }
 
 /**
@@ -315,8 +343,8 @@ export async function rkeysForWrite(
   if (rkeys === null) return null;
   // Anything Constellation still shows after a recent removal was deleted
   // after it was indexed.
-  if (recent(ownRemovals, did, now)) rkeys = [];
-  const own = ownAdds.get(did);
+  if (recent(ownRemovals, ownKey(list, did), now)) rkeys = [];
+  const own = ownAdds.get(ownKey(list, did));
   if (
     own &&
     now - own.at < OWN_WRITES_MS &&
@@ -330,8 +358,9 @@ export async function rkeysForWrite(
 
 /** For tests. */
 export function resetGraphFacts() {
-  held = null;
-  loading = null;
+  heldLists.clear();
+  heldBlockers = null;
+  loading.clear();
   ownAdds.clear();
   ownRemovals.clear();
 }

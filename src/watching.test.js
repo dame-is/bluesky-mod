@@ -237,6 +237,35 @@ describe('a send that fails', () => {
   });
 });
 
+describe("an alert's menu", () => {
+  it('sends what can be done about the post as a numbered menu, and stores it', async () => {
+    watch.ownPostAlerts.mockResolvedValueOnce([{ uri: 'at://p', growth: 20 }]);
+    const options = [
+      { label: 'Watch it for 24 hours', command: 'shield watch at://p' },
+      { label: 'Guard it', command: 'guard at://p for 72h' },
+    ];
+    const c = chat();
+    await tickAlerts({ chat: c, convoFor: async () => 'convo1', menuFor: async () => options });
+    expect(c.sent[0]).toMatch(/reply with a number:\n1\. Watch it for 24 hours\n2\. Guard it/);
+    const row = db.dm_choice.find((r) => r.convo_id === 'convo1' && r.options?.length);
+    expect(row.options.map((o) => o.command)).toEqual(options.map((o) => o.command));
+  });
+
+  it('still goes, with only its 👍, when the menu cannot be read', async () => {
+    watch.ownPostAlerts.mockResolvedValueOnce([{ uri: 'at://p', growth: 20 }]);
+    const c = chat();
+    const n = await tickAlerts({
+      chat: c,
+      convoFor: async () => 'convo1',
+      menuFor: async () => {
+        throw new Error('appview down');
+      },
+    });
+    expect(n).toBe(1);
+    expect(c.sent[0]).not.toMatch(/reply with a number/);
+  });
+});
+
 describe('the loops wait for an answer', () => {
   it('holds a watch digest while a question is open, and keeps reading', async () => {
     await savePending('convo1', {
