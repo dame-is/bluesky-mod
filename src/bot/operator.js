@@ -1068,7 +1068,7 @@ export function buildActionTools(ctx, deps = DEPS) {
             byBand: p.totals?.byBand ?? null,
             approvedAt: p.approved_at,
             approvedBands: p.approved_bands,
-            note: noteText(p.note),
+            ...(ctx.canWrite ? { note: noteText(p.note) } : {}),
           }));
         } catch (err) {
           return failed(err);
@@ -1099,7 +1099,7 @@ export function buildActionTools(ctx, deps = DEPS) {
               via: r.approved_via,
               code: r.code,
               undone: Boolean(r.undone_at),
-              note: noteText(r.plan?.note),
+              ...(ctx.canWrite ? { note: noteText(r.plan?.note) } : {}),
             })),
           };
         } catch (err) {

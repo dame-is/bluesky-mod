@@ -170,6 +170,45 @@ describe('who gets the write tools', () => {
     expect(tools).toHaveProperty('review_plan');
   });
 
+  it('a read-only guest sees what was added, but not the words that asked for it', async () => {
+    const plan = {
+      id: PLAN.id,
+      created_at: '2026-01-01T00:00:00.000Z',
+      totals: { uri: 'at://did:plc:author/app.bsky.feed.post/3abc' },
+      note: 'the owner said block my ex',
+    };
+    const deps = () =>
+      fakeDeps({
+        recentPlans: vi.fn(async () => [plan]),
+        historyFor: vi.fn(async () => ({
+          total: 1,
+          rows: [
+            {
+              acted_at: '2026-01-01T00:00:00.000Z',
+              did: 'did:plc:x',
+              action: 'list_add',
+              band: 'UNKNOWN',
+              code: '3f9a2c1b',
+              plan,
+            },
+          ],
+        })),
+      });
+    const guest = buildActionTools(ctxFor({ canWrite: false }), deps());
+    const seen = JSON.stringify([
+      await guest.recent_plans.execute({}),
+      await guest.history.execute({}),
+    ]);
+    expect(seen).toContain('3f9a2c1b');
+    expect(seen).toContain('UNKNOWN');
+    expect(seen).not.toContain('my ex');
+    const writer = buildActionTools(ctxFor(), deps());
+    expect(JSON.stringify(await writer.recent_plans.execute({}))).toContain(
+      'my ex',
+    );
+    expect(JSON.stringify(await writer.history.execute({}))).toContain('my ex');
+  });
+
   it('a writer with no session gets none either', () => {
     const tools = buildActionTools(ctxFor({ writeAgent: null }), fakeDeps());
     for (const name of WRITES) expect(tools).not.toHaveProperty(name);

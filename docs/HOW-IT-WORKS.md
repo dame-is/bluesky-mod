@@ -66,7 +66,7 @@ Both settings take DIDs only. A handle can change hands, so an allowlist written
 
 It answers in one-to-one chats only. In a group chat it says nothing, because every member would read the reply, and the menu, the stored question and the remembered post belong to the chat rather than to one person.
 
-Read-only accounts can still see bands, vouch counts and follower numbers for third parties. That is your private reading of your own social graph, and adding someone to the roster shares it with them.
+Read-only accounts can still see bands, vouch counts and follower numbers for third parties. They can also see what was added and when, by band and plan code, but not the words that asked for it. That is your private reading of your own social graph, and adding someone to the roster shares it with them.
 
 `src/lib/senders.js` is the only place that decides who is answered, for DMs and public mentions alike.
 
