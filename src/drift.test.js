@@ -173,6 +173,43 @@ describe('the brief', () => {
     expect(body).toContain('and 1 more');
   });
 
+  it('puts a member who became PROTECTED under its own line, with its earlier band', () => {
+    const body = renderBrief({
+      scored: 40,
+      drifted: [
+        {
+          did: 'did:plc:f',
+          handle: 'f.test',
+          was: 'CONNECTED',
+          now: 'PROTECTED',
+          vouches: 4,
+        },
+      ],
+      gone: [],
+      added: 0,
+    });
+    expect(body).toContain('1 account on the list is now PROTECTED:');
+    expect(body).toContain('@f.test is now PROTECTED, was CONNECTED, 4 vouches');
+    expect(body).not.toContain('no longer a stranger');
+    expect(body).toContain('unblock @handle');
+  });
+
+  it('counts a stranger who became PROTECTED once, under PROTECTED', () => {
+    const body = renderBrief({
+      scored: 40,
+      drifted: [
+        { did: 'did:plc:a', handle: 'a.test', was: 'UNKNOWN', now: 'NOTABLE' },
+        { did: 'did:plc:b', handle: 'b.test', was: 'UNKNOWN', now: 'PROTECTED' },
+      ],
+      gone: [],
+      added: 0,
+    });
+    expect(body).toContain('1 account on the list is now PROTECTED:');
+    expect(body).toContain('1 account is no longer a stranger:');
+    expect(body.match(/@b\.test/g)).toHaveLength(1);
+    expect(body.indexOf('@b.test')).toBeLessThan(body.indexOf('@a.test'));
+  });
+
   it('says nothing when nothing moved', () => {
     expect(renderBrief({ scored: 10, drifted: [], gone: [], added: 3 })).toBe(
       null,

@@ -237,22 +237,35 @@ export function renderBrief({ scored, drifted, gone, added }) {
     `Re-scored ${scored.toLocaleString()} accounts on the list.`,
     '',
   ];
-  if (drifted.length) {
-    // Every member who became PROTECTED is named, first: an audit that has
-    // reported one is the baseline after it, so a name cut here is never
-    // given. The rest are cut to the twelve with the most vouches.
-    const nowProtected = drifted.filter((d) => d.now === 'PROTECTED');
-    const rest = drifted
-      .filter((d) => d.now !== 'PROTECTED')
-      .sort((a, b) => (b.vouches ?? 0) - (a.vouches ?? 0));
+  // A member who became PROTECTED is one no path may add, such as someone the
+  // owner follows. Every one is named, first: the audit that reports one is
+  // the baseline after it, so a name cut here is never given.
+  const nowProtected = drifted.filter((d) => d.now === 'PROTECTED');
+  const strangers = drifted
+    .filter((d) => d.now !== 'PROTECTED')
+    .sort((a, b) => (b.vouches ?? 0) - (a.vouches ?? 0));
+  const vouches = (d) => plural(d.vouches ?? 0, 'vouch', 'vouches');
+  if (nowProtected.length) {
     lines.push(
-      `${plural(drifted.length, 'account is', 'accounts are')} no longer a stranger:`,
-      ...[...nowProtected, ...rest.slice(0, 12)].map(
+      `${plural(nowProtected.length, 'account on the list is', 'accounts on the list are')} now PROTECTED:`,
+      ...nowProtected.map(
         (d) =>
-          `  @${d.handle ?? d.did} is now ${d.now}, ${plural(d.vouches ?? 0, 'vouch', 'vouches')}`,
+          `  @${d.handle ?? d.did} is now PROTECTED${d.was ? `, was ${d.was}` : ''}, ${vouches(d)}`,
       ),
+      '',
     );
-    if (rest.length > 12) lines.push(`  and ${rest.length - 12} more`);
+  }
+  // The strangers who moved are cut to the twelve with the most vouches.
+  if (strangers.length) {
+    lines.push(
+      `${plural(strangers.length, 'account is', 'accounts are')} no longer a stranger:`,
+      ...strangers
+        .slice(0, 12)
+        .map((d) => `  @${d.handle ?? d.did} is now ${d.now}, ${vouches(d)}`),
+    );
+    if (strangers.length > 12) {
+      lines.push(`  and ${strangers.length - 12} more`);
+    }
     lines.push('');
   }
   if (gone.length) {
