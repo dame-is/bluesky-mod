@@ -66,7 +66,8 @@ function query(table, opts = {}) {
       return 0;
     });
   }
-  return opts.limit ? rows.slice(0, opts.limit) : rows;
+  const from = opts.offset || 0;
+  return opts.limit ? rows.slice(from, from + opts.limit) : rows.slice(from);
 }
 
 vi.mock('./db.js', () => ({
@@ -838,6 +839,32 @@ describe('undo last', () => {
 
   it('answers null when nothing is live', async () => {
     expect((await lastChange()).plan).toBe(null);
+  });
+
+  it('passes over a typed block that found the account already listed', async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:x', '2026-10-01T10:00:00Z', {
+        approved_via: 'band',
+        acted_seq: 1,
+      }),
+      // "block @x", answered "was already on the list".
+      added(PLAN_B, 'did:plc:x', '2026-10-01T11:00:00Z', {
+        approved_via: 'command',
+        already_listed: true,
+        acted_seq: 2,
+      }),
+    ];
+    constellation.set('did:plc:x', ['rk-x']);
+    repo.set('rk-x', 'did:plc:x');
+
+    const last = await lastChange();
+    expect(last.plan.id).toBe(PLAN_A);
+
+    // Undoing the plan that put them on still leaves them where the typed
+    // block put them.
+    const out = await undoPlan(bot(), last.plan);
+    expect(out).toMatchObject({ removed: 0, kept: 1 });
+    expect([...repo.values()]).toEqual(['did:plc:x']);
   });
 
   it('does not reach past an unblock to an older add', async () => {

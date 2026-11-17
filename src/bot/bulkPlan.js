@@ -1040,25 +1040,34 @@ export function estimateWrites(n, { kind = 'create' } = {}) {
  * `plan` is null: undo only takes people off, so it has nothing to reverse,
  * and reaching past the removal to an older add would undo something else.
  * An add already undone is passed over, so undoing again steps back to the
- * change before it. One row from the database.
+ * change before it. So is a typed block of someone already listed while an
+ * add that wrote their listitem still holds them: it changed nothing, and is
+ * logged only so an undo of that add leaves them on the list (heldByName).
+ * Usually one row from the database.
  *
  * @returns {Promise<{ plan: object|null,
  *   removed: { did: string, planId: string, at: string }|null }>}
  */
 export async function lastChange() {
-  const rows = await select('decision', {
-    select: 'plan_id,did,action,acted_at',
-    where: {
-      action: 'in.(list_add,list_remove)',
-      acted_at: 'not.is.null',
-      undone_at: 'is.null',
-    },
-    // By the order the changes were made in, which the clock cannot reorder.
-    order: 'acted_seq.desc,acted_at.desc',
-    limit: 1,
-  });
-  const last = rows?.[0];
-  if (!last) return { plan: null, removed: null };
+  let last = null;
+  for (let offset = 0; !last; offset += 1) {
+    const rows = await select('decision', {
+      select: 'plan_id,did,action,acted_at,already_listed',
+      where: {
+        action: 'in.(list_add,list_remove)',
+        acted_at: 'not.is.null',
+        undone_at: 'is.null',
+      },
+      // By the order the changes were made in, which the clock cannot
+      // reorder.
+      order: 'acted_seq.desc,acted_at.desc',
+      limit: 1,
+      ...(offset ? { offset } : {}),
+    });
+    const row = rows?.[0];
+    if (!row) return { plan: null, removed: null };
+    if (!row.already_listed || !(await heldByWrite(row))) last = row;
+  }
   if (last.action === 'list_remove') {
     return {
       plan: null,
@@ -1070,6 +1079,21 @@ export async function lastChange() {
     eq: { id: last.plan_id },
   });
   return { plan: plans?.[0] ?? null, removed: null };
+}
+
+/**
+ * Does another plan's live add that wrote a listitem still hold this row's
+ * account on the list? A row marked `already_listed` wrote none.
+ */
+async function heldByWrite(row) {
+  const rows = await select('decision', {
+    select: 'plan_id,already_listed',
+    eq: { action: 'list_add', did: row.did },
+    where: { acted_at: 'not.is.null', undone_at: 'is.null' },
+  });
+  return (rows || []).some(
+    (r) => r.plan_id !== row.plan_id && !r.already_listed,
+  );
 }
 
 /**
