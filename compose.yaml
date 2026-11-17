@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # The database, the session and the Jetstream cursor.
+      - data:/app/data
+      # Optional voice and limits. Read-only, so the bot cannot rewrite the
+      # instructions it runs under.
+      - ./config:/app/config:ro
+    # For a model server on this machine, such as Ollama, reached as
+    # host.docker.internal (see .env.example).
+    # extra_hosts: ["host.docker.internal:host-gateway"]
+    # Let an answer that is mid-reply finish before the container stops.
+    stop_grace_period: 60s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  data:

@@ -1,0 +1,10 @@
+{
+  "style": "Write plainly and briefly. Lowercase is fine. No emoji.",
+  "guidance": "Never add someone who only liked a post unless I say so.",
+  "openers": "",
+  "report": "",
+  "postReport": "",
+  "model": "",
+  "limits": { "maxTurns": 12, "maxSteps": 12, "historyHours": 4, "reviewRows": 40 },
+  "barePost": "card"
+}
