@@ -223,6 +223,20 @@ export const config = {
   pulseBudgetMs: num('PULSE_BUDGET_MS', 45_000, { positive: true }),
 
   statsIntervalMs: delay('STATS_INTERVAL_MS', 30 * 60_000),
+
+  /**
+   * The web panel (src/panel, docs/PANEL.md). Off unless PANEL_PORT is set, so
+   * a bot that never asked for one opens no port. It listens on this machine
+   * only unless PANEL_HOST says otherwise; putting it on the internet is a
+   * reverse proxy's job, and PANEL_URL is then the address people type.
+   */
+  panel: {
+    port: num('PANEL_PORT', 0, { whole: true, max: 65535 }),
+    host: process.env.PANEL_HOST || '127.0.0.1',
+    url: String(process.env.PANEL_URL || '').trim().replace(/\/+$/, ''),
+    /** How long a sign-in lasts before the panel asks for a new code. */
+    sessionDays: num('PANEL_SESSION_DAYS', 30, { positive: true, max: 365 }),
+  },
 };
 
 // bot/operator.js and lib/agent.js read their deadlines themselves (they
@@ -297,6 +311,9 @@ export function assertConfig(env = process.env) {
   }
   if (env.DATABASE_SCHEMA && !/^[a-z_][a-z0-9_]{0,62}$/.test(env.DATABASE_SCHEMA)) {
     problems.push('DATABASE_SCHEMA must be lowercase letters, digits and underscores');
+  }
+  if (env.PANEL_URL && !/^https?:\/\/[^\s/]+(\/[^\s]*)?$/i.test(String(env.PANEL_URL).trim())) {
+    problems.push('PANEL_URL must be the address the panel is reached at, like https://mod.example.com');
   }
   const scoring = String(env.MOD_SCORING ?? '').trim().toLowerCase();
   if (scoring && scoring !== 'full' && scoring !== 'simple') {

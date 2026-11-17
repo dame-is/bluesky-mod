@@ -14,7 +14,8 @@
     "dev": "LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/main.js",
     "setup": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/setup.js",
     "test": "vitest run",
-    "eval:intent": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/eval-intent.mjs"
+    "eval:intent": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/eval-intent.mjs",
+    "panel:demo": "node --disable-warning=ExperimentalWarning scripts/panel-demo.js"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.105",

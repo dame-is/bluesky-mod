@@ -149,6 +149,12 @@ export { normaliseMode };
 const CLASSIC_PREFIX = /^\s*!(?=\s*[\p{L}\p{N}@])/u;
 
 /**
+ * "panel", alone, asks for a sign-in code for the web panel (src/panel). The
+ * whole message, so a sentence about a panel is still a sentence.
+ */
+const PANEL_WORD = /^\s*panel(?:\s+code)?[\s.!?]*$/i;
+
+/**
  * "^ what's going on in these replies" sends that one message straight to the
  * escalation model. The agent model never sees it.
  */
@@ -2093,6 +2099,8 @@ async function seekToTail(chat, { log = () => {} } = {}) {
  * @param {string} [opts.model]
  * @param {string} opts.botDid    the bot account's DID
  * @param {Function} [opts.generate]  injected for tests
+ * @param {Function} [opts.signIn]  async (did) => the reply to "panel", or
+ *   null. Set when the web panel is on (src/panel/server.js).
  * @returns {Promise<{ answered: number, scanned: number, turns: Array }>}
  */
 /**
@@ -2197,6 +2205,7 @@ export async function runDmPass({
   generate = generateText,
   extraTools = {},
   mode = normaliseMode(process.env.MOD_DM_MODE),
+  signIn = null,
   log = () => {},
 }) {
   const cursor = await readCursor();
@@ -2506,6 +2515,20 @@ export async function runDmPass({
         if (isNo(said)) {
           await send('Okay, nothing changed.');
           turns.push({ convoId: entry.convoId, pending: 'none' });
+          continue;
+        }
+      }
+
+      // The web panel's sign-in, when there is a panel. Answered by code in
+      // either mode: the reply is a credential, so it is never a model's to
+      // write, and it goes only to the sender, who is on the roster or would
+      // not have been read at all.
+      if (signIn && PANEL_WORD.test(said)) {
+        const text = await signIn(entry.message.sender.did);
+        if (text) {
+          await send(text);
+          log('Sent a panel sign-in code');
+          turns.push({ convoId: entry.convoId, panel: 'code' });
           continue;
         }
       }

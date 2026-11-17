@@ -268,6 +268,17 @@ export function blockersView() {
   return { has: (did) => blocksMe(did) === true };
 }
 
+/**
+ * The held copy of the list as it stands, without reading anything: who is
+ * on it, whether the walk reached the end, and when it was walked. Null when
+ * nothing is held. For the panel, which would rather show a list that is a
+ * few minutes old than wait behind a job.
+ */
+export function heldListed(list) {
+  if (!held || held.list !== list || !held.listed) return null;
+  return { listed: held.listed, complete: Boolean(held.complete), at: held.listAt };
+}
+
 /** Record a write this process made, so reads and the next write see it. */
 export function noteListed(list, did, rkey = null) {
   const now = Date.now();

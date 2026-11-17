@@ -752,6 +752,171 @@ const FUNCTIONS = {
       [name, holder],
     ];
   },
+
+  // --- the panel's counts (src/panel/queries.js) ------------------------------
+  // What the verbs above cannot ask for: sums and groups. Each is a read, and
+  // each is written so SQLite and Postgres take the same text. Timestamps are
+  // compared bytewise in Postgres, as the verbs compare them.
+
+  /**
+   * Per day since `since`: how many accounts were added, and how many came
+   * off (an unblock, an undo, or both for the same account, counted once).
+   * A typed block of someone already listed wrote nothing and is left out.
+   */
+  *panel_days(b, { since }) {
+    const T = tableName(b, 'decision');
+    const C = b.kind === 'pg' ? ' collate "C"' : '';
+    const no = bool(b, false);
+    const added = yield [
+      'all',
+      `select substr(acted_at, 1, 10) as day, count(*) as n from ${T}
+       where action = 'list_add' and acted_at${C} >= ?
+         and (already_listed is null or already_listed = ?)
+       group by substr(acted_at, 1, 10)`,
+      [since, no],
+    ];
+    const removed = yield [
+      'all',
+      `select u.day as day, count(distinct u.did) as n from (
+         select substr(acted_at, 1, 10) as day, did from ${T}
+           where action = 'list_remove' and acted_at${C} >= ?
+         union all
+         select substr(undone_at, 1, 10) as day, did from ${T}
+           where action = 'list_add' and acted_at is not null and undone_at${C} >= ?
+             and (already_listed is null or already_listed = ?)
+       ) u group by u.day`,
+      [since, since, no],
+    ];
+    const count = (rows) =>
+      rows.map((r) => ({ day: r.day, n: Number(r.n) }));
+    return { added: count(added), removed: count(removed) };
+  },
+
+  /**
+   * Writes to the list since `since`, as the log has them: records created,
+   * and accounts taken off. An unblock logs a removal and closes the add
+   * that put the account there; that is one record deleted, counted once.
+   */
+  *panel_writes(b, { since }) {
+    const T = tableName(b, 'decision');
+    const C = b.kind === 'pg' ? ' collate "C"' : '';
+    const [{ n: creates }] = yield [
+      'all',
+      `select count(*) as n from ${T}
+       where action = 'list_add' and acted_at${C} >= ?
+         and (already_listed is null or already_listed = ?)`,
+      [since, bool(b, false)],
+    ];
+    const [{ n: deletes }] = yield [
+      'all',
+      `select count(distinct u.did) as n from (
+         select did from ${T} where action = 'list_remove' and acted_at${C} >= ?
+         union all
+         select did from ${T}
+           where action = 'list_add' and acted_at is not null and undone_at${C} >= ?
+       ) u`,
+      [since, since],
+    ];
+    return { creates: Number(creates), deletes: Number(deletes) };
+  },
+
+  /**
+   * The decision log, one row per plan and kind of change, newest first.
+   * A batch of five hundred is one row here, not five hundred.
+   */
+  *panel_activity(b, { limit = 30, offset = 0, action = null }) {
+    const T = tableName(b, 'decision');
+    const C = b.kind === 'pg' ? ' collate "C"' : '';
+    const rows = yield [
+      'all',
+      `select plan_id, action, approved_via, count(*) as n,
+              min(acted_at) as first_at, max(acted_at) as last_at,
+              sum(case when undone_at is not null then 1 else 0 end) as undone,
+              sum(case when already_listed = ? then 1 else 0 end) as already,
+              min(did) as did, min(band) as band_low, max(band) as band_high
+       from ${T}
+       where acted_at is not null${action ? ' and action = ?' : ''}
+       group by plan_id, action, approved_via
+       order by max(acted_at)${C} desc, plan_id asc
+       limit ? offset ?`,
+      [bool(b, true), ...(action ? [action] : []), Number(limit), Number(offset)],
+    ];
+    return rows.map((r) => ({
+      ...r,
+      n: Number(r.n),
+      undone: Number(r.undone),
+      already: Number(r.already),
+    }));
+  },
+
+  /** For each of these plans: how many accounts, added, still on, and read. */
+  *panel_plan_counts(b, { ids = [] }) {
+    if (!ids.length) return [];
+    const rows = yield [
+      'all',
+      `select plan_id, count(*) as total,
+              sum(case when action = 'list_add' and acted_at is not null then 1 else 0 end) as added,
+              sum(case when action = 'list_add' and acted_at is not null and undone_at is null then 1 else 0 end) as live,
+              sum(case when triage = 'hostile' then 1 else 0 end) as hostile,
+              sum(case when triage = 'arguing' then 1 else 0 end) as arguing,
+              sum(case when triage = 'neutral' then 1 else 0 end) as neutral,
+              sum(case when evidence_uri is not null then 1 else 0 end) as with_text
+       from ${tableName(b, 'decision')}
+       where plan_id in (${ids.map(() => '?').join(',')})
+       group by plan_id`,
+      ids,
+    ];
+    return rows.map((r) =>
+      Object.fromEntries(
+        Object.entries(r).map(([k, v]) => [k, k === 'plan_id' ? v : Number(v)]),
+      ),
+    );
+  },
+
+  /** How many accounts a re-score put in each band. */
+  *panel_band_counts(b, { audit }) {
+    const rows = yield [
+      'all',
+      `select band, count(*) as n from ${tableName(b, 'audit_item')}
+       where audit_id = ? group by band`,
+      [audit],
+    ];
+    return rows.map((r) => ({ band: r.band, n: Number(r.n) }));
+  },
+
+  /** Tokens per day, kind and model since `since`. */
+  *panel_usage(b, { since }) {
+    const C = b.kind === 'pg' ? ' collate "C"' : '';
+    const rows = yield [
+      'all',
+      `select substr("at", 1, 10) as day, kind, model, count(*) as calls,
+              sum(coalesce(input_tokens, 0)) as input_tokens,
+              sum(coalesce(output_tokens, 0)) as output_tokens
+       from ${tableName(b, 'llm_usage')}
+       where "at"${C} >= ?
+       group by substr("at", 1, 10), kind, model`,
+      [since],
+    ];
+    return rows.map((r) => ({
+      day: r.day,
+      kind: r.kind,
+      model: r.model,
+      calls: Number(r.calls),
+      input: Number(r.input_tokens),
+      output: Number(r.output_tokens),
+    }));
+  },
+
+  /** How many accounts are protected, by where the protection came from. */
+  *panel_protected_counts(b) {
+    const rows = yield [
+      'all',
+      `select source, reason, count(*) as n from ${tableName(b, 'protected')}
+       group by source, reason`,
+      [],
+    ];
+    return rows.map((r) => ({ source: r.source, reason: r.reason, n: Number(r.n) }));
+  },
 };
 
 /** Call a named function, e.g. `rpc('finalise_snapshot', { snapshot })`. */
