@@ -72,6 +72,12 @@ export function hasAnswered(uri) {
   return answered.has(uri);
 }
 
+/**
+ * Mark a mention answered, and say whether the mark reached the disk.
+ *
+ * False means a restart would replay the mention as unanswered, so the caller
+ * leaves it unanswered. The mark stays in memory, so this process skips it.
+ */
 export function markAnswered(uri) {
   answered.add(uri);
   if (answered.size > config.answeredKeep) {
@@ -80,7 +86,9 @@ export function markAnswered(uri) {
   }
   try {
     writeAtomic(answeredPath, JSON.stringify([...answered]));
+    return true;
   } catch (err) {
     logger.error('Could not save the answered set', { err });
+    return false;
   }
 }

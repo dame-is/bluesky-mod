@@ -83,6 +83,24 @@ describe('clampLimits', () => {
     expect(clampLimits({}).reviewRows).toBe(LIMITS.reviewRows.def);
   });
 
+  it('reads null, blank and true or false as missing, not as zero', () => {
+    // Number(null), Number('') and Number(false) are all 0, which would clamp
+    // maxSteps to one step and turn history off.
+    expect(
+      parseConfig({
+        limits: { maxSteps: null, historyHours: null, maxTurns: '', reviewRows: false },
+      }).limits,
+    ).toEqual(clampLimits({}));
+    expect(clampLimits({ maxTurns: '  ', maxSteps: true })).toMatchObject({
+      maxTurns: LIMITS.maxTurns.def,
+      maxSteps: LIMITS.maxSteps.def,
+    });
+    expect(clampLimits({ maxSteps: '6', historyHours: '0' })).toMatchObject({
+      maxSteps: 6,
+      historyHours: 0,
+    });
+  });
+
   it('allows zero history hours, which turns the window off', () => {
     expect(clampLimits({ historyHours: 0 }).historyHours).toBe(0);
   });

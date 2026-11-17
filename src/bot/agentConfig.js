@@ -68,10 +68,20 @@ const barePostOf = (v) => (BARE_POST.includes(v) ? v : 'card');
  */
 const MODEL_SHAPE = /^[a-z0-9][a-z0-9._:/-]{0,120}$/i;
 
+/**
+ * A limit as a number, or NaN when the file gives none. Only a number or a
+ * non-blank string counts: Number(null), Number('') and Number(false) are 0,
+ * which would clamp to the minimum instead of taking the default.
+ */
+const limitValue = (v) =>
+  typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')
+    ? Number(v)
+    : NaN;
+
 export function clampLimits(raw) {
   const out = {};
   for (const [key, spec] of Object.entries(LIMITS)) {
-    const v = Number(raw?.[key]);
+    const v = limitValue(raw?.[key]);
     out[key] = Number.isFinite(v)
       ? Math.min(spec.max, Math.max(spec.min, Math.round(v)))
       : spec.def;

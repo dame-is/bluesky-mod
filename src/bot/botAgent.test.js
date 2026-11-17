@@ -10,6 +10,9 @@ const OTHER = 'did:plc:someoneelse';
 
 let sessionRow = null;
 let loginAs = BOT;
+let logins = 0;
+/** How the refresh inside resumeSession fails: null, 'dead' or 'network'. */
+let refreshFails = null;
 
 let resolvedPds = 'https://pds.example.com';
 let pdsThrows = false;
@@ -33,6 +36,7 @@ vi.mock('@atproto/api', () => ({
       this.session = null;
     }
     async login() {
+      logins += 1;
       this.session = {
         did: loginAs,
         handle: 'bot.example.com',
@@ -43,6 +47,21 @@ vi.mock('@atproto/api', () => ({
     }
     async resumeSession(session) {
       if (!session?.refreshJwt) throw new Error('dead');
+      // As the library does: a dead refresh token drops the session and
+      // fires 'expired'; anything else keeps it and throws.
+      this.session = session;
+      if (refreshFails === 'dead') {
+        this.session = undefined;
+        this.opts?.persistSession?.('expired', undefined);
+        throw Object.assign(new Error('Token has been revoked'), {
+          status: 400,
+          error: 'ExpiredToken',
+        });
+      }
+      if (refreshFails === 'network') {
+        this.opts?.persistSession?.('network-error', session);
+        throw Object.assign(new Error('Upstream Failure'), { status: 502 });
+      }
       this.session = { ...session, did: session.did ?? loginAs };
       return { data: this.session };
     }
@@ -56,10 +75,14 @@ vi.mock('@atproto/api', () => ({
 }));
 
 const { botAgent } = await import('./botAgent.js');
+const { upsert } = await import('./db.js');
 
 beforeEach(() => {
   sessionRow = null;
   loginAs = BOT;
+  logins = 0;
+  refreshFails = null;
+  upsert.mockClear();
   resolvedPds = 'https://pds.example.com';
   pdsThrows = false;
   process.env.MOD_IDENTIFIER = BOT;
@@ -95,6 +118,26 @@ describe('botAgent', () => {
   it('refuses when the password authenticates as a different account', async () => {
     loginAs = OTHER;
     await expect(botAgent()).rejects.toThrow(/belong to different accounts/);
+    // That account's refresh token is never stored.
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('logs in when the library says the stored refresh token is dead', async () => {
+    sessionRow = { did: BOT, refreshJwt: 'r' };
+    refreshFails = 'dead';
+    const { agent, via } = await botAgent();
+    expect(via).toBe('login');
+    expect(agent.session.did).toBe(BOT);
+  });
+
+  it('throws a refresh that failed for any other reason, without logging in', async () => {
+    // A network error or a 5xx says nothing about the token. Logging in would
+    // spend a createSession on every retry; throwing lets the reconnector
+    // back off.
+    sessionRow = { did: BOT, refreshJwt: 'r' };
+    refreshFails = 'network';
+    await expect(botAgent()).rejects.toThrow(/Upstream Failure/);
+    expect(logins).toBe(0);
   });
 
   it('never resumes a stored session for a different account', async () => {

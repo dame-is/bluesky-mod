@@ -56,15 +56,22 @@ function credentials() {
 }
 
 /**
+ * Whether a session is for the configured account. Only checkable when the
+ * identifier is a DID, so a handle passes.
+ */
+function isExpectedAccount(identifier, session) {
+  return !identifier.startsWith('did:') || session?.did === identifier;
+}
+
+/**
  * Refuse a session for any account but the configured one.
  *
  * A DID and an app password from two different accounts log in fine (the
  * password is valid, just for someone else), and every write afterwards lands
- * in the wrong repo. Only checkable when the identifier is a DID.
+ * in the wrong repo.
  */
 function assertExpectedAccount(identifier, session) {
-  if (!identifier.startsWith('did:')) return;
-  if (session?.did === identifier) return;
+  if (isExpectedAccount(identifier, session)) return;
   throw new Error(
     `MOD_IDENTIFIER is ${identifier} but the app password authenticated as ${session?.did}; ` +
       'the identifier and the password belong to different accounts',
@@ -122,7 +129,8 @@ export async function botAgent({ onExpired = null } = {}) {
   // persistSession fires on refresh and on login, so every path that produces
   // a usable session writes it back. A failed write is ignored: the session
   // still works for this run, and throwing would turn a storage error into an
-  // outage.
+  // outage. A session for another account is never written: login hands it
+  // over here before the account check below refuses it.
   const agent = new AtpAgent({
     service,
     persistSession: (event, session) => {
@@ -130,7 +138,7 @@ export async function botAgent({ onExpired = null } = {}) {
         onExpired?.();
         return;
       }
-      if (!session) return;
+      if (!session || !isExpectedAccount(identifier, session)) return;
       if (event === 'create' || event === 'update') {
         writeSession(session).catch(() => {});
       }
@@ -142,17 +150,18 @@ export async function botAgent({ onExpired = null } = {}) {
   // A stored session for another account is never resumed. It is left over
   // from a misconfigured run or an earlier bot account, and resuming it would
   // fail the account check below even once the configuration is right.
-  const resumable =
-    stored?.refreshJwt &&
-    (!identifier.startsWith('did:') || stored.did === identifier);
+  const resumable = stored?.refreshJwt && isExpectedAccount(identifier, stored);
   if (resumable) {
     try {
-      // resumeSession validates and refreshes if the access token has aged out.
-      // A dead refresh token throws here, which is the one case that must fall
-      // through to a real login rather than fail the run.
+      // resumeSession always refreshes. A dead refresh token is the one
+      // failure that falls through to a real login: the library drops the
+      // session for it (401, ExpiredToken, InvalidToken, InvalidDID) and keeps
+      // it for anything else, such as a network error or a 5xx. Those are
+      // thrown, so the caller backs off instead of spending a createSession.
       await agent.resumeSession(stored);
       via = 'resume';
-    } catch {
+    } catch (err) {
+      if (agent.session) throw err;
       via = 'login';
     }
   }

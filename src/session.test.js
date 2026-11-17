@@ -13,6 +13,25 @@ describe('noticing a dead session', () => {
     expect(isAuthError(new Error('Upstream Failure'))).toBe(false);
     expect(isAuthError(null)).toBe(false);
   });
+
+  it('leaves a live token that lacks permission alone', () => {
+    // The PDS answers chat.bsky.* from an app password without DM access with
+    // 400 InvalidToken "Bad token method". A new session has the same
+    // permissions, so reconnecting on every DM poll changes nothing.
+    expect(
+      isAuthError({ status: 400, error: 'InvalidToken', message: 'Bad token method' }),
+    ).toBe(false);
+    expect(
+      isAuthError({ status: 400, error: 'InvalidToken', message: 'Bad token scope' }),
+    ).toBe(false);
+    expect(
+      isAuthError({
+        status: 400,
+        error: 'InvalidToken',
+        message: 'Token could not be verified',
+      }),
+    ).toBe(true);
+  });
 });
 
 describe('getting it back', () => {

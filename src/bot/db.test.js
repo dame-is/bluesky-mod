@@ -56,6 +56,33 @@ describe('db', () => {
     expect(await dids({ where: { approved_via: 'like.*triage:hostile*' } })).toEqual(['did:plc:a']);
   });
 
+  it('binds each value of an { in: [...] } list, quotes and commas included', async () => {
+    await upsert('plan', [{ id: 'p' }]);
+    await upsert('decision', [
+      { plan_id: 'p', did: 'did:plc:x"y', band: 'UNKNOWN' },
+      { plan_id: 'p', did: 'did:plc:a,b', band: 'UNKNOWN' },
+      { plan_id: 'p', did: 'did:plc:c', band: 'PROTECTED' },
+    ]);
+    const dids = async (opts) => (await select('decision', { ...opts, order: 'did.asc' })).map((r) => r.did);
+    expect(await dids({ where: { did: { in: ['did:plc:x"y', 'did:plc:c'] } } })).toEqual(['did:plc:c', 'did:plc:x"y']);
+    expect(await dids({ where: { did: { in: ['did:plc:a,b'] } } })).toEqual(['did:plc:a,b']);
+    expect(await dids({ where: { did: { in: [] } } })).toEqual([]);
+    expect(await count('decision', { where: { did: { in: ['did:plc:c'] }, band: 'eq.PROTECTED' } })).toBe(1);
+  });
+
+  it('refuses a double quote inside an in.(...) value rather than matching fewer rows', async () => {
+    // The string form has no escape for a quote. Read loosely, one stray quote
+    // merges the values after it into one, and the rows they name drop out of
+    // the answer without any error.
+    await upsert('plan', [{ id: 'p' }]);
+    await upsert('decision', [{ plan_id: 'p', did: 'did:plc:c', band: 'PROTECTED' }]);
+    const read = (list) => select('decision', { where: { did: list } });
+    await expect(read('in.("did:plc:x"y","did:plc:c")')).rejects.toThrow(/double quote/);
+    await expect(read('in.(did:plc:x"y,did:plc:c)')).rejects.toThrow(/double quote/);
+    await expect(read('in.("did:plc:x,did:plc:c)')).rejects.toThrow(/double quote/);
+    expect(await read('in.("did:plc:x","did:plc:c")')).toHaveLength(1);
+  });
+
   it('sorts null as larger than any value', async () => {
     await upsert('plan', [{ id: 'p' }]);
     await upsert('decision', [

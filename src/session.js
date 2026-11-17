@@ -10,13 +10,22 @@
 // password must not burn through that.
 
 const AUTH_ERROR =
-  /Authentication Required|AuthMissing|ExpiredToken|InvalidToken|Token has expired|Token could not be verified|Bad token/i;
+  /Authentication Required|AuthMissing|ExpiredToken|InvalidToken|Token has expired|Token could not be verified/i;
+
+/**
+ * A live token refused a method or scope it has no permission for, such as
+ * chat.bsky.* from an app password made without DM access. The PDS sends these
+ * as InvalidToken too, but a new session has the same permissions.
+ */
+const NOT_PERMITTED = /Bad token (method|scope)/i;
 
 /** Did this fail because the session is gone? */
 export function isAuthError(err) {
   if (!err) return false;
+  const text = `${err.error || ''} ${err.message || err}`;
+  if (NOT_PERMITTED.test(text)) return false;
   if (err.status === 401) return true;
-  return AUTH_ERROR.test(`${err.error || ''} ${err.message || err}`);
+  return AUTH_ERROR.test(text);
 }
 
 /**

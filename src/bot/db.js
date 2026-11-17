@@ -16,6 +16,9 @@
 //   eq.X  neq.X  gt.X  gte.X  lt.X  lte.X  like.*x*  in.(a,b)  is.null
 //   not.is.null  is.true  is.false
 //
+// and `{ in: [a, b] }`, which binds each value as given. An `in.(...)` string
+// has no escape for a double quote, so values from outside go in the array.
+//
 // Table and column names are checked against the schema before they reach
 // SQL, and every value is a bound parameter.
 
@@ -138,7 +141,16 @@ function operand(type, raw) {
   return raw;
 }
 
-/** `in.(a,"b,c",d)` -> ['a', 'b,c', 'd'] */
+const STRAY_QUOTE =
+  'db: an in.(...) value holds a double quote, which the list cannot carry; pass { in: [...] }';
+
+/**
+ * `in.(a,"b,c",d)` -> ['a', 'b,c', 'd']
+ *
+ * A quote may only open or close a whole value. Anywhere else it throws: read
+ * loosely, it would merge the values after it into one and quietly match fewer
+ * rows.
+ */
 function parseList(raw) {
   const inner = String(raw).replace(/^\(/, '').replace(/\)$/, '');
   const out = [];
@@ -147,6 +159,9 @@ function parseList(raw) {
   for (let i = 0; i < inner.length; i += 1) {
     const ch = inner[i];
     if (ch === '"') {
+      const opens = !quoted && (i === 0 || inner[i - 1] === ',');
+      const closes = quoted && (i + 1 === inner.length || inner[i + 1] === ',');
+      if (!opens && !closes) throw new Error(STRAY_QUOTE);
       quoted = !quoted;
       continue;
     }
@@ -157,16 +172,21 @@ function parseList(raw) {
     }
     cur += ch;
   }
+  if (quoted) throw new Error(STRAY_QUOTE);
   if (cur.length || inner.length) out.push(cur);
   return out;
 }
 
 const OPS = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
-/** One filter string -> [sql, params]. */
+/** One filter string, or `{ in: [...] }` -> [sql, params]. */
 function condition(t, tableName, col, filter) {
   const c = column(t, tableName, col);
   const type = t.columns.get(col);
+  if (Array.isArray(filter?.in)) {
+    if (!filter.in.length) return ['0', []];
+    return [`${c} in (${filter.in.map(() => '?').join(',')})`, filter.in.map((v) => toDb(type, v))];
+  }
   const s = String(filter);
   if (s === 'is.null') return [`${c} is null`, []];
   if (s === 'not.is.null') return [`${c} is not null`, []];
