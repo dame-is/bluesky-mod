@@ -22,6 +22,10 @@ const db = {
 function matches(row, { eq = {}, where = {} } = {}) {
   for (const [k, v] of Object.entries(eq)) if (row[k] !== v) return false;
   for (const [k, raw] of Object.entries(where)) {
+    if (Array.isArray(raw?.in)) {
+      if (!raw.in.includes(row[k])) return false;
+      continue;
+    }
     for (const v of [raw].flat()) {
       const val = row[k];
       if (v === 'not.is.null' && val == null) return false;

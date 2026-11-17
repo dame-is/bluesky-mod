@@ -60,12 +60,7 @@ async function fromTable(dids) {
     for (let i = 0; i < dids.length; i += 50) {
       const rows = await select('protected', {
         select: 'did,reason',
-        where: {
-          did: `in.(${dids
-            .slice(i, i + 50)
-            .map((d) => `"${d}"`)
-            .join(',')})`,
-        },
+        where: { did: { in: dids.slice(i, i + 50) } },
       });
       for (const r of rows || []) out.set(r.did, r.reason);
     }

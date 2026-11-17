@@ -182,12 +182,7 @@ async function startSnapshot(pds) {
   for (let i = 0; i < stale.length; i += 50) {
     await del('protected', {
       eq: { source: 'derived' },
-      where: {
-        did: `in.(${stale
-          .slice(i, i + 50)
-          .map((d) => `"${d}"`)
-          .join(',')})`,
-      },
+      where: { did: { in: stale.slice(i, i + 50) } },
     });
   }
 

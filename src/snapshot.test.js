@@ -44,12 +44,7 @@ vi.mock('./bot/db.js', () => ({
   }),
   del: vi.fn(async (table, { eq = {}, where = {} }) => {
     db.writes.push(`del ${table}`);
-    const ids = where.did
-      ? where.did
-          .slice(4, -1)
-          .split(',')
-          .map((d) => d.replace(/"/g, ''))
-      : null;
+    const ids = where.did ? where.did.in : null;
     db[table] = db[table].filter(
       (r) =>
         !(

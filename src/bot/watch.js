@@ -462,7 +462,7 @@ export async function ownPostAlerts({
     (
       (await select('post_alert', {
         select: 'uri,last_count,last_seen_at,alerted_at',
-        where: { uri: `in.(${uris.map((u) => `"${u}"`).join(',')})` },
+        where: { uri: { in: uris } },
       }).catch(() => [])) || []
     ).map((r) => [r.uri, r]),
   );

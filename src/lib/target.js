@@ -29,6 +29,9 @@ const DID = /^did:[a-z]+:/;
  */
 const DID_SYNTAX = /^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$/;
 
+/** Whether a string is a DID by that syntax. */
+export const isDid = (value) => DID_SYNTAX.test(String(value ?? ''));
+
 export class TargetError extends Error {}
 
 /**

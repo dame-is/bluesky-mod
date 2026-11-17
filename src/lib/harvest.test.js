@@ -49,6 +49,23 @@ describe('a harvest the caller stopped', () => {
   });
 });
 
+describe('who a harvest returns', () => {
+  it('leaves out a record whose author is not DID syntax', async () => {
+    pages.script = [
+      {
+        records: [
+          { did: 'did:plc:fine', rkey: 'r1' },
+          { did: 'did:plc:a","did:plc:b', rkey: 'r2' },
+          { did: 'not a did', rkey: 'r3' },
+        ],
+        cursor: undefined,
+      },
+    ];
+    const h = await harvestPost('at://did:plc:a/app.bsky.feed.post/1');
+    expect(h.participants.map((p) => p.did)).toEqual(['did:plc:fine']);
+  });
+});
+
 describe('a harvest that fails part way', () => {
   it('says it is not everyone, rather than passing for a complete read', async () => {
     pages.script = [page(1, 'c1'), page(2, 'c2'), null, null];

@@ -37,7 +37,7 @@ export async function closeAdds(dids, reason, { plan = null } = {}) {
   let closed = 0;
   for (let i = 0; i < wanted.length; i += CHUNK) {
     const chunk = wanted.slice(i, i + CHUNK);
-    const inChunk = `in.(${chunk.map((d) => `"${d}"`).join(',')})`;
+    const inChunk = { in: chunk };
     const live = await selectAll('decision', {
       select: 'plan_id,did,band,acted_at',
       eq: { action: 'list_add', ...(plan ? { plan_id: plan } : {}) },

@@ -1133,10 +1133,7 @@ async function heldByName(plan, dids) {
       select: 'plan_id,did,approved_via',
       eq: { action: 'list_add' },
       where: {
-        did: `in.(${dids
-          .slice(i, i + 50)
-          .map((d) => `"${d}"`)
-          .join(',')})`,
+        did: { in: dids.slice(i, i + 50) },
         acted_at: 'not.is.null',
         undone_at: 'is.null',
       },
@@ -1321,7 +1318,7 @@ export async function historyFor(did = null, { limit = 8 } = {}) {
   const plans = ids.length
     ? await select('plan', {
         select: 'id,note,approved_bands,created_at',
-        where: { id: `in.(${ids.join(',')})` },
+        where: { id: { in: ids } },
       })
     : [];
   const byId = new Map((plans || []).map((p) => [p.id, p]));
@@ -1387,7 +1384,7 @@ export async function activitySince(hours = 24, { now = Date.now() } = {}) {
   for (let i = 0; i < ids.length; i += 50) {
     const rows = await select('plan', {
       select: 'id,note',
-      where: { id: `in.(${ids.slice(i, i + 50).join(',')})` },
+      where: { id: { in: ids.slice(i, i + 50) } },
     }).catch(() => []);
     for (const p of rows || []) notes.set(p.id, p.note);
   }

@@ -12,7 +12,7 @@ vi.mock('./db.js', () => ({
     if (veto.unreadable) throw new Error('no such table: protected');
     let rows = [...protectedRows].map(([did, reason]) => ({ did, reason }));
     if (eq.did) rows = rows.filter((r) => r.did === eq.did);
-    if (where.did) rows = rows.filter((r) => where.did.includes(`"${r.did}"`));
+    if (where.did) rows = rows.filter((r) => where.did.in.includes(r.did));
     return limit ? rows.slice(0, limit) : rows;
   }),
   selectAll: vi.fn(async (table, { eq = {}, where = {} }) =>
@@ -20,7 +20,7 @@ vi.mock('./db.js', () => ({
       ? decisions.filter(
           (r) =>
             r.action === eq.action &&
-            where.did.includes(`"${r.did}"`) &&
+            where.did.in.includes(r.did) &&
             r.acted_at &&
             !r.undone_at,
         )

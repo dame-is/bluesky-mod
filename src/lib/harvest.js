@@ -22,6 +22,7 @@ import {
   backlinkRows,
   flattenSources,
 } from './constellation.js';
+import { isDid } from './target.js';
 
 /** Constellation pages at 100; anything larger is silently clamped. */
 const PAGE = 100;
@@ -194,7 +195,10 @@ export async function harvestPost(uri, opts = {}) {
       maxPages,
     });
     for (const row of rows) {
-      if (!row?.did) continue;
+      // A DID comes from whoever wrote the backlinked record, by way of the
+      // index. One that is not DID syntax is nobody to block, and kept, it
+      // would reach decision rows and filters as text someone chose.
+      if (!isDid(row?.did)) continue;
       records += 1;
       let entry = byDid.get(row.did);
       if (!entry) {
