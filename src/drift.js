@@ -352,8 +352,15 @@ async function finishAudit(auditId) {
  * Send a recorded brief, then stamp it sent and finish its audit. A send that
  * throws leaves both for the next check to try again; one that fails partway
  * sends the earlier parts a second time then.
+ *
+ * The convo's numbered menu is cleared first, as the DM loop does before each
+ * of its own messages, so a "1" typed after the brief cannot run an option
+ * offered before it.
  */
 async function deliver(chat, convoId, brief) {
+  await upsert('dm_choice', [{ convo_id: convoId, options: [] }]).catch(
+    () => {},
+  );
   for (const chunk of chunkForDm(brief.body)) {
     await chat.chat.bsky.convo.sendMessage({
       convoId,

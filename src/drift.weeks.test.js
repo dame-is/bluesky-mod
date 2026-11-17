@@ -59,13 +59,19 @@ const agent = {
   },
 };
 
-const chatState = { down: false, sent: [] };
+const chatState = { down: false, sent: [], menus: [] };
 const chat = {
   chat: {
     bsky: {
       convo: {
-        sendMessage: async ({ message }) => {
+        sendMessage: async ({ convoId, message }) => {
           if (chatState.down) throw new Error('UpstreamFailure');
+          // The numbered menu stored for this convo as each message goes.
+          const [row] = await select('dm_choice', {
+            select: 'options',
+            eq: { convo_id: convoId },
+          });
+          chatState.menus.push(row?.options ?? null);
           chatState.sent.push(message.text);
           return { data: {} };
         },
@@ -102,6 +108,7 @@ beforeEach(() => {
   listReads.mockClear();
   chatState.down = false;
   chatState.sent = [];
+  chatState.menus = [];
   config.driftEveryHours = 168;
   vi.useFakeTimers({ toFake: ['Date'] });
 });
@@ -222,6 +229,23 @@ describe('a brief that could not be sent', () => {
     expect(await checkAt('2026-11-15T12:00:00Z')).toContain(
       `@${A.slice(8)} is now PROTECTED`,
     );
+  });
+});
+
+describe('a brief going out', () => {
+  it('clears the numbered menu first, so a number sent after it cannot answer an older menu', async () => {
+    members.push(A);
+    expect(await checkAt('2026-11-01T12:00:00Z')).toBe(null);
+
+    await upsert('dm_choice', [
+      {
+        convo_id: 'convo1',
+        options: [{ label: 'Add @x.test to the list', command: 'list add @x.test' }],
+      },
+    ]);
+    bands.set(A, 'PROTECTED');
+    expect(await checkAt('2026-11-08T12:00:00Z')).toContain('is now PROTECTED');
+    expect(chatState.menus).toEqual([[]]);
   });
 });
 
