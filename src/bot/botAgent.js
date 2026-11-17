@@ -39,14 +39,11 @@ const AGENT_REQUEST_MS = 60_000;
 
 /**
  * fetch for the agent, with that ceiling. The library calls it with a Request
- * and no init, and puts a caller's signal on that Request. A signal in init
- * replaces the Request's, so the Request's own signal is passed on and
- * combined with the ceiling.
+ * and no init, and puts a caller's signal on that Request; fetchWithTimeout
+ * combines that signal with the ceiling.
  */
 function agentFetch(input, init) {
-  const signal =
-    init?.signal ?? (input instanceof Request ? input.signal : undefined);
-  return fetchWithTimeout(input, { ...init, signal }, AGENT_REQUEST_MS);
+  return fetchWithTimeout(input, init, AGENT_REQUEST_MS);
 }
 
 /**

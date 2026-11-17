@@ -20,9 +20,15 @@ function withTimeout(init, ms = REQUEST_TIMEOUT_MS) {
   return { ...base, signal };
 }
 
-/** `fetch` with the same 15s ceiling every request in this module carries. */
+/**
+ * `fetch` with the same 15s ceiling every request in this module carries.
+ * A signal in init would replace the one on a Request, so a Request's own
+ * signal is the caller's when init has none.
+ */
 export function fetchWithTimeout(url, init, ms) {
-  return fetch(url, withTimeout(init, ms));
+  const signal =
+    init?.signal ?? (url instanceof Request ? url.signal : undefined);
+  return fetch(url, withTimeout({ ...init, signal }, ms));
 }
 
 async function fetchJson(url, init) {
