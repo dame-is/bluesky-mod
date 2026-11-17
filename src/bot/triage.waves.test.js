@@ -320,3 +320,35 @@ describe('what is left to add', () => {
     expect(review.rows.map((r) => r.did)).toEqual(['did:plc:fresh']);
   });
 });
+
+describe('posts with nothing to read', () => {
+  it('tells a post with no text from one the AppView did not return', async () => {
+    // p3 comes back with an empty text (an image, say); p4 does not come back.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        const uris = [...new URL(url).searchParams.getAll('uris')];
+        return {
+          ok: true,
+          json: async () => ({
+            posts: uris
+              .filter((uri) => !uri.endsWith('/4'))
+              .map((uri) => ({
+                uri,
+                record: { text: uri.endsWith('/3') ? '  ' : POSTS[uri] },
+              })),
+          }),
+        };
+      }),
+    );
+    const out = await runTriage(PLAN, {
+      generate: labeller({ idiot: 'hostile' }),
+      model: 'm',
+      escalation: null,
+    });
+    expect(label('did:plc:p3').triage).toBe('wordless');
+    expect(label('did:plc:p4').triage).toBe('gone');
+    expect(out).toMatchObject({ labelled: 2, wordless: 1, gone: 1 });
+    expect(out.counts).toEqual({ hostile: 1, arguing: 0, neutral: 1 });
+  });
+});

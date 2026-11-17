@@ -913,7 +913,7 @@ export function buildActionTools(ctx, deps = DEPS) {
             remaining: out.remaining,
             counts: out.counts,
             notYetAdded: out.pending,
-            noWords: out.noText,
+            noWords: out.noText + (out.wordless ?? 0),
             deletedPosts: out.gone,
             total: out.total,
             ...(out.secondWave ? { secondReader: out.secondWave } : {}),

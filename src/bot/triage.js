@@ -67,13 +67,15 @@ export function evidenceUriFor(row) {
 /**
  * Post text by URI, 25 at a time.
  *
- * Reports which URIs the AppView answered about, separately from which came
- * back with text. A post it answered about and did not return will never
- * arrive; one whose whole request failed might be there next time.
+ * Reports which URIs the AppView answered about (`asked`), which posts it
+ * returned (`returned`), and which of those had text. A post it answered
+ * about and did not return will never arrive; one whose whole request failed
+ * might be there next time.
  */
 async function textsFor(uris) {
   const texts = new Map();
   const asked = new Set();
+  const returned = new Set();
   for (let i = 0; i < uris.length; i += POSTS_PER_CALL) {
     const slice = uris.slice(i, i + POSTS_PER_CALL);
     const q = slice.map((u) => `uris=${encodeURIComponent(u)}`).join('&');
@@ -85,6 +87,7 @@ async function textsFor(uris) {
       const body = await res.json();
       for (const u of slice) asked.add(u);
       for (const post of body?.posts || []) {
+        returned.add(post.uri);
         const text = String(post?.record?.text ?? '').trim();
         if (text) texts.set(post.uri, text);
       }
@@ -92,7 +95,7 @@ async function textsFor(uris) {
       // The request failed, so these stay pending and get another go.
     }
   }
-  return { texts, asked };
+  return { texts, asked, returned };
 }
 
 const PROMPT = `You are sorting short posts by TONE for a moderation review. Each numbered item is one post somebody wrote about a thread.
@@ -294,6 +297,7 @@ export async function runTriage(
       error: null,
       remaining: 0,
       noText,
+      wordless: all.filter((r) => r.triage === 'wordless').length,
       gone: all.filter((r) => r.triage === 'gone').length,
       counts: countLabels(all),
       pending: countLabels(all.filter(addable)),
@@ -301,33 +305,47 @@ export async function runTriage(
     };
   }
 
-  const { texts, asked } = await textsFor(pending.map((r) => r.evidence_uri));
+  const { texts, asked, returned } = await textsFor(
+    pending.map((r) => r.evidence_uri),
+  );
   const items = pending
     .map((r) => ({ ...r, text: texts.get(r.evidence_uri) }))
     .filter((r) => r.text);
 
-  // The AppView answered about these and returned no text: deleted, hidden,
-  // or a post with no words. No later run will read them either, so they are
-  // marked `gone` rather than left in `remaining` forever. `gone` is a fact
-  // about the record, which is why code sets it and the model never does.
-  const missing = pending.filter(
-    (r) => asked.has(r.evidence_uri) && !texts.has(r.evidence_uri),
+  // Posts with nothing to read. No later run will read them either, so they
+  // are marked rather than left in `remaining` forever: `wordless` came back
+  // with no text (an image, say), and `gone` was not returned at all
+  // (deleted or hidden). Each is a fact about the record, which is why code
+  // sets it and the model never does.
+  const wordless = pending.filter(
+    (r) => returned.has(r.evidence_uri) && !texts.has(r.evidence_uri),
   );
-  if (missing.length) {
-    const stamp = new Date().toISOString();
-    for (let i = 0; i < missing.length; i += 200) {
+  const gone = pending.filter(
+    (r) => asked.has(r.evidence_uri) && !returned.has(r.evidence_uri),
+  );
+  const stamp = new Date().toISOString();
+  for (const [rows, mark] of [
+    [wordless, 'wordless'],
+    [gone, 'gone'],
+  ]) {
+    for (let i = 0; i < rows.length; i += 200) {
       await upsert(
         'decision',
-        missing.slice(i, i + 200).map((r) => ({
+        rows.slice(i, i + 200).map((r) => ({
           plan_id: plan.id,
           did: r.did,
           band: r.band,
-          triage: 'gone',
+          triage: mark,
           triage_at: stamp,
         })),
       );
     }
-    log('Triage skipped posts with no text', { gone: missing.length });
+  }
+  if (wordless.length || gone.length) {
+    log('Triage skipped posts with nothing to read', {
+      wordless: wordless.length,
+      gone: gone.length,
+    });
   }
 
   const now = new Date().toISOString();
@@ -434,6 +452,7 @@ export async function runTriage(
       (r) => r.evidence_uri && !r.triage && (!only || only.has(r.did)),
     ).length,
     noText,
+    wordless: after.filter((r) => r.triage === 'wordless').length,
     gone: after.filter((r) => r.triage === 'gone').length,
     counts: countLabels(after),
     // What approving would still add, as opposed to what was found, so a menu
