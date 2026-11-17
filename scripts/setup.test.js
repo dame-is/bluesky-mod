@@ -1,5 +1,8 @@
 // setup.js runs when it is imported, so each test imports a fresh copy with
 // the bot's agent mocked. Every repo write the mock receives is recorded.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const OWNER = 'did:plc:owner0000000000000000000';
@@ -68,6 +71,7 @@ vi.mock('../src/bot/db.js', async (importOriginal) => ({
 
 let out;
 let savedEnv;
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-setup-'));
 let savedArgv;
 
 /** Run setup.js once with these settings and arguments, to the end. */
@@ -77,6 +81,7 @@ async function setup(env = {}, args = []) {
     MOD_IDENTIFIER: BOT,
     MOD_APP_PASSWORD: 'not-a-real-password',
     MOD_LIST_URI: '',
+    DATA_DIR: dataDir,
     ...env,
   });
   process.argv = [...savedArgv.slice(0, 2), ...args];
@@ -106,6 +111,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   process.env = savedEnv;
   process.argv = savedArgv;
   process.exitCode = 0;
@@ -120,12 +126,38 @@ describe('which account setup writes to', () => {
     expect(text).toMatch(/MOD_IDENTIFIER is the same account as MOD_OWNER_DID/);
   });
 
-  it('refuses a handle for the bot, before logging in', async () => {
-    const text = await setup({ MOD_IDENTIFIER: 'bot.bsky.social' });
+  it('takes a handle for the bot and logs in as the account it names', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ did: BOT }) })),
+    );
+    await setup({ MOD_IDENTIFIER: 'bot.example.social' });
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(h.logins).toBe(1);
+    expect(process.env.MOD_IDENTIFIER).toBe(BOT);
+  });
+
+  it('refuses a handle nobody has, before logging in', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 400, json: async () => ({}) })),
+    );
+    const text = await setup({ MOD_IDENTIFIER: 'nobody.example.social' });
     expect(process.exitCode).toBe(1);
     expect(h.logins).toBe(0);
     expect(h.writes).toEqual([]);
-    expect(text).toMatch(/MOD_IDENTIFIER must be the bot account's DID/);
+    expect(text).toMatch(/no account has that handle/);
+  });
+
+  it("refuses a handle that is the owner's own account", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ did: OWNER }) })),
+    );
+    const text = await setup({ MOD_IDENTIFIER: 'me.example.social' });
+    expect(process.exitCode).toBe(1);
+    expect(h.logins).toBe(0);
+    expect(text).toMatch(/MOD_IDENTIFIER is the same account as MOD_OWNER_DID/);
   });
 });
 

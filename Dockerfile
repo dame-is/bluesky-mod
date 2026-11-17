@@ -16,4 +16,4 @@ RUN mkdir -p /app/data && chown -R node:node /app/data
 VOLUME /app/data
 
 USER node
-CMD ["node", "--disable-warning=ExperimentalWarning", "src/index.js"]
+CMD ["node", "--disable-warning=ExperimentalWarning", "src/main.js"]

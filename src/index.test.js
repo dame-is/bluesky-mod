@@ -38,6 +38,20 @@ vi.mock('./bot/botAgent.js', () => {
         actor: { getProfile: async () => ({ data: { handle: 'owner.test' } }) },
       },
     },
+    com: {
+      atproto: {
+        repo: {
+          getRecord: async ({ collection }) => ({
+            data: {
+              value:
+                collection === 'app.bsky.graph.list'
+                  ? { purpose: 'app.bsky.graph.defs#modlist', name: 'list' }
+                  : { allowIncoming: 'all' },
+            },
+          }),
+        },
+      },
+    },
   };
   const chat = {
     chat: {

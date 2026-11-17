@@ -42,6 +42,7 @@ import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { isAuthError, createReconnector } from './session.js';
 import { acquireLease, HEARTBEAT_MS } from './lease.js';
+import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
 import { diskSpace, isLow, describe as describeDisk } from './disk.js';
 
 const model = MODELS.agent;
@@ -173,6 +174,44 @@ async function connectAtBoot() {
         retryInS: Math.round(waitMs / 1000),
       });
       await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+
+/**
+ * What the bot needs on its own account: incoming DMs open, and a moderation
+ * list. With no MOD_LIST_URI it finds its one list or makes one, and says so
+ * in the log; a dry run writes nothing, so it only says what it would do.
+ * A configured list that cannot be written to stops the start.
+ */
+async function settleBotAccount() {
+  if (process.env.MOD_LIST_URI) {
+    const problem = await listProblem(agent, process.env.MOD_LIST_URI);
+    if (problem) throw new Error(problem);
+  } else if (config.dryRun) {
+    logger.info('DRY_RUN: no MOD_LIST_URI, and a dry run makes no list');
+  } else {
+    const list = await findOrCreateList(agent, {
+      name: process.env.MOD_LIST_NAME || undefined,
+    });
+    process.env.MOD_LIST_URI = list.uri;
+    const rkey = list.uri.split('/').pop();
+    logger.info(
+      list.created ? 'Made a moderation list for the bot' : 'Using the bot\'s moderation list',
+      {
+        name: list.name,
+        uri: list.uri,
+        subscribe: `https://bsky.app/profile/${agent.session?.did}/lists/${rkey}`,
+      },
+    );
+  }
+  if (!config.dryRun) {
+    try {
+      if ((await ensureDmsOpen(agent)) === 'opened') {
+        logger.info('Opened the bot\'s DMs to everyone; it still answers only the roster');
+      }
+    } catch (err) {
+      logger.warn('Could not open the bot\'s DMs', { err: err.message });
     }
   }
 }
@@ -490,6 +529,7 @@ async function start() {
   loadState();
 
   const session = await connectAtBoot();
+  await settleBotAccount();
   try {
     const owner = await agent.app.bsky.actor.getProfile({ actor: config.ownerDid });
     setOwnerHandle(owner.data.handle);

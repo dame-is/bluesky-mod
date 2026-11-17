@@ -4,14 +4,14 @@
   "description": "A Bluesky moderation bot you run yourself. It owns a block list, takes orders by DM, and refuses to block people you follow.",
   "license": "MIT",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/main.js",
   "engines": {
     "node": ">=22.13"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/index.js",
-    "dry-run": "DRY_RUN=true LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/index.js",
-    "dev": "LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/index.js",
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/main.js",
+    "dry-run": "DRY_RUN=true LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/main.js",
+    "dev": "LOG_LEVEL=debug node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/main.js",
     "setup": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/setup.js",
     "test": "vitest run",
     "eval:intent": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/eval-intent.mjs"

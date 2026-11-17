@@ -209,13 +209,13 @@ const LIST = /^at:\/\/(did:[^/]+)\/app\.bsky\.graph\.list\/[^/]+$/;
  */
 export function identityProblems(env = process.env) {
   const problems = [];
+  // A handle given here has already been turned into a DID (identity.js), so
+  // anything else is a typo or a handle nobody could resolve.
   if (!DID.test(env.MOD_OWNER_DID || '')) {
-    problems.push('MOD_OWNER_DID must be your own account\'s DID (did:plc:...)');
+    problems.push('MOD_OWNER_DID must be your own account\'s handle or DID');
   }
-  // A DID rather than a handle: a handle can change hands, and a DID can be
-  // checked against the session that comes back.
   if (!DID.test(env.MOD_IDENTIFIER || '')) {
-    problems.push('MOD_IDENTIFIER must be the bot account\'s DID (did:plc:...)');
+    problems.push('MOD_IDENTIFIER must be the bot account\'s handle or DID');
   }
   if (!env.MOD_APP_PASSWORD) {
     problems.push('MOD_APP_PASSWORD must be an app password for the bot account, with DM access');
@@ -231,11 +231,15 @@ export function identityProblems(env = process.env) {
 /** Everything wrong with the environment, as one error. */
 export function assertConfig(env = process.env) {
   const problems = identityProblems(env);
-  if (!LIST.test(env.MOD_LIST_URI || '')) {
+  // Empty is fine: the bot finds or makes its list at its first start.
+  if (env.MOD_LIST_URI && !LIST.test(env.MOD_LIST_URI)) {
     problems.push(
-      'MOD_LIST_URI must be the at:// URI of a list the bot account owns (npm run setup creates one)',
+      'MOD_LIST_URI must be the at:// URI of a list the bot account owns, or empty for the bot to make one',
     );
-  } else if (LIST.exec(env.MOD_LIST_URI)[1] !== env.MOD_IDENTIFIER) {
+  } else if (
+    env.MOD_LIST_URI &&
+    LIST.exec(env.MOD_LIST_URI)[1] !== env.MOD_IDENTIFIER
+  ) {
     // The bot can only write to its own repo, and a write elsewhere fails with
     // a permission error that explains nothing.
     problems.push(
