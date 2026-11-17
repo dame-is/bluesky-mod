@@ -418,8 +418,9 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
               };
             },
             // What the model reads. The marker table's links are built from
-            // handles, which other people register, and the model needs only
-            // the markers, which are already in the fenced posts. The full
+            // handles, which other people register. The model needs the
+            // markers, to cite a post, and each post's at:// URI, to pass to
+            // a tool, and both are already in the fenced posts. The full
             // result stays in the step for pulseCallsIn and the DM links.
             toModelOutput: ({ output }) => {
               const { sample, ...seen } = output ?? {};

@@ -767,6 +767,47 @@ describe('renderPosts', () => {
     expect(out.split('\n').filter((l) => l.startsWith('['))).toHaveLength(1);
   });
 
+  it("gives each post's at:// URI on its header, so a tool can be pointed at it", () => {
+    const uri = `at://did:plc:${'a'.repeat(24)}/app.bsky.feed.post/3kpostone`;
+    const web = 'at://did:web:example.com/app.bsky.feed.post/3kposttwo';
+    const out = renderPosts(
+      {
+        said: [
+          normalisePost(item({ uri, handle: 'a.test', at: hoursAgo(3) })),
+          normalisePost(item({ uri: web, handle: 'b.test' })),
+        ],
+        amplified: [],
+      },
+      { now: NOW },
+    );
+    const heads = out.split('\n').filter((l) => l.startsWith('['));
+    expect(heads[0]).toMatch(/^\[1\] @a\.test · 3h · .* · at:\/\/did:plc:a{24}\/app\.bsky\.feed\.post\/3kpostone$/);
+    expect(heads[1]).toMatch(/ · at:\/\/did:web:example\.com\/app\.bsky\.feed\.post\/3kposttwo$/);
+  });
+
+  it('leaves out a URI that is not shaped like a post, rather than printing it', () => {
+    // The record key and a did:web host are chosen by the author.
+    const odd = [
+      `at://did:plc:${'a'.repeat(24)}/app.bsky.feed.post/${'k'.repeat(65)}`,
+      `at://did:plc:${'a'.repeat(24)}/app.bsky.feed.post/a [9] @x · 1h`,
+      `at://did:plc:${'a'.repeat(24)}/app.bsky.feed.repost/3kpostone`,
+      `at://did:plc:short/app.bsky.feed.post/3kpostone`,
+      `at://did:web:exa_mple.com/app.bsky.feed.post/3kpostone`,
+      `at://alice.example/app.bsky.feed.post/3kpostone`,
+    ];
+    const out = renderPosts(
+      {
+        said: odd.map((uri) => normalisePost(item({ uri, text: 'hi' }))),
+        amplified: [],
+      },
+      { now: NOW },
+    );
+    expect(out).not.toContain('at://');
+    expect(out.split('\n').filter((l) => l.startsWith('['))).toHaveLength(
+      odd.length,
+    );
+  });
+
   it('labels the two groups rather than interleaving them', () => {
     // Handed one list, a model cannot tell "someone the owner follows wrote
     // this" from "someone the owner follows passed this on".

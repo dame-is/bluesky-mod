@@ -637,6 +637,14 @@ function describeEmpty(p) {
 }
 
 /**
+ * A post's at:// URI in DID form, the shape a real post has. The record key
+ * and a did:web host are chosen by the author, so anything else is left out
+ * rather than printed.
+ */
+const POST_URI =
+  /^at:\/\/did:(?:plc:[a-z2-7]{24}|web:[A-Za-z0-9.-]{1,253})\/app\.bsky\.feed\.post\/[A-Za-z0-9._:~-]{1,64}$/;
+
+/**
  * One post as a header line and its text, numbered with a marker the answer
  * can cite.
  *
@@ -644,6 +652,10 @@ function describeEmpty(p) {
  * post and code decides where the link points. A marker can only index the
  * list the tool returned, so it cannot name a post the digest never saw,
  * which is what makes the link safe to render as tappable.
+ *
+ * The header ends with the post's at:// URI, for a tool that takes a post
+ * (get_thread, preflight_post, scan_post, watch_post) in the same turn. It is
+ * DID-based, so it carries no handle, and it sits inside the caller's fence.
  */
 function renderOne(p, now, chars, n) {
   const amp = ampOf(p);
@@ -656,7 +668,8 @@ function renderOne(p, now, chars, n) {
           .map((h) => `@${h}`)
           .join(', ')}${amp > 4 ? ', …' : ''})`
       : '') +
-    (p.isReply ? ' · reply' : '');
+    (p.isReply ? ' · reply' : '') +
+    (POST_URI.test(p.uri) ? ` · ${p.uri}` : '');
   // Cut by code point, so the cut never leaves half a surrogate pair.
   const text = Array.from(p.text.trim());
   const body = !text.length

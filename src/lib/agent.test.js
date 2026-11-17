@@ -15,6 +15,7 @@ import {
   threadRequest,
   untrusted,
 } from './agent.js';
+import { pulse as realPulse } from './pulse.js';
 
 const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 const graphemes = (s) => [...seg.segment(s)].length;
@@ -281,6 +282,53 @@ describe('the digest tool', () => {
     // The counts and the fenced posts still reach it.
     expect(view.value.shown).toBe(1);
     expect(view.value.posts).toContain('<untrusted source="network:posts">');
+  });
+
+  it("hands the model each post's at:// URI inside the fence, and no handle link", async () => {
+    // A request in the same turn, like "scan the replies on the worst one",
+    // needs an address for the post that a tool takes.
+    const did = `did:plc:${'b'.repeat(24)}`;
+    const uri = `at://${did}/app.bsky.feed.post/3kpostone`;
+    const fetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        feed: [
+          {
+            post: {
+              uri,
+              author: { did, handle: 'alice.example' },
+              record: {
+                text: 'a heated thread',
+                createdAt: new Date(Date.now() - 3_600_000).toISOString(),
+              },
+              likeCount: 50,
+              repostCount: 3,
+              replyCount: 40,
+            },
+          },
+        ],
+      }),
+    });
+    const tools = buildTools({
+      ...io,
+      pulse: (opts) =>
+        realPulse({ ...opts, circleDids: [did], fetchImpl, useCache: false }),
+    });
+    const out = await tools.network_pulse.execute({ source: 'circle' }, {});
+    const view = await modelView(tools.network_pulse, out);
+    const fence = view.value.posts.match(
+      /<untrusted source="network:posts">[\s\S]*?<\/untrusted>/,
+    )[0];
+    expect(fence).toContain(uri);
+    const outside = JSON.stringify(view.value).replace(
+      /<untrusted source=[^>]*>[\s\S]*?<\/untrusted>/g,
+      '',
+    );
+    expect(outside).not.toContain('3kpostone');
+    expect(JSON.stringify(view.value)).not.toMatch(/bsky\.app\/profile/);
+    // The code-side marker table still has the link.
+    expect(out.sample[0].url).toContain('3kpostone');
   });
 });
 
