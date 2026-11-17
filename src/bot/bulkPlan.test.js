@@ -245,6 +245,29 @@ function heldCopyReadsRepo() {
   );
 }
 
+/**
+ * The held copy of the list as graphFacts.js keeps it: the repo as it stood
+ * at the first read, and after that only the writes this process notes.
+ */
+function heldCopy() {
+  let held = null;
+  graph.graphFacts.mockImplementation(async () => {
+    held ??= new Set(repo.values());
+    return { listed: held };
+  });
+  graph.isListed.mockImplementation((list, did) =>
+    held ? held.has(did) : null,
+  );
+  graph.noteListed.mockImplementation((list, did) => {
+    unlisted.delete(did);
+    held?.add(did);
+  });
+  graph.noteUnlisted.mockImplementation((list, did) => {
+    unlisted.add(did);
+    held?.delete(did);
+  });
+}
+
 /** A repo whose next applyWrites commits and then loses its reply. */
 function losesReply(agent) {
   const write = agent.com.atproto.repo.applyWrites.getMockImplementation();
@@ -415,6 +438,99 @@ describe('approve', () => {
       'Added 1 by name. 1 refused: PROTECTED. Not in this plan: did:plc:nobody.',
     );
     expect(row(PLAN_A, 'did:plc:a').approved_via).toBe('individual');
+  });
+});
+
+describe('a batch the PDS refused', () => {
+  const refusing = (err) => {
+    const agent = bot();
+    agent.com.atproto.repo.applyWrites.mockRejectedValueOnce(err);
+    return agent;
+  };
+  const refusals = [
+    ['the rate limit', () => new Error('Rate Limit Exceeded')],
+    ['a 400', () => Object.assign(new Error('Invalid request'), { status: 400 })],
+  ];
+
+  for (const [what, refusal] of refusals) {
+    it(`after ${what}, is not claimed as this plan's add once another plan adds the account`, async () => {
+      heldCopy();
+      db.decision = [
+        scanned(PLAN_A, 'did:plc:x1', 'UNKNOWN'),
+        scanned(PLAN_A, 'did:plc:x2', 'UNKNOWN'),
+        scanned(PLAN_B, 'did:plc:x1', 'UNKNOWN'),
+      ];
+
+      const first = await applyPlan(refusing(refusal()), db.plan[0], [
+        'UNKNOWN',
+      ]);
+      expect(first.added).toBe(0);
+      expect(repo.size).toBe(0);
+      expect(row(PLAN_A, 'did:plc:x1').action).toBe(null);
+
+      expect(await applyPlan(bot(), db.plan[1], ['UNKNOWN'])).toMatchObject({
+        added: 1,
+      });
+
+      const again = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+      expect(again).toMatchObject({ added: 1, already: 1 });
+      expect(again.message).toBe('Added 1 to the list. 1 was already on it.');
+      expect(row(PLAN_A, 'did:plc:x1')).toMatchObject({
+        action: null,
+        acted_at: null,
+        already_listed: true,
+      });
+
+      const undo = await undoPlan(bot(), db.plan[0]);
+      expect(undo).toMatchObject({ removed: 1, remaining: 0 });
+      expect([...repo.values()]).toEqual(['did:plc:x1']);
+      expect(row(PLAN_B, 'did:plc:x1').undone_at).toBe(null);
+    });
+  }
+
+  it('leaves nothing for an undo to look for when its only batch was refused', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:x1', 'UNKNOWN')];
+    await applyPlan(
+      refusing(new Error('Rate Limit Exceeded')),
+      db.plan[0],
+      ['UNKNOWN'],
+    );
+    const agent = bot();
+    graph.rkeysForWrite.mockClear();
+
+    const undo = await undoPlan(agent, db.plan[0]);
+
+    expect(undo.message).toBe('Nothing from that plan is still on the list.');
+    expect(agent.com.atproto.repo.listRecords).not.toHaveBeenCalled();
+    expect(graph.rkeysForWrite).not.toHaveBeenCalled();
+  });
+
+  it('keeps the mark after a lost reply, but does not claim an account another plan has since added', async () => {
+    heldCopy();
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:x1', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:x2', 'UNKNOWN'),
+      scanned(PLAN_B, 'did:plc:x1', 'UNKNOWN'),
+    ];
+    await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
+    expect(row(PLAN_A, 'did:plc:x1').action).toBe('list_add');
+    // The held copy never heard of the lost write, so plan B writes x1 again.
+    await applyPlan(bot(), db.plan[1], ['UNKNOWN']);
+    expect(repo.size).toBe(3);
+
+    const undo = await undoPlan(bot(), db.plan[0]);
+
+    expect(undo).toMatchObject({ removed: 1, remaining: 0 });
+    expect([...repo.values()]).toEqual(['did:plc:x1', 'did:plc:x1']);
+    expect(row(PLAN_B, 'did:plc:x1').undone_at).toBe(null);
+    expect(row(PLAN_A, 'did:plc:x1')).toMatchObject({
+      action: null,
+      acted_at: null,
+    });
+
+    // Plan B's undo takes every copy, the lost one included.
+    await undoPlan(bot(), db.plan[1]);
+    expect(repo.size).toBe(0);
   });
 });
 

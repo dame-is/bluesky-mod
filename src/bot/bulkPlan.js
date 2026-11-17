@@ -483,6 +483,29 @@ export function stopWrites() {
 /** An error's message, short enough for a DM. */
 const brief = (err) => String(err?.message || err).slice(0, 160);
 
+const RATE_LIMIT = /rate ?limit/i;
+
+/**
+ * Did the PDS refuse the call, so that nothing in it was written? A 4xx, the
+ * rate limit among them. A timeout, a dropped connection or a 5xx may have
+ * come after the commit, so those are not.
+ */
+const refusedByPds = (err) =>
+  RATE_LIMIT.test(String(err?.message || err)) ||
+  (typeof err?.status === 'number' && err.status >= 400 && err.status < 500);
+
+/**
+ * A decision row with its mark as asked for taken off (see writeRows). The
+ * key and band go too, since SQLite checks NOT NULL columns first.
+ */
+const unmarked = (plan, r) => ({
+  plan_id: plan.id,
+  did: r.did,
+  band: r.band,
+  action: null,
+  approved_via: null,
+});
+
 /**
  * Create the listitems for a set of already-chosen rows.
  *
@@ -497,11 +520,12 @@ const brief = (err) => String(err?.message || err).slice(0, 160);
  * failing throws, so nothing is written.
  *
  * Each batch is marked as asked for (`action` set, `acted_at` not yet) before
- * it is sent, and stamped `acted_at` once the PDS has taken it. A batch whose
- * reply was lost, or whose stamp failed, is then found on the list by the
- * next approval or undo and recorded as this plan's add, rather than as
- * someone another plan put there. A stamp that fails stops the run, since
- * every batch after it would go unrecorded too.
+ * it is sent, and stamped `acted_at` once the PDS has taken it. A batch the
+ * PDS refused has its mark taken off again. A batch whose reply was lost, or
+ * whose stamp failed, is then found on the list by the next approval or undo
+ * and recorded as this plan's add, rather than as someone another plan put
+ * there, unless another plan holds a live add of that account. A stamp that
+ * fails stops the run, since every batch after it would go unrecorded too.
  *
  * `note` is a sentence for the reply when the run stopped early for a reason
  * other than the rate limit.
@@ -514,17 +538,17 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
   const allowed = rows.filter((r) => !veto.has(r.did));
   const vetoed = rows.length - allowed.length;
   const { fresh, listed } = await splitListed(uri, allowed);
-  const landed = listed.filter((r) => r.action === 'list_add' && !r.acted_at);
+  const marked = listed.filter((r) => r.action === 'list_add' && !r.acted_at);
+  const elsewhere = await addsElsewhere(
+    plan,
+    marked.map((r) => r.did),
+  );
+  const landed = marked.filter((r) => !elsewhere.has(r.did));
   const others = listed.filter((r) => !landed.includes(r));
   if (others.length) {
     await upsert(
       'decision',
-      others.map((r) => ({
-        plan_id: plan.id,
-        did: r.did,
-        band: r.band,
-        already_listed: true,
-      })),
+      others.map((r) => ({ ...unmarked(plan, r), already_listed: true })),
     ).catch(() => {});
   }
   if (landed.length) {
@@ -566,9 +590,20 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       });
     } catch (err) {
       failed += batch.length;
+      // Nothing was written, so the marks this run made come off. A mark
+      // from an earlier run stays, since that run's outcome is still unknown.
+      if (refusedByPds(err)) {
+        const mine = batch.filter((r) => r.action !== 'list_add');
+        if (mine.length) {
+          await upsert(
+            'decision',
+            mine.map((r) => unmarked(plan, r)),
+          ).catch(() => {});
+        }
+      }
       // A rate limit means stop, not retry. The remaining budget is gone and
       // approving again in an hour is the correct backoff.
-      if (/rate ?limit/i.test(String(err?.message || err))) {
+      if (RATE_LIMIT.test(String(err?.message || err))) {
         return { added, failed, rateLimited: true, already, vetoed, note };
       }
       continue;
@@ -1134,9 +1169,12 @@ async function deleteListitems(agent, bot, rkeys) {
 const byName = (via) =>
   via === 'command' || via === 'agent' || /(^|:)individual$/.test(via || '');
 
-/** Which of these accounts another plan added by name and still holds. */
-async function heldByName(plan, dids) {
-  const out = new Set();
+/**
+ * Which of these accounts another plan still holds a live add of, as
+ * did -> that plan's `approved_via` values.
+ */
+async function addsElsewhere(plan, dids) {
+  const out = new Map();
   for (let i = 0; i < dids.length; i += 50) {
     const rows = await selectAll('decision', {
       select: 'plan_id,did,approved_via',
@@ -1149,10 +1187,19 @@ async function heldByName(plan, dids) {
       order: 'did.asc',
     });
     for (const r of rows) {
-      if (r.plan_id !== plan.id && byName(r.approved_via)) out.add(r.did);
+      if (r.plan_id === plan.id) continue;
+      out.set(r.did, [...(out.get(r.did) || []), r.approved_via]);
     }
   }
   return out;
+}
+
+/** Which of these accounts another plan added by name and still holds. */
+async function heldByName(plan, dids) {
+  const held = await addsElsewhere(plan, dids);
+  return new Set(
+    [...held].filter(([, vias]) => vias.some(byName)).map(([did]) => did),
+  );
 }
 
 /**
@@ -1176,6 +1223,8 @@ async function heldByName(plan, dids) {
  *
  * An add this plan sent but never saw confirmed (see writeRows) is looked for
  * too, and if it is on the list it is recorded and taken off with the rest.
+ * When another plan holds a live add of that account, it is that plan's to
+ * take back: the mark comes off, and the account stays.
  *
  * An account the owner also added by name through another plan stays on the
  * list: undoing a batch takes back the batch, not their own choice. Only this
@@ -1208,7 +1257,20 @@ export async function undoPlan(
     uri,
     dids: open.map((r) => r.did),
   });
-  const landed = open.filter((r) => !r.acted_at && byDid.has(r.did));
+  const found = open.filter((r) => !r.acted_at && byDid.has(r.did));
+  const elsewhere = await addsElsewhere(
+    plan,
+    found.map((r) => r.did),
+  );
+  const claimed = found.filter((r) => elsewhere.has(r.did));
+  if (claimed.length) {
+    await upsert(
+      'decision',
+      claimed.map((r) => unmarked(plan, r)),
+    );
+    for (const r of claimed) byDid.delete(r.did);
+  }
+  const landed = found.filter((r) => !elsewhere.has(r.did));
   if (landed.length) {
     await upsert('decision', await stampRows(plan, landed));
   }
