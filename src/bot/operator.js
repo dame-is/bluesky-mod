@@ -49,7 +49,7 @@ import {
 import { KINDS, LABELS, parseActor } from '../lib/command.js';
 import { postWebUrl } from '../lib/links.js';
 import { BANDS } from '../lib/score.js';
-import { resolveActor } from '../lib/target.js';
+import { resolveActor, resolveTarget } from '../lib/target.js';
 import {
   proposePlan,
   findPlan,
@@ -315,6 +315,7 @@ const DEPS = {
   reviewTriage,
   recentPlans,
   resolveActor,
+  resolveTarget,
   countDecisions,
   decisionsFor,
   checkIntent,
@@ -444,6 +445,9 @@ function mentioned(text, needles) {
 
 /** A record key, without the full stop or colon of the sentence around it. */
 const keyOf = (raw) => raw.replace(/[.:]+$/, '');
+
+/** A post's at:// URI as resolveTarget builds it, with its key exactly. */
+const POST_URI = /^at:\/\/([^/]+)\/app\.bsky\.feed\.post\/([^/?#]+)$/;
 
 /**
  * Posts referred to in a message: at:// post URIs, and post links from any
@@ -721,15 +725,17 @@ export function buildActionTools(ctx, deps = DEPS) {
 
   /**
    * Where a post sits in the conversation: one of the post clauses in
-   * PLAN_SOURCE, or null for something that is not a post. Matched on author
-   * DID and record key together, because anyone can give a post of their own
-   * the same key as someone else's.
+   * PLAN_SOURCE, or null for anything but a post's at:// URI. Matched on
+   * author DID and record key together, because anyone can give a post of
+   * their own the same key as someone else's. The key is taken exactly, so a
+   * post whose key is another's plus a full stop does not match where that
+   * other post is named.
    */
-  const postPlace = async (link) => {
-    const [ref] = postRefs(link);
-    const did = ref ? await didOf(ref.author) : null;
+  const postPlace = async (uri) => {
+    const m = POST_URI.exec(String(uri ?? ''));
+    const did = m ? await didOf(m[1]) : null;
     if (!did) return null;
-    const post = { did, rkey: ref.rkey };
+    const post = { did, rkey: m[2] };
     if (await refersTo(ctx.said, post)) return 'attached';
     if (await refersTo(ctx.ownerText, post)) return 'ownerPost';
     if (postRefs(ctx.said).length) return 'otherPost';
@@ -1408,17 +1414,25 @@ export function buildActionTools(ctx, deps = DEPS) {
         return { error: 'a watch needs a conversation to report to' };
       }
       try {
+        // Resolved once, so the check, the question put to the owner and the
+        // watch itself all name the same post, by DID.
+        const { uri, collection } = await deps.resolveTarget(post, {
+          signal: abortSignal,
+        });
+        if (collection !== 'app.bsky.feed.post') {
+          return { error: 'I watch posts, and that is not a post.' };
+        }
         if (auto) {
           // Named by where it came from, never by the model's argument, so the
           // check reads only words code wrote.
-          const place = (await postPlace(post)) ?? 'unnamedPost';
+          const place = (await postPlace(uri)) ?? 'unnamedPost';
           const pointedAt = place === 'attached' || place === 'ownerPost';
           const which = WATCHED[place];
           const stopped = await gate(
             `Watch ${which} for ${hours} hours, and add the accounts triage reads as hostile in its new quotes and replies as they arrive (CONNECTED and NOTABLE held for the owner).`,
             {
               pointedAt,
-              commands: [`watch ${post} ${hours}h auto`],
+              commands: [`watch ${uri} ${hours}h auto`],
               describe: `watch it for ${hours}h and block the hostile ones as they come`,
             },
           );
@@ -1426,7 +1440,7 @@ export function buildActionTools(ctx, deps = DEPS) {
         }
         const out = await deps.startWatch({
           convoId: ctx.convoId,
-          target: post,
+          target: uri,
           hours,
           auto,
           signal: abortSignal,

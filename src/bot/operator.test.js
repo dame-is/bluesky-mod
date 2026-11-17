@@ -9,6 +9,7 @@ import {
   fallbackText,
   MAX_NAMED,
 } from './operator.js';
+import { resolveTarget } from '../lib/target.js';
 
 const PLAN = {
   id: '3f9a2c1b-0000-4000-8000-000000000000',
@@ -97,6 +98,18 @@ function fakeDeps(overrides = {}) {
       String(a).startsWith('did:')
         ? a
         : `did:plc:${String(a).replace(/^@/, '').split('.')[0]}`,
+    ),
+    // The real parser, with handles resolved the way resolveActor's fake
+    // resolves them, so nothing reaches the network.
+    resolveTarget: vi.fn((input) =>
+      resolveTarget(input, {
+        fetchImpl: async (url) => ({
+          ok: true,
+          json: async () => ({
+            did: `did:plc:${new URL(url).searchParams.get('handle').split('.')[0]}`,
+          }),
+        }),
+      }),
     ),
     countDecisions: vi.fn(async () => 4),
     decisionsFor: vi.fn(async () => new Map()),
@@ -1257,6 +1270,95 @@ describe('where a target came from', () => {
     );
     expect(out.waitingOnOwner).toBe(true);
   });
+
+  it('watches the post it described to the check, and stores that post for a 👍', async () => {
+    const attached = 'at://did:plc:attachedauthor/app.bsky.feed.post/3kabc2def3gh2';
+    const other = 'https://bsky.app/profile/did:plc:someoneelse/post/3zzzzzzzzzz22';
+    const otherUri = 'at://did:plc:someoneelse/app.bsky.feed.post/3zzzzzzzzzz22';
+    const said = `keep an eye on the replies to this and block anyone nasty${shared(attached)}`;
+    const post = `${other}?ref=${attached}`;
+
+    const allowing = fakeDeps();
+    await buildActionTools(
+      ctxFor({ checkWrites: true, convoId: 'c1', said, pending: [] }),
+      allowing,
+    ).watch_post.execute({ post, block_hostile: true });
+    expect(actionOf(allowing)).toMatch(
+      /^Watch a different post, not the one the owner attached, for 24 hours/,
+    );
+    expect(allowing.startWatch.mock.calls[0][0].target).toBe(otherUri);
+
+    const deps = refusing();
+    const ctx = ctxFor({ checkWrites: true, convoId: 'c1', said, pending: [] });
+    const out = await buildActionTools(ctx, deps).watch_post.execute({
+      post,
+      block_hostile: true,
+    });
+    expect(out.waitingOnOwner).toBeUndefined();
+    expect(ctx.pending).toEqual([]);
+    expect(deps.startWatch).not.toHaveBeenCalled();
+  });
+
+  it('stores a watch put to the owner by the at:// URI it resolved to', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      convoId: 'c1',
+      said: `watch this and block the hostile ones${shared('at://did:plc:author/app.bsky.feed.post/3zzz')}`,
+      pending: [],
+    });
+    await buildActionTools(ctx, deps).watch_post.execute({
+      post: 'https://bsky.app/profile/author.test/post/3zzz',
+      hours: 6,
+      block_hostile: true,
+    });
+    expect(ctx.pending.map((p) => p.commands)).toEqual([
+      ['watch at://did:plc:author/app.bsky.feed.post/3zzz 6h auto'],
+    ]);
+  });
+
+  it('refuses to watch something that is not a post, before the check', async () => {
+    const deps = fakeDeps();
+    const out = await buildActionTools(
+      ctxFor({ checkWrites: true, convoId: 'c1', said: 'watch this list' }),
+      deps,
+    ).watch_post.execute({
+      post: 'at://did:plc:author/app.bsky.graph.list/3abc',
+      block_hostile: true,
+    });
+    expect(out.error).toMatch(/not a post/);
+    expect(deps.checkIntent).not.toHaveBeenCalled();
+    expect(deps.startWatch).not.toHaveBeenCalled();
+  });
+
+  // Free text loses the full stop or colon after a key, so the owner's
+  // "at://.../3abc." still means 3abc. A plan's or a watch's key is exact.
+  for (const tail of ['.', ':']) {
+    it(`does not read a post whose key ends in "${tail}" as the attached one`, async () => {
+      const attached = 'at://did:plc:attachedauthor/app.bsky.feed.post/3kabc2def3gh2';
+      const said = `block the unknowns on this and watch it${shared(attached)}`;
+      const deps = refusing({
+        findPlan: vi.fn(async () => planOn(`${attached}${tail}`)),
+      });
+      const ctx = ctxFor({ checkWrites: true, convoId: 'c1', said, pending: [] });
+      const tools = buildActionTools(ctx, deps);
+      const approved = await tools.approve_plan.execute({
+        code: '3f9a2c1b',
+        bands: ['UNKNOWN'],
+      });
+      expect(actionOf(deps)).not.toContain('the post the owner attached');
+      expect(approved.waitingOnOwner).toBeUndefined();
+      const watched = await tools.watch_post.execute({
+        post: `${attached}${tail}`,
+        block_hostile: true,
+      });
+      expect(deps.checkIntent.mock.calls[1][0].action).not.toMatch(
+        /^Watch the post the owner attached/,
+      );
+      expect(watched.waitingOnOwner).toBeUndefined();
+      expect(ctx.pending).toEqual([]);
+    });
+  }
 
   it('does not offer a bare undo nobody pointed at', async () => {
     const deps = refusing();
