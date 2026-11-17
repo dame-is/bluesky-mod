@@ -488,6 +488,28 @@ describe('when the turn fails', () => {
     );
   });
 
+  it('takes the default deadline over one a timer cannot hold', async () => {
+    // AbortSignal.timeout throws on a fraction, which would fail every turn.
+    for (const bad of ['1500.5', String(2 ** 31)]) {
+      vi.stubEnv('MOD_OPERATOR_TIMEOUT_MS', bad);
+      vi.resetModules();
+      try {
+        const fresh = await import('./operator.js');
+        const reply = await fresh.operate({
+          generate: vi.fn(async () => ({ text: 'ok', steps: [{}] })),
+          message: 'x',
+          io: {},
+          model: 'test/model',
+          deps: fakeDeps(),
+        });
+        expect(reply.ok, bad).toBe(true);
+        expect(reply.text).toBe('ok');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    }
+  });
+
   it('operate never throws, and keeps the actions', async () => {
     const generate = vi.fn().mockRejectedValue(new Error('boom'));
     const reply = await operate({

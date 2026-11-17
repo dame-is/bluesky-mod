@@ -89,6 +89,19 @@ const num = (v, d) => {
 };
 
 /**
+ * A deadline in milliseconds from the environment, or the default when it is
+ * not a whole number from 1 (0 too, where `off` allows it) to 2^31-1.
+ * AbortSignal.timeout throws on a fraction, and a timer past 2^31-1 fires
+ * after 1 ms. config.js reports such a value at startup; this keeps one from
+ * reaching a timer when this module is loaded without it.
+ */
+const deadline = (v, d, { off = false } = {}) => {
+  const n = Number(v);
+  const ok = Number.isInteger(n) && n >= (off ? 0 : 1) && n <= 2 ** 31 - 1;
+  return v == null || v === '' || !ok ? d : n;
+};
+
+/**
  * Tool-loop steps for one agent turn.
  *
  * Higher than the analyst's 12. "Block the hostile quoters" is scan, triage,
@@ -112,7 +125,10 @@ const OPERATOR_STEPS = Math.max(
  * watch_post hand it on to the harvest and the triage they start, which stop
  * on it. A scan stopped that way stores no plan; labels a triage wrote stay.
  */
-const OPERATOR_TIMEOUT_MS = num(process.env.MOD_OPERATOR_TIMEOUT_MS, 300_000);
+const OPERATOR_TIMEOUT_MS = deadline(
+  process.env.MOD_OPERATOR_TIMEOUT_MS,
+  300_000,
+);
 
 /**
  * How long ONE model call may take before the model counts as stalled.
@@ -122,13 +138,15 @@ const OPERATOR_TIMEOUT_MS = num(process.env.MOD_OPERATOR_TIMEOUT_MS, 300_000);
  * seconds. The second wave reasons longer over a bigger context, and nothing
  * comes after it, so it waits longer. 0 turns the watchdog off.
  */
-const OPERATOR_CALL_TIMEOUT_MS = num(
+const OPERATOR_CALL_TIMEOUT_MS = deadline(
   process.env.MOD_OPERATOR_CALL_TIMEOUT_MS,
   45_000,
+  { off: true },
 );
-const ESCALATION_CALL_TIMEOUT_MS = num(
+const ESCALATION_CALL_TIMEOUT_MS = deadline(
   process.env.MOD_ESCALATION_CALL_TIMEOUT_MS,
   90_000,
+  { off: true },
 );
 
 /** A model call that did not come back inside its window. */

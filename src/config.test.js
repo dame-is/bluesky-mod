@@ -48,6 +48,7 @@ describe('number settings', () => {
     'MOD_OPERATOR_TIMEOUT_MS',
     'MOD_OPERATOR_CALL_TIMEOUT_MS',
     'MOD_ESCALATION_CALL_TIMEOUT_MS',
+    'MOD_MODEL_TIMEOUT_MS',
   ])('refuse a %s too long for a timer, which would fire after 1 ms', async (name) => {
     const problems = await problemsWith({ [name]: String(MAX_TIMER_MS + 1) });
     expect(problems).toHaveLength(1);
@@ -87,6 +88,18 @@ describe('number settings', () => {
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/^MOD_OPERATOR_TIMEOUT_MS must be /);
   });
+
+  it.each(['MOD_OPERATOR_TIMEOUT_MS', 'MOD_MODEL_TIMEOUT_MS'])(
+    'refuse a %s that is not a whole number, which AbortSignal.timeout throws on',
+    async (name) => {
+      const problems = await problemsWith({ [name]: '1500.5' });
+      expect(problems).toEqual([
+        `${name} must be a whole number above 0 and at most ${MAX_TIMER_MS}`,
+      ]);
+      expect(await problemsWith({ [name]: '0' })).toHaveLength(1);
+      expect(await problemsWith({ [name]: '1500' })).toEqual([]);
+    },
+  );
 
   it('refuse 0 where a timer must run, as before', async () => {
     const problems = await problemsWith({ DM_POLL_MS: '0' });

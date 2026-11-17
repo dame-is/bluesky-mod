@@ -20,26 +20,31 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
  * setInterval given NaN or 0 fires at once, over and over. `min` and `max`
  * bound a value above 0; 0 itself is allowed unless `positive`.
  */
-function num(name, fallback, { positive = false, min = 0, max = Infinity } = {}) {
+function num(
+  name,
+  fallback,
+  { positive = false, min = 0, max = Infinity, whole = false } = {},
+) {
   const raw = process.env[name];
   if (raw == null || String(raw).trim() === '') return fallback;
   const n = Number(raw);
   const inRange = n === 0 ? !positive : n >= min && n <= max;
-  if (!Number.isFinite(n) || !inRange) {
-    badNumbers.push(`${name} must be ${wanted({ positive, min, max })}`);
+  if (!Number.isFinite(n) || !inRange || (whole && !Number.isInteger(n))) {
+    badNumbers.push(`${name} must be ${wanted({ positive, min, max, whole })}`);
     return fallback;
   }
   return n;
 }
 
 /** What num() takes, in words. */
-function wanted({ positive, min, max }) {
+function wanted({ positive, min, max, whole }) {
   const low = min > 0 ? String(min) : positive ? null : '0';
   const range =
     max === Infinity
       ? low ? `, ${low} or more` : ' above 0'
       : low ? ` from ${low} to ${max}` : ` above 0 and at most ${max}`;
-  return `${!positive && min > 0 ? '0 (off) or ' : ''}a number${range}`;
+  const kind = whole ? 'a whole number' : 'a number';
+  return `${!positive && min > 0 ? '0 (off) or ' : ''}${kind}${range}`;
 }
 
 /**
@@ -185,13 +190,15 @@ export const config = {
   statsIntervalMs: delay('STATS_INTERVAL_MS', 30 * 60_000),
 };
 
-// bot/operator.js reads its deadlines itself (it cannot import this module,
-// which imports it through dmLoop.js), so they are checked here too. A
-// whole-turn deadline of 0 would end every agent turn at once, while 0 turns a
-// per-call watchdog off.
-delay('MOD_OPERATOR_TIMEOUT_MS', null, { positive: true });
+// bot/operator.js and lib/agent.js read their deadlines themselves (they
+// cannot import this module, which imports them through dmLoop.js), so they
+// are checked here too. A whole-turn deadline of 0 would end every agent turn
+// at once, while 0 turns a per-call watchdog off. The two that reach
+// AbortSignal.timeout must be whole numbers, since it throws on a fraction.
+delay('MOD_OPERATOR_TIMEOUT_MS', null, { positive: true, whole: true });
 delay('MOD_OPERATOR_CALL_TIMEOUT_MS', null);
 delay('MOD_ESCALATION_CALL_TIMEOUT_MS', null);
+delay('MOD_MODEL_TIMEOUT_MS', null, { positive: true, whole: true });
 
 const DID = /^did:(plc|web):[a-zA-Z0-9._:%-]+$/;
 const LIST = /^at:\/\/(did:[^/]+)\/app\.bsky\.graph\.list\/[^/]+$/;
