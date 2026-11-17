@@ -115,7 +115,7 @@ describe('number settings', () => {
     },
   );
 
-  it('refuse 0 where a timer must run, as before', async () => {
+  it('refuse 0 where a timer must run', async () => {
     const problems = await problemsWith({ DM_POLL_MS: '0' });
     expect(problems).toEqual([expect.stringMatching(/^DM_POLL_MS must be /)]);
   });
