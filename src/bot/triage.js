@@ -41,7 +41,7 @@ const PER_CALL = 20;
  * Model calls at once. The calls are almost all waiting on the provider, so a
  * wave costs about what its slowest call costs.
  */
-const CONCURRENCY = 12;
+export const CONCURRENCY = 12;
 
 const KINDS = new Set(['quote', 'reply', 'threadReply']);
 
@@ -245,9 +245,10 @@ async function recordUsage(rows) {
  *
  * `perCall` is how many posts share one model call. At 1, no stranger's words
  * are ever in the same call as another's, so a post that talks to the model
- * can only sway its own label. `dids`, when given, limits the read, and the
- * `remaining` count, to those accounts, and the read takes them in the order
- * given.
+ * can only sway its own label. Every path that adds on a reading nobody
+ * reviewed (an auto watch and a card's "hostile") passes 1. `dids`, when
+ * given, limits the read, and the `remaining` count, to those accounts, and
+ * the read takes them in the order given.
  *
  * `perRun` is how many posts one run reads, by default one wave of calls at
  * whatever `perCall` is. Jobs share one queue in the process, so a long

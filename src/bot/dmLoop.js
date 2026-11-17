@@ -82,7 +82,7 @@ import {
 } from '../lib/phrases.js';
 import { select, upsert } from './db.js';
 import { applyCommand } from './listWrite.js';
-import { runTriage, reviewTriage } from './triage.js';
+import { runTriage, reviewTriage, CONCURRENCY } from './triage.js';
 import {
   proposePlan,
   findPlan,
@@ -1363,11 +1363,10 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
 }
 
 /**
- * Posts per round of a card's "hostile": one wave of single-post calls
- * (CONCURRENCY in triage.js), so a round holds the shared job queue no longer
- * than one batched wave does.
+ * Posts per round of a card's "hostile": one wave of single-post calls, so a
+ * round holds the shared job queue no longer than one batched wave does.
  */
-const HOSTILE_PER_ROUND = 12;
+const HOSTILE_PER_ROUND = CONCURRENCY;
 
 /**
  * "hostile" on a card: read the replies and quotes, then add the hostile.
