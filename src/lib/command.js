@@ -1362,10 +1362,17 @@ export function parseWatchCommand(text, { embedUri = null, links = [] } = {}) {
   ) {
     return { action: 'watches' };
   }
-  const target = postTargetIn(raw, { embedUri, links });
+  // Stopping keeps a target of any kind. A list or a feed is never watched,
+  // so it matches no watch, where dropping it would stop the newest one.
   if (/^(stop watching|unwatch|stop watch|done watching)\b/.test(lower)) {
-    return { action: 'unwatch', target };
+    const named =
+      extractTargets(raw)[0] ||
+      links.find((l) => extractTargets(l).length) ||
+      embedUri ||
+      null;
+    return { action: 'unwatch', target: named };
   }
+  const target = postTargetIn(raw, { embedUri, links });
   // "watch this", "watch https://...", "keep an eye on it", but not "watch
   // out, this one is nasty", which is a warning with a post attached.
   if (

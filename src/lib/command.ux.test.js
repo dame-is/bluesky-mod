@@ -257,6 +257,27 @@ describe('watch commands', () => {
       parseWatchCommand('watch this', { embedUri: list }),
     ).toMatchObject({ action: 'watch', target: null });
   });
+
+  it('keeps a list or a feed named in "stop watching", so no watch matches it', () => {
+    // A null target stops the newest watch, which is not what was named.
+    const list = 'at://did:plc:abc/app.bsky.graph.list/3abc';
+    const feed = 'at://did:plc:abc/app.bsky.feed.generator/hot';
+    expect(parseWatchCommand(`stop watching ${list}`)).toEqual({
+      action: 'unwatch',
+      target: list,
+    });
+    expect(
+      parseWatchCommand('stop watching', { links: [`${feed}`] }),
+    ).toEqual({ action: 'unwatch', target: feed });
+    expect(parseWatchCommand('unwatch this', { embedUri: list })).toEqual({
+      action: 'unwatch',
+      target: list,
+    });
+    expect(parseWatchCommand(`stop watching ${POST}`)).toEqual({
+      action: 'unwatch',
+      target: POST,
+    });
+  });
 });
 
 describe('approving by what people did', () => {
