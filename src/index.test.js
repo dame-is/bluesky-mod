@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
   stepsToFinish: 5,
   stepScript: [],
   stream: null,
+  dms: [],
+  disk: { free: 50 * 2 ** 30, total: 100 * 2 ** 30 },
 }));
 
 vi.mock('./bot/dmLoop.js', async (importOriginal) => ({
@@ -38,7 +40,17 @@ vi.mock('./bot/botAgent.js', () => {
     },
   };
   const chat = {
-    chat: { bsky: { convo: { getLog: async () => ({ data: { logs: [] } }) } } },
+    chat: {
+      bsky: {
+        convo: {
+          getLog: async () => ({ data: { logs: [] } }),
+          sendMessage: async ({ message }) => {
+            h.dms.push(message.text);
+            return { data: { id: 'sent' } };
+          },
+        },
+      },
+    },
   };
   return {
     botAgent: async () => {
@@ -85,6 +97,16 @@ vi.mock('./bot/reference.js', async (importOriginal) => ({
     takenAt: '2026-01-01T00:00:00.000Z',
   }),
   makeIo: () => ({}),
+}));
+
+vi.mock('./drift.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  ownerConvo: async () => 'owner-convo',
+}));
+
+vi.mock('./disk.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  diskSpace: async () => h.disk,
 }));
 
 vi.mock('./watching.js', () => ({
@@ -161,6 +183,8 @@ beforeEach(() => {
     stepsToFinish: 5,
     stepScript: [],
     stream: null,
+    dms: [],
+    disk: { free: 50 * 2 ** 30, total: 100 * 2 ** 30 },
   });
   vi.resetModules();
   vi.useFakeTimers();
@@ -256,6 +280,24 @@ describe('a second copy', () => {
     // The other copy stopped beating; its lease goes stale.
     await vi.advanceTimersByTimeAsync(100_000);
     expect(h.events).toContain('login');
+  });
+});
+
+describe('a data disk running low', () => {
+  it('is said by DM once, not every hour', async () => {
+    h.disk = { free: 100 * 2 ** 20, total: 2 ** 30 };
+    await boot();
+    expect(h.dms).toEqual([
+      "The bot's data disk is nearly full: 100 MB free of 1 GB. Give it a bigger disk before writes start failing; docs/DEPLOY.md says how for each host.",
+    ]);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    expect(h.dms).toHaveLength(1);
+  });
+
+  it('says nothing while there is room', async () => {
+    await boot();
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(h.dms).toEqual([]);
   });
 });
 

@@ -42,6 +42,7 @@ import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { isAuthError, createReconnector } from './session.js';
 import { acquireLease, HEARTBEAT_MS } from './lease.js';
+import { diskSpace, isLow, describe as describeDisk } from './disk.js';
 
 const model = MODELS.agent;
 
@@ -402,6 +403,44 @@ function scheduleWatching() {
   }
 }
 
+// --- room on the data disk ---------------------------------------------------
+let diskTimer = null;
+let diskWarnedAt = 0;
+const DISK_CHECK_MS = 60 * 60_000;
+const DISK_WARN_EVERY_MS = 24 * 60 * 60_000;
+
+/**
+ * Hourly: when the data disk runs low, say so in the log and, once a day, by
+ * DM, before SQLite starts refusing writes. Reading the disk is not a job and
+ * waits for nothing; the DM goes through the queue like any other.
+ */
+function scheduleDiskCheck() {
+  const check = async () => {
+    let space;
+    try {
+      space = await diskSpace(config.dataDir);
+    } catch {
+      return;
+    }
+    if (!isLow(space)) return;
+    logger.error('The data disk is nearly full', { space: describeDisk(space) });
+    if (config.dryRun || Date.now() - diskWarnedAt < DISK_WARN_EVERY_MS) return;
+    diskWarnedAt = Date.now();
+    enqueue('disk', async () => {
+      const convoId = await ownerConvo(chat);
+      await chat.chat.bsky.convo.sendMessage({
+        convoId,
+        message: {
+          text: `The bot's data disk is nearly full: ${describeDisk(space)}. Give it a bigger disk before writes start failing; docs/DEPLOY.md says how for each host.`,
+        },
+      });
+    });
+  };
+  check();
+  diskTimer = setInterval(check, DISK_CHECK_MS);
+  if (diskTimer.unref) diskTimer.unref();
+}
+
 // --- stats -------------------------------------------------------------------
 function logStats() {
   logger.info('stats', {
@@ -504,6 +543,7 @@ async function start() {
   }
 
   scheduleSnapshot();
+  scheduleDiskCheck();
 
   const protect = ownerGraphHandler({
     ownerDid: config.ownerDid,
@@ -568,6 +608,7 @@ async function shutdown(signal) {
   if (watchTimer) clearInterval(watchTimer);
   if (alertTimer) clearInterval(alertTimer);
   if (statsTimer) clearInterval(statsTimer);
+  if (diskTimer) clearInterval(diskTimer);
   stream?.close();
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),
