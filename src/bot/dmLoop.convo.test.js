@@ -813,6 +813,40 @@ describe("strangers' words in the bot's own messages", () => {
   }
 });
 
+describe('a post shared in an earlier message', () => {
+  it('is named in the history the agent reads', async () => {
+    const POST = 'at://did:plc:author/app.bsky.feed.post/3earlier';
+    const at = (s) => new Date(Date.now() - s * 1000).toISOString();
+    const { chat } = chatWith([msg('m2', 'ok block the hostile ones on that')]);
+    chat.chat.bsky.convo.getMessages = async () => ({
+      data: {
+        messages: [
+          {
+            id: 'm1',
+            text: '',
+            embed: { record: { uri: POST } },
+            sender: { did: OWNER },
+            sentAt: at(60),
+          },
+          {
+            id: 'b1',
+            text: 'Nobody hostile yet.',
+            sender: { did: BOT },
+            sentAt: at(50),
+          },
+        ],
+      },
+    });
+    const generate = vi.fn(async () => ({ text: 'model said ok', steps: [] }));
+    await pass(chat, { mode: 'agent', generate });
+    const said = generate.mock.calls[0][0].messages
+      .filter((t) => t.role === 'user')
+      .map((t) => JSON.stringify(t.content))
+      .join('\n');
+    expect(said).toContain(`[The post the owner shared: ${POST}]`);
+  });
+});
+
 describe('a shared record that is not a post', () => {
   const LIST = 'at://did:plc:listmaker/app.bsky.graph.list/3list';
 

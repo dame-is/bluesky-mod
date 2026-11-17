@@ -1039,11 +1039,19 @@ async function readHistory(chat, entry, { botDid, limits }) {
       convoId: entry.convoId,
       limit: 40,
     });
-    const turns = historyFrom(page.data.messages, {
-      // The asker, who is not always the owner. Labelling a guest's own
-      // messages as someone else's makes the model read the conversation as
-      // one it watched rather than one it is in.
-      selfDid: entry.message?.sender?.did ?? OWNER_DID,
+    // The asker, who is not always the owner. Labelling a guest's own
+    // messages as someone else's makes the model read the conversation as
+    // one it watched rather than one it is in.
+    const asker = entry.message?.sender?.did ?? OWNER_DID;
+    // The asker's messages as composeMessage gives them to the model, so a
+    // post shared as an embed in an earlier turn is still named in history.
+    const messages = (page.data.messages || []).map((m) =>
+      m?.sender?.did === asker && typeof m.text === 'string'
+        ? { ...m, text: composeMessage(m) }
+        : m,
+    );
+    const turns = historyFrom(messages, {
+      selfDid: asker,
       botDid,
       beforeId: entry.message.id,
       maxTurns: limits.maxTurns,

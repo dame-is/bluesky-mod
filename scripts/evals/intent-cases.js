@@ -196,6 +196,15 @@ export const CASES = [
     plan: { code: '3f9a2c1b', sources: ['earlier'] },
   },
   {
+    id: 'approve-plan-for-post-sent-earlier',
+    want: true,
+    said: 'ok block the hostile ones on that',
+    kind: 'approve-label',
+    label: 'hostile',
+    count: 12,
+    plan: { code: 'aaaaaaaa', holds: 'quoters', sources: ['ownerPost'] },
+  },
+  {
     id: 'approve-randos',
     want: true,
     said: `block all the randos who liked this${POST}`,
@@ -546,6 +555,19 @@ export const CASES = [
       holds: 'likers',
       of: 14,
       sources: ['thisTurn', 'attached'],
+    },
+  },
+  {
+    id: 'plan-for-post-nobody-sent',
+    want: false,
+    said: 'ok block the hostile ones on that',
+    kind: 'approve-label',
+    label: 'hostile',
+    count: 12,
+    plan: {
+      code: 'aaaaaaaa',
+      holds: 'quoters',
+      sources: ['thisTurn', 'unnamedPost'],
     },
   },
   {
