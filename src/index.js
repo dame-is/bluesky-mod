@@ -30,6 +30,7 @@ import {
 import { loadReference, makeIo } from './bot/reference.js';
 import { loadAgentConfig } from './bot/agentConfig.js';
 import { runDmPass } from './bot/dmLoop.js';
+import { stopWrites } from './bot/bulkPlan.js';
 import { CHECK_MODEL, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
 import { upsert, openDb, closeDb } from './bot/db.js';
@@ -646,6 +647,9 @@ async function start() {
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  // No new approval batch starts; one already sent can finish and be
+  // recorded within the wait below.
+  stopWrites();
   logger.info('Shutting down', { signal });
   if (dmTimer) clearInterval(dmTimer);
   if (driftTimer) clearInterval(driftTimer);

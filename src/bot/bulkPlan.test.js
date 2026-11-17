@@ -128,6 +128,7 @@ const {
   lastChange,
   findPlan,
   historyFor,
+  stopWrites,
 } = await import('./bulkPlan.js');
 
 /** The bot's repo: rkey -> subject. */
@@ -906,5 +907,27 @@ describe('history', () => {
       plan: { note: 'block @b.test' },
     });
     expect(db.reads.filter((r) => r.table === 'plan')).toHaveLength(1);
+  });
+});
+
+// Last in the file: stopWrites holds for the rest of the process.
+describe('shutting down', () => {
+  it('starts no new batch once the process is stopping, and records the one sent', async () => {
+    db.decision = Array.from({ length: 60 }, (_, i) =>
+      scanned(PLAN_A, `did:plc:u${String(i).padStart(2, '0')}`, 'UNKNOWN'),
+    );
+    const agent = bot();
+    const write = agent.com.atproto.repo.applyWrites.getMockImplementation();
+    agent.com.atproto.repo.applyWrites.mockImplementation(async (args) => {
+      const out = await write(args);
+      stopWrites();
+      return out;
+    });
+
+    const out = await applyPlan(agent, db.plan[0], ['UNKNOWN']);
+
+    expect(out).toMatchObject({ added: 50, remaining: 10 });
+    expect(repo.size).toBe(50);
+    expect(db.decision.filter((r) => r.acted_at)).toHaveLength(50);
   });
 });
