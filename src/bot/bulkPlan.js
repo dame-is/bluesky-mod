@@ -1163,19 +1163,25 @@ export function estimateWrites(n, { kind = 'create' } = {}) {
  * `plan` is null: undo only takes people off, so it has nothing to reverse,
  * and reaching past the removal to an older add would undo something else.
  * An add already undone is passed over, so undoing again steps back to the
- * change before it. So is a typed block of someone already listed while an
- * add that wrote their listitem still holds them: it changed nothing, and is
- * logged only so an undo of that add leaves them on the list (heldByName).
+ * change before it. A typed block of someone already listed, while an add
+ * that wrote their listitem still holds them, changed nothing; it is logged
+ * only so an undo of that add leaves them on the list (heldByName). When it
+ * is the newest change, `unchanged` names that account and `plan` is null:
+ * reaching past it would take back an older batch the owner did not just
+ * make.
  *
  * A batch sent but never confirmed (see writeRows) counts as a change in the
  * order it was sent, so its plan is named when it is the newest, and the
  * undo of that plan looks for it on the list.
  *
  * @returns {Promise<{ plan: object|null,
- *   removed: { did: string, planId: string, at: string }|null }>}
+ *   removed: { did: string, planId: string, at: string }|null,
+ *   unchanged?: { did: string, planId: string } }>}
  */
 export async function lastChange() {
-  const last = await newestChange();
+  const { row: last, passed } = await newestChange();
+  // Passed over within the same plan, it is one of that plan's own rows.
+  const unchanged = passed && passed.plan_id !== last?.plan_id ? passed : null;
   const [mark] =
     (await select('decision', {
       select: 'plan_id,acted_seq',
@@ -1188,8 +1194,19 @@ export async function lastChange() {
       order: 'acted_seq.desc',
       limit: 1,
     })) || [];
-  if (mark && !(last?.acted_seq > mark.acted_seq)) {
+  const newest = Math.max(
+    last?.acted_seq ?? -Infinity,
+    unchanged?.acted_seq ?? -Infinity,
+  );
+  if (mark && !(newest > mark.acted_seq)) {
     return { plan: await planById(mark.plan_id), removed: null };
+  }
+  if (unchanged) {
+    return {
+      plan: null,
+      removed: null,
+      unchanged: { did: unchanged.did, planId: unchanged.plan_id },
+    };
   }
   if (!last) return { plan: null, removed: null };
   if (last.action === 'list_remove') {
@@ -1204,8 +1221,12 @@ export async function lastChange() {
 const planById = async (id) =>
   (await select('plan', { select: PLAN_COLUMNS, eq: { id } }))?.[0] ?? null;
 
-/** The newest recorded change lastChange counts, or null. */
+/**
+ * The newest recorded change lastChange counts, or null, and the newest row
+ * it passed over to get there, if any.
+ */
 async function newestChange() {
+  let passed = null;
   for (let offset = 0; ; offset += 1) {
     const rows = await select('decision', {
       select: 'plan_id,did,action,acted_at,acted_seq,already_listed',
@@ -1221,8 +1242,11 @@ async function newestChange() {
       ...(offset ? { offset } : {}),
     });
     const row = rows?.[0];
-    if (!row) return null;
-    if (!row.already_listed || !(await heldByWrite(row))) return row;
+    if (!row) return { row: null, passed };
+    if (!row.already_listed || !(await heldByWrite(row))) {
+      return { row, passed };
+    }
+    passed ??= row;
   }
 }
 

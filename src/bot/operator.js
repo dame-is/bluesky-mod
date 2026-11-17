@@ -1399,6 +1399,12 @@ export function buildActionTools(ctx, deps = DEPS) {
             result: `The last change took ${last.removed.did} off the list. Undo only takes people off, so nothing was undone.`,
           };
         }
+        if (!plan && last?.unchanged) {
+          return {
+            ok: true,
+            result: `The last change found ${last.unchanged.did} already on the list, so it changed nothing and nothing was undone. An earlier change needs its plan code.`,
+          };
+        }
         if (!plan) return { ok: true, result: 'Nothing to undo.' };
         const live = await deps.countDecisions(plan, { state: 'live' });
         if (!live) {

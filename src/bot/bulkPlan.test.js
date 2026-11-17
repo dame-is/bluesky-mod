@@ -933,7 +933,7 @@ describe('undo last', () => {
     expect((await lastChange()).plan).toBe(null);
   });
 
-  it('passes over a typed block that found the account already listed', async () => {
+  it('stops at a typed block that found the account already listed', async () => {
     db.decision = [
       added(PLAN_A, 'did:plc:x', '2026-10-01T10:00:00Z', {
         approved_via: 'band',
@@ -949,14 +949,36 @@ describe('undo last', () => {
     constellation.set('did:plc:x', ['rk-x']);
     repo.set('rk-x', 'did:plc:x');
 
-    const last = await lastChange();
-    expect(last.plan.id).toBe(PLAN_A);
+    // The block changed nothing, so a bare undo does not reach past it to
+    // the batch that put them on.
+    expect(await lastChange()).toEqual({
+      plan: null,
+      removed: null,
+      unchanged: { did: 'did:plc:x', planId: PLAN_B },
+    });
 
     // Undoing the plan that put them on still leaves them where the typed
     // block put them.
-    const out = await undoPlan(bot(), last.plan);
+    const out = await undoPlan(
+      bot(),
+      db.plan.find((p) => p.id === PLAN_A),
+    );
     expect(out).toMatchObject({ removed: 0, kept: 1 });
     expect([...repo.values()]).toEqual(['did:plc:x']);
+  });
+
+  it("names a batch whose newest rows found accounts already listed", async () => {
+    db.decision = [
+      added(PLAN_B, 'did:plc:b', '2026-10-01T09:00:00Z', { acted_seq: 1 }),
+      added(PLAN_A, 'did:plc:b', '2026-10-01T10:00:00Z', {
+        acted_seq: 2,
+        already_listed: true,
+      }),
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', { acted_seq: 2 }),
+    ];
+    const last = await lastChange();
+    expect(last.plan.id).toBe(PLAN_A);
+    expect(last.unchanged).toBeUndefined();
   });
 
   it('does not reach past an unblock to an older add', async () => {

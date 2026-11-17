@@ -244,6 +244,19 @@ describe('the reaction says what a command did, not what its reply says', () => 
     expect(tickOf(reactions, 'm2')).not.toContain('+✅@m2');
   });
 
+  it('a bare undo after a block that changed nothing undoes nothing', async () => {
+    plans.lastChange.mockResolvedValueOnce({
+      plan: null,
+      removed: null,
+      unchanged: { did: 'did:plc:s', planId: 'p' },
+    });
+    const { chat, reactions, sent } = chatOver([msg('m1', 'undo')]);
+    await pass(chat);
+    expect(sent.at(-1).text).toMatch(/already on the list, so it changed nothing/);
+    expect(plans.undoPlan).not.toHaveBeenCalled();
+    expect(tickOf(reactions)).toEqual([]);
+  });
+
   it('a block that went on the list but missed the log gets its ✅', async () => {
     listWrite.applyCommand.mockResolvedValue({
       ok: true,

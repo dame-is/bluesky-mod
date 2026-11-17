@@ -466,6 +466,21 @@ describe('the write tools', () => {
     expect(ctx.actions).toEqual([]);
   });
 
+  it('undoes nothing when the newest change was a block that changed nothing', async () => {
+    const deps = fakeDeps({
+      lastChange: vi.fn(async () => ({
+        plan: null,
+        removed: null,
+        unchanged: { did: 'did:plc:x', planId: 'p' },
+      })),
+    });
+    const ctx = ctxFor();
+    const out = await buildActionTools(ctx, deps).undo.execute({});
+    expect(out.result).toMatch(/^The last change found did:plc:x already on the list/);
+    expect(deps.undoPlan).not.toHaveBeenCalled();
+    expect(ctx.actions).toEqual([]);
+  });
+
   it('says what a cancel leaves on the list', async () => {
     const message =
       'Cancelled 3f9a2c1b. 9 it added are still on the list; "undo 3f9a2c1b" takes them off.';

@@ -96,7 +96,7 @@ Commands are parsed, not interpreted. They never reach a model.
 | `watch this` *(model)* | Re-reads a post's new quotes and replies for 24 hours. `for 12h`, `and block the hostile ones` (agent mode only), `stop watching`, `what are you watching` |
 | `remember: <note>` *(agent mode)* | Keeps your words as a standing note the model reads. `what do you remember`, `forget 2`. Classic mode answers it with a note saying so. |
 
-**You rarely type a code.** Bare `undo` means the newest change to the list when that change was an add, one block or a whole batch. After an unblock it undoes nothing and says so. A reply that offers a next step ends in a numbered menu, so the usual path is answering `1`. A number answers only the menu on the bot's last message. A code that doesn't parse is refused rather than guessed, because undoing the most recent plan over a typo would act on a batch you didn't name.
+**You rarely type a code.** Bare `undo` means the newest change to the list when that change was an add, one block or a whole batch. After an unblock, or a block of someone already on the list, it undoes nothing and says so. A reply that offers a next step ends in a numbered menu, so the usual path is answering `1`. A number answers only the menu on the bot's last message. A code that doesn't parse is refused rather than guessed, because undoing the most recent plan over a typo would act on a batch you didn't name.
 
 `undo` is the only verb that may default to a target you didn't name. Every other one adds someone to a block list, and guessing is the failure that matters there.
 
