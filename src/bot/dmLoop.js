@@ -542,10 +542,13 @@ export async function runCommand(
         cmd.actor ? 'Nothing recorded for them.' : 'Nothing done yet.',
       );
     }
+    // A plan's note holds the words that asked for each change, which can be
+    // what the owner would tell nobody else, so a sender who may not write
+    // sees what was done and not why.
     const lines = h.rows.map((r) => {
       const when = new Date(r.acted_at).toLocaleString();
       const verb = r.action === 'list_remove' ? 'removed' : 'added';
-      const note = r.plan?.note ? `, "${r.plan.note}"` : '';
+      const note = canWrite && r.plan?.note ? `, "${r.plan.note}"` : '';
       const undone = r.undone_at ? ' (undone)' : '';
       return `${when} · ${verb} · ${r.band} · ${r.approved_via ?? '?'} · ${r.code}${undone}${note}`;
     });

@@ -335,3 +335,50 @@ describe('a label review', () => {
     );
   });
 });
+
+describe('history for a sender who may not write', () => {
+  const WORDS = "block him, he's my ex and he found my new account";
+
+  async function acted() {
+    const id = 'abcdef12-0000-4000-8000-000000000000';
+    const now = new Date().toISOString();
+    await db.upsert('plan', [
+      {
+        id,
+        created_at: now,
+        approved_at: now,
+        approved_bands: ['agent'],
+        note: `${WORDS} [agent: owner asked]`,
+      },
+    ]);
+    await db.upsert('decision', [
+      {
+        plan_id: id,
+        did: 'did:plc:ex0000000000',
+        band: 'UNKNOWN',
+        action: 'list_add',
+        acted_at: now,
+        acted_seq: 1,
+        approved_via: 'agent',
+      },
+    ]);
+  }
+
+  it('leaves out the words that asked for each change', async () => {
+    await acted();
+    const out = await runCommand(parseCommand('history'), agent, {
+      canWrite: false,
+    });
+    expect(out.text).toMatch(/· added · UNKNOWN · agent · abcdef12$/m);
+    expect(out.text).not.toContain('my ex');
+    expect(out.text).not.toContain('owner asked');
+  });
+
+  it('still shows them to a sender who may write', async () => {
+    await acted();
+    const out = await runCommand(parseCommand('history'), agent, {
+      canWrite: true,
+    });
+    expect(out.text).toContain(WORDS);
+  });
+});
