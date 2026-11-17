@@ -108,7 +108,7 @@ The settings most people change are in [.env.example](.env.example), commented. 
 ```bash
 npm install
 npm test
-DRY_RUN=true npm run dev   # reads and logs, never posts or DMs
+DRY_RUN=true npm run dev   # posts nothing and reads no DMs; public mentions are answered in the log
 ```
 
 ## License
