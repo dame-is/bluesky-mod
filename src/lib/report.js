@@ -156,7 +156,7 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
     '  approve <code> UNKNOWN    add that band only',
     '  block @handle             add one account to the list',
     '  unblock @handle           take them back off',
-    '  undo                      reverse the last batch',
+    '  undo                      take back the last add, one account or a batch',
   ];
   const tail = [
     '',
@@ -178,9 +178,10 @@ function actorRef(a) {
  * What the owner can do about this account, as parseable commands.
  *
  * PROTECTED gets no add option. The write would refuse it anyway, and a button
- * that exists to be rejected is worse than no button.
+ * that exists to be rejected is worse than no button. For the same reason the
+ * read is left out when no model is set up, as helpText leaves it out.
  */
-export function actionsFor(account) {
+export function actionsFor(account, { hasModel = true } = {}) {
   const at = actorRef(account);
   const out = [];
   if (!account.protectedReason) {
@@ -194,10 +195,12 @@ export function actionsFor(account) {
   // if I blocked them" and says nothing about conduct, which is usually the
   // question being asked. Offering the read beside the act keeps the band from
   // being taken as a verdict.
-  out.push({
-    label: `Read ${at}'s recent posts first`,
-    command: `read ${at}`,
-  });
+  if (hasModel) {
+    out.push({
+      label: `Read ${at}'s recent posts first`,
+      command: `read ${at}`,
+    });
+  }
   return out;
 }
 
@@ -259,9 +262,10 @@ export function renderPlanReport(plan, { template } = {}) {
  *
  * Bands with nothing in them get no option: an approval that would carry zero
  * accounts is a button that does nothing, and a menu of those teaches you to
- * stop reading the menu.
+ * stop reading the menu. Reading and sorting by tone need a model, so they are
+ * left out when there is none.
  */
-export function planActions(plan) {
+export function planActions(plan, { hasModel = true } = {}) {
   const byBand = plan.byBand || {};
   const out = [];
 
@@ -276,7 +280,7 @@ export function planActions(plan) {
       command: `list add ${at}`,
     });
   }
-  if (at) {
+  if (at && hasModel) {
     out.push({
       label: `Read ${at}'s recent posts first`,
       command: `read ${at}`,
@@ -287,7 +291,7 @@ export function planActions(plan) {
   // mostly UNKNOWN, with no way to tell an insult from an argument about a
   // policy. So when there are words to read, offer to read them before
   // offering to add everyone.
-  if (plan.withText) {
+  if (plan.withText && hasModel) {
     out.push({
       label: `Sort the ${plan.withText} who wrote something by tone`,
       command: `triage ${plan.code}`,

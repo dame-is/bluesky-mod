@@ -72,6 +72,24 @@ const CODE = /^[0-9a-f]{4,36}$/;
 const bare = (token) => String(token ?? '').replace(/[),.?!:;]+$/, '');
 
 /**
+ * A profile or post link as a client shortens it for display: the path cut
+ * short and "..." added, as in "bsky.app/profile/jo.e...". A whole link never
+ * has "..." after "/profile/", since neither a handle nor a DID holds two dots
+ * in a row.
+ */
+const SHORTENED = /\/profile\/\S*(?:\.\.\.|…)/;
+
+/**
+ * The account one typed word names, or null.
+ *
+ * A shortened link is not read: once bare() strips its dots, what is left of
+ * the handle ("jo.e") can have a handle's shape and would be taken for one.
+ * The link facet holds the whole URL, and the callers read that instead.
+ */
+const typedActor = (token) =>
+  SHORTENED.test(String(token ?? '')) ? null : parseActor(bare(token));
+
+/**
  * The verbs, most specific first.
  *
  * Deliberately small. Each entry is a capability, and the list should read
@@ -158,6 +176,17 @@ export function facetMentions(message) {
     }
   }
   return out;
+}
+
+/**
+ * The one account a message's facets name, or null. Two candidates is the
+ * same ambiguity as two typed handles, and is refused for the same reason.
+ */
+function oneFromFacets(links, mentions) {
+  const named = [
+    ...new Set([...mentions, ...links.map(parseActor).filter(Boolean)]),
+  ];
+  return named.length === 1 ? named[0] : null;
 }
 
 /** A handle, DID, or profile URL, as written by the owner, not as inferred. */
@@ -328,14 +357,18 @@ export function parseCommand(
   // `history` names an account or nothing at all, so it never needs a code.
   if (verb.action === 'history') {
     const tokens = rest.split(/\s+/).filter(Boolean);
-    const actor = tokens.length === 1 ? parseActor(bare(tokens[0])) : null;
+    const actor =
+      tokens.length === 1
+        ? (typedActor(tokens[0]) ?? oneFromFacets(links, mentions))
+        : null;
     return { action: 'history', actor, needsTarget: false, raw };
   }
 
-  // Bare `undo` means the last thing that touched the list. Undo is the one
-  // verb that may default to a target nobody named: every other verb adds
-  // someone to a block list, where guessing is the failure that matters, while
-  // undo only removes people, who can be added again.
+  // Bare `undo` means the most recent addition still on the list, one block or
+  // a whole batch. Undo is the one verb that may default to a target nobody
+  // named: every other verb adds someone to a block list, where guessing is
+  // the failure that matters, while undo only removes people, who can be added
+  // again.
   //
   // A token meant as a code is not defaulted, though. Undoing the most recent
   // plan over a typo would act on a batch the owner did not name.
@@ -352,8 +385,12 @@ export function parseCommand(
     verb.action === 'review' ||
     verb.action === 'triage'
   ) {
-    const tokens = rest.split(/[\s,]+/).map(bare).filter(Boolean);
-    const code = (tokens.shift() || '').toLowerCase();
+    const words = rest
+      .split(/[\s,]+/)
+      .map((typed) => ({ typed, token: bare(typed) }))
+      .filter((w) => w.token);
+    const code = (words.shift()?.token || '').toLowerCase();
+    const tokens = words.map((w) => w.token);
     const valid = CODE.test(code);
     const bands = tokens
       .map((t) => t.toUpperCase())
@@ -366,7 +403,7 @@ export function parseCommand(
     // decided. It is recorded differently from a band approval, because "you
     // were in a category I approved" and "I looked at your account" are
     // different answers to "why am I on your list".
-    const actors = tokens.map(parseActor).filter(Boolean);
+    const actors = words.map((w) => typedActor(w.typed)).filter(Boolean);
     // "approve <code> likers": only the accounts that engaged that way, out of
     // a scan of everyone. Read from each row's recorded engagement.
     const kinds = [
@@ -376,6 +413,28 @@ export function parseCommand(
           .filter((t) => t !== 'everyone' && Object.hasOwn(KINDS, t)),
       ),
     ];
+    // "asof=<time>": only labels given by then. A watch's digest puts it on
+    // the approval its 👍 runs, so the 👍 adds what the digest counted and
+    // not what later checks labelled.
+    const stamps = tokens
+      .map((t) => t.match(/^asof=(.+)$/i)?.[1])
+      .filter(Boolean)
+      .map(Date.parse);
+    const asOf =
+      stamps.length === 1 && Number.isFinite(stamps[0])
+        ? new Date(stamps[0]).toISOString()
+        : null;
+    const refusal =
+      verb.action === 'approve' && valid
+        ? approvalRefusal(code, {
+            words,
+            bands,
+            labels,
+            actors,
+            kinds,
+            asOf,
+          })
+        : null;
     return {
       action: verb.action,
       code: valid ? code : null,
@@ -385,7 +444,11 @@ export function parseCommand(
       bands: bands.filter((b) => b !== 'PROTECTED'),
       labels,
       actors,
-      needsTarget: !valid,
+      asOf,
+      // Said back instead of acting. Set with needsTarget, so a caller that
+      // only checks needsTarget still adds nobody.
+      refusal,
+      needsTarget: !valid || Boolean(refusal),
       raw,
     };
   }
@@ -393,18 +456,11 @@ export function parseCommand(
   // Exactly one token after the verb. A command naming two accounts is
   // ambiguous, and the safe reading of an ambiguous block is to refuse it.
   const tokens = rest.split(/\s+/).filter(Boolean);
-  let actor = tokens.length === 1 ? parseActor(bare(tokens[0])) : null;
+  let actor = tokens.length === 1 ? typedActor(tokens[0]) : null;
 
   // The token came out of the display text, so a pasted profile link arrives
-  // truncated and unresolvable. The facets carry the real thing. Used only when
-  // they name exactly one account: two candidates is the same ambiguity as two
-  // typed handles, and is refused for the same reason.
-  if (!actor) {
-    const fromFacets = [
-      ...new Set([...mentions, ...links.map(parseActor).filter(Boolean)]),
-    ];
-    if (fromFacets.length === 1) actor = fromFacets[0];
-  }
+  // truncated and unresolvable. The facets carry the real thing.
+  if (!actor) actor = oneFromFacets(links, mentions);
 
   // An attached post names its author. The owner put the record in this
   // message and code reads the author out of its URI, so it has the same
@@ -444,6 +500,58 @@ export function parseCommand(
     needsTarget: !actor,
     raw,
   };
+}
+
+/** Words an approval can carry that change nothing about who it adds. */
+const APPROVE_FILLER = new Set([
+  'and',
+  'the',
+  'only',
+  'ones',
+  'accounts',
+  'please',
+  '&',
+  '+',
+]);
+
+/**
+ * Why an approval cannot be read one way, said back to the sender, or null.
+ *
+ * An approval names accounts or a group. A group is bands and engagement
+ * kinds ("UNKNOWN likers"), or one tone label, which may be narrowed to bands
+ * ("hostile UNKNOWN" is the hostile ones in UNKNOWN). Anything else is refused
+ * rather than half read: a word with no place may be an exception ("hostile
+ * except @friend"), and dropping it adds the opposite of what was asked.
+ */
+function approvalRefusal(code, { words, bands, labels, actors, kinds, asOf }) {
+  const unplaced = words.find(({ typed, token }) => {
+    const lower = token.toLowerCase();
+    return !(
+      BANDS.includes(token.toUpperCase()) ||
+      parseLabel(token) ||
+      Object.hasOwn(KINDS, lower) ||
+      typedActor(typed) ||
+      (asOf && /^asof=/i.test(token)) ||
+      APPROVE_FILLER.has(lower)
+    );
+  });
+  const group = bands.length || labels.length || kinds.length || asOf;
+  const why = unplaced
+    ? `I do not know what "${unplaced.typed.slice(0, 40)}" means in an approval`
+    : actors.length && group
+      ? 'That names accounts and a group together'
+      : labels.length > 1
+        ? 'That names more than one tone label'
+        : labels.length && kinds.length
+          ? 'A tone label does not combine with likers, reposters, repliers or quoters'
+          : asOf && !labels.length
+            ? '"asof=" goes only with a tone label'
+            : null;
+  if (!why) return null;
+  return (
+    `${why}, so I have not added anyone. Send one kind at a time: ` +
+    `"approve ${code} @handle @handle", "approve ${code} UNKNOWN" or "approve ${code} hostile".`
+  );
 }
 
 /**
@@ -766,9 +874,12 @@ export function labelFor(cmd) {
         return `Approve ${names} in ${cmd.code}`;
       }
       // The same precedence as the approval itself: named accounts, then a
-      // triage label, then bands and engagement kinds.
+      // triage label (with the bands it is narrowed to), then bands and
+      // engagement kinds.
       const what = cmd.labels?.length
-        ? `the ${cmd.labels[0]} ones`
+        ? cmd.bands?.length
+          ? `the ${cmd.bands.join(', ')} ones read as ${cmd.labels[0]}`
+          : `the ${cmd.labels[0]} ones`
         : [cmd.bands?.join(', '), cmd.kinds?.join(', ')]
             .filter(Boolean)
             .join(' ');
@@ -935,7 +1046,7 @@ export function parseLookup(text, { links = [], mentions = [] } = {}) {
   const actors = [];
   const rest = [];
   for (const token of tokens) {
-    const actor = parseActor(bare(token));
+    const actor = typedActor(token);
     if (actor) actors.push(actor);
     // A truncated link is skipped so the facets can say what it was, instead
     // of the client's display choice refusing the lookup.
@@ -1051,7 +1162,7 @@ export function parseQuick(
       action = QUICK_VERBS.get(word);
       continue;
     }
-    const actor = parseActor(bare(token));
+    const actor = typedActor(token);
     if (actor) {
       typed.push(actor);
       continue;
@@ -1081,8 +1192,16 @@ const YES =
 const NO =
   /^(n|no|nope|nah|cancel|stop|don['’]?t|do not|never ?mind|nvm|leave it|skip|skip it|no thanks|👎|❌)[\s.!]*$/iu;
 
-export const isYes = (text) => YES.test(String(text ?? '').trim());
-export const isNo = (text) => NO.test(String(text ?? '').trim());
+/**
+ * Text or a reaction without skin tones or the emoji presentation selector,
+ * so 👍🏽 and 👍️ read as 👍. A keyboard set to a skin tone sends one with
+ * every thumb.
+ */
+export const bareEmoji = (text) =>
+  String(text ?? '').replace(/[\u{1F3FB}-\u{1F3FF}\u{FE0F}]/gu, '');
+
+export const isYes = (text) => YES.test(bareEmoji(text).trim());
+export const isNo = (text) => NO.test(bareEmoji(text).trim());
 
 /**
  * The words a post card answers to, as typed: "likers", "author and likers",
@@ -1139,8 +1258,11 @@ export function parseMemoryCommand(text) {
     return { action: 'recall' };
   }
   const remember = raw.match(/^remember\b[\s:,-]*(?:that\s+)?([\s\S]+)$/i);
-  // "remember when we blocked them?" is a question for the agent, not a note.
-  if (remember && remember[1].trim().length >= 3 && !/\?\s*$/.test(raw)) {
+  // "remember when we blocked them?" and "remember the post I sent? add the
+  // quoters" are for the agent, not notes. "remember:" with a colon is a note
+  // whatever it holds.
+  const asked = /\?/.test(raw) && !/^remember\s*:/i.test(raw);
+  if (remember && remember[1].trim().length >= 3 && !asked) {
     return { action: 'remember', text: remember[1].trim().slice(0, 500) };
   }
   const forget = raw.match(/^forget\b[\s:,-]*(?:that\s+|about\s+)?([\s\S]*)$/i);
@@ -1149,10 +1271,37 @@ export function parseMemoryCommand(text) {
     if (/^\d{1,3}$/.test(rest)) {
       return { action: 'forget', index: Number(rest), text: null };
     }
-    if (rest.length >= 3) return { action: 'forget', index: null, text: rest };
+    // "forget that" and "forget about it" mean never mind. Read as a search,
+    // "that" matches any note with the word in it.
+    const pointsBack = rest
+      .toLowerCase()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z]/g, ''))
+      .every((w) => !w || FORGET_POINTER.has(w));
+    if (rest.length >= 3 && !pointsBack) {
+      return { action: 'forget', index: null, text: rest };
+    }
   }
   return null;
 }
+
+/** Words that point back at the conversation rather than at a note. */
+const FORGET_POINTER = new Set([
+  'that',
+  'this',
+  'it',
+  'them',
+  'those',
+  'these',
+  'one',
+  'ones',
+  'all',
+  'of',
+  'about',
+  'the',
+  'last',
+  'everything',
+]);
 
 /**
  * watch this / stop watching / what are you watching.

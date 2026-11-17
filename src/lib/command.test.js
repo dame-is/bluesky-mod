@@ -9,6 +9,8 @@ import {
   facetMentions,
   offersFrom,
   parsePostScan,
+  parseQuick,
+  parseLookup,
   pulseCommand,
   pulseFromArgs,
   followUpsFor,
@@ -244,6 +246,83 @@ describe('reviewing and approving by name', () => {
   });
 });
 
+describe('an approval that reads one way or not at all', () => {
+  // A word the parser cannot place may be an exception. Dropping it adds the
+  // opposite of what was asked: "hostile except @friend" would add only
+  // @friend.
+  const refused = (text) => {
+    const out = parseCommand(text);
+    expect(out.action).toBe('approve');
+    expect(out.needsTarget).toBe(true);
+    expect(out.refusal).toMatch(/I have not added anyone/);
+    return out;
+  };
+
+  it('refuses a word it cannot place', () => {
+    expect(
+      refused('approve 1c2d3e4f hostile except @friend.bsky.social').refusal,
+    ).toContain('"except"');
+    refused('approve 1c2d3e4f UNKNOWN, but not @friend.bsky.social');
+    refused('approve 1c2d3e4f UNKNOWN not hostile');
+    refused('approve 1c2d3e4f everyone,ALL');
+  });
+
+  it('refuses named accounts mixed with a group', () => {
+    refused('approve 3f9a2c1b UNKNOWN @a.bsky.social');
+    refused('approve 3f9a2c1b hostile @a.bsky.social');
+    refused('approve 3f9a2c1b likers @a.bsky.social');
+  });
+
+  it('refuses a tone label it would have to drop half of', () => {
+    refused('approve 1c2d3e4f hostile arguing');
+    refused('approve 1c2d3e4f hostile likers');
+    refused('approve 1c2d3e4f UNKNOWN asof=2026-11-01T10:00:00.000Z');
+    refused('approve 1c2d3e4f hostile asof=yesterday');
+  });
+
+  it('carries a label narrowed to bands, and the time a digest counted to', () => {
+    const out = parseCommand(
+      'approve 1c2d3e4f hostile CONNECTED,NOTABLE asof=2026-11-01T10:00:00.000Z',
+    );
+    expect(out).toMatchObject({
+      code: '1c2d3e4f',
+      labels: ['hostile'],
+      bands: ['CONNECTED', 'NOTABLE'],
+      asOf: '2026-11-01T10:00:00.000Z',
+      needsTarget: false,
+    });
+    expect(out.refusal).toBe(null);
+    expect(labelFor(parseCommand('approve 1c2d3e4f hostile UNKNOWN'))).toBe(
+      'Approve the UNKNOWN ones read as hostile in 1c2d3e4f',
+    );
+  });
+
+  it('still takes every form a menu or a person sends', () => {
+    for (const text of [
+      'approve 3f9a2c1b unknown, notable',
+      'approve 3f9a2c1b UNKNOWN and NOTABLE',
+      'approve 3f9a2c1b UNKNOWN,PROTECTED',
+      'approve 3f9a2c1b UNKNOWN,likers',
+      'approve 3f9a2c1b UNKNOWN only please',
+      'approve 3f9a2c1b @a.bsky.social @b.bsky.social',
+      'approve 3f9a2c1b the hostile ones',
+      'approve 3f9a2c1b toxic',
+      'approve 3f9a2c1b hostile asof=2026-11-01T10:00:00.000Z',
+    ]) {
+      const out = parseCommand(text);
+      expect(out.needsTarget).toBe(false);
+      expect(out.refusal).toBe(null);
+    }
+  });
+
+  it('leaves review, cancel and triage as they were', () => {
+    expect(parseCommand('review 3f9a2c1b hostile please').needsTarget).toBe(
+      false,
+    );
+    expect(parseCommand('cancel 3f9a2c1b, not now').needsTarget).toBe(false);
+  });
+});
+
 describe('truncated links', () => {
   // A client truncates the visible text of a pasted URL and keeps the whole
   // thing in a facet. Reading the text finds "bsky.app/profile/stra...", which
@@ -294,6 +373,36 @@ describe('truncated links', () => {
       mentions: ['did:plc:somethingelse'],
     });
     expect(out.actor).toBe('typed.example');
+  });
+
+  it('does not read what is left of a shortened link as a handle', () => {
+    // A client keeps only the start of the path, here "/profile/" and four
+    // characters of the handle. "jo.e" has the shape of a handle, but the
+    // account is the one in the link facet.
+    const links = ['https://bsky.app/profile/jo.example.com/post/3lxyz'];
+    for (const shown of [
+      'bsky.app/profile/jo.e...',
+      'bsky.app/profile/jo.e…',
+    ]) {
+      expect(parseCommand(`block ${shown}`, { links }).actor).toBe(
+        'jo.example.com',
+      );
+      expect(parseQuick(`block ${shown}`, { links }).actor).toBe(
+        'jo.example.com',
+      );
+      expect(parseLookup(shown, { links })).toBe('jo.example.com');
+      expect(parseCommand(`history ${shown}`, { links }).actor).toBe(
+        'jo.example.com',
+      );
+      expect(parseCommand(`approve 1c2d3e4f ${shown}`).needsTarget).toBe(true);
+    }
+    // A whole link typed without a facet is still read.
+    expect(
+      parseCommand('block https://bsky.app/profile/jo.example.com').actor,
+    ).toBe('jo.example.com');
+    expect(parseCommand('block @jo.example.com...').actor).toBe(
+      'jo.example.com',
+    );
   });
 
   it('finds a post link in a facet for a bulk plan', () => {

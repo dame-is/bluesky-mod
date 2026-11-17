@@ -4,6 +4,7 @@ import {
   parseQuick,
   isYes,
   isNo,
+  bareEmoji,
   parseCardWords,
   parseMemoryCommand,
   parseWatchCommand,
@@ -97,6 +98,18 @@ describe('answers to a question', () => {
     expect(isYes('yes but not @x')).toBe(false);
     expect(isYes('what does that mean')).toBe(false);
   });
+
+  it('reads a thumb in any skin tone, or with the emoji selector', () => {
+    // A keyboard set to a skin tone sends one on every thumbs-up.
+    for (const t of ['👍🏽', '👍🏻', '👍\u{FE0F}', '👌🏿', '✅\u{FE0F}']) {
+      expect(isYes(t)).toBe(true);
+    }
+    for (const t of ['👎🏾', '👎\u{FE0F}']) expect(isNo(t)).toBe(true);
+    expect(isNo('👍🏽')).toBe(false);
+    expect(bareEmoji('👍🏽')).toBe('👍');
+    expect(bareEmoji('👎\u{FE0F}')).toBe('👎');
+    expect(bareEmoji(undefined)).toBe('');
+  });
 });
 
 describe("a card's words", () => {
@@ -148,6 +161,40 @@ describe('memory commands', () => {
       action: 'recall',
     });
     expect(parseMemoryCommand('remembering is hard')).toBe(null);
+  });
+
+  it('does not read "forget that" as a note to drop', () => {
+    // It means "never mind". Read as a search, "that" would match a note such
+    // as "never block accounts that only liked" and remove it.
+    for (const t of [
+      'forget that',
+      'forget this.',
+      'forget it!',
+      'forget about it',
+      'forget that one',
+      'forget all of it',
+      'forget everything',
+    ]) {
+      expect(parseMemoryCommand(t)).toBe(null);
+    }
+    expect(parseMemoryCommand('forget that likers note')).toEqual({
+      action: 'forget',
+      index: null,
+      text: 'likers note',
+    });
+  });
+
+  it('leaves a question with an instruction after it to the agent', () => {
+    expect(
+      parseMemoryCommand('remember the post I sent earlier? add the quoters'),
+    ).toBe(null);
+    // With a colon it is plainly a note, question mark or not.
+    expect(
+      parseMemoryCommand('remember: ignore anyone who only replies "why?"'),
+    ).toEqual({
+      action: 'remember',
+      text: 'ignore anyone who only replies "why?"',
+    });
   });
 });
 

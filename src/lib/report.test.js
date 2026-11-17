@@ -205,6 +205,23 @@ describe('planActions', () => {
     const out = planActions({ ...plan, author: null });
     expect(out.map((o) => o.command)).toEqual(['cancel afe16c3f']);
   });
+
+  it('offers no reading when there is no model to read with', () => {
+    // Pressing it would only get "I only understand commands" back.
+    const withText = { ...plan, total: 3, withText: 3, byBand: { UNKNOWN: 3 } };
+    expect(planActions(withText).map((o) => o.command.split(' ')[0])).toContain(
+      'triage',
+    );
+    const out = planActions(withText, { hasModel: false });
+    expect(out.map((o) => o.command)).toEqual([
+      'list add @author.test',
+      'approve afe16c3f UNKNOWN',
+      'cancel afe16c3f',
+    ]);
+    expect(
+      actionsFor(account, { hasModel: false }).map((o) => o.command),
+    ).toEqual(['list add @stranger.test', 'list remove @stranger.test']);
+  });
 });
 
 describe('the default template', () => {
@@ -335,5 +352,15 @@ describe('helpText', () => {
     }
     expect(text).toContain('history @handle');
     expect(text).toContain('block @handle');
+  });
+
+  it('says undo takes back the last add, whatever its size', () => {
+    // Bare undo picks the most recent addition still on the list, which after
+    // a "block @x" is that one account and not the batch before it.
+    const line = helpText()
+      .split('\n')
+      .find((l) => /^\s+undo\s/.test(l));
+    expect(line).toMatch(/last add/);
+    expect(line).not.toMatch(/last batch/);
   });
 });
