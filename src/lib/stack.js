@@ -5,6 +5,7 @@
 
 /** 6816 -> "6.8k", 1234567 -> "1.2m"; under 1,000 exact. */
 export function compact(n) {
+  if (n === null || n === undefined || n === '') return '-';
   const v = Number(n);
   if (!Number.isFinite(v)) return '-';
   const abs = Math.abs(v);
