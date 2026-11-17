@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const protectedRows = new Map();
+// Protected rows added by hand (source 'manual'). Every other row is one a
+// snapshot derived.
+const manual = new Set();
+// The snapshot's circle rows. A snapshot writes them once it has filled the
+// protected set.
+const circle = [];
 const veto = { unreadable: false };
 const decisions = [];
 // Plan ids the log was asked to write, and how many of those writes fail, as
@@ -8,10 +14,16 @@ const decisions = [];
 const plans = { ids: [], failing: 0 };
 vi.mock('./db.js', () => ({
   select: vi.fn(async (table, { eq = {}, where = {}, limit } = {}) => {
+    if (table === 'circle') return limit ? circle.slice(0, limit) : circle;
     if (table !== 'protected') return [];
     if (veto.unreadable) throw new Error('no such table: protected');
-    let rows = [...protectedRows].map(([did, reason]) => ({ did, reason }));
+    let rows = [...protectedRows].map(([did, reason]) => ({
+      did,
+      reason,
+      source: manual.has(did) ? 'manual' : 'derived',
+    }));
     if (eq.did) rows = rows.filter((r) => r.did === eq.did);
+    if (eq.source) rows = rows.filter((r) => r.source === eq.source);
     if (where.did) rows = rows.filter((r) => where.did.in.includes(r.did));
     return limit ? rows.slice(0, limit) : rows;
   }),
@@ -106,6 +118,8 @@ function agent() {
 
 beforeEach(() => {
   protectedRows.clear();
+  manual.clear();
+  circle.length = 0;
   // A snapshot has run, so the protected set holds the owner's follows.
   protectedRows.set('did:plc:oldfollow', 'you follow them');
   veto.unreadable = false;
@@ -214,6 +228,21 @@ describe('one block', () => {
     expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
   });
 
+  it('adds nobody when the only protected rows were added by hand before any snapshot', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    protectedRows.clear();
+    protectedRows.set('did:plc:sister', 'added by hand');
+    manual.add('did:plc:sister');
+    const a = agent();
+    await expect(applyCommand(a, 'list_add', 'x.test')).rejects.toThrow(
+      /not built yet/,
+    );
+    await expect(protectedAmong(['did:plc:curated'])).rejects.toThrow(
+      /not built yet/,
+    );
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
   it("refuses the owner's own account and the bot's", async () => {
     graph.rkeysForWrite.mockResolvedValue([]);
     const a = agent();
@@ -298,6 +327,18 @@ describe('the protected set for a bulk write', () => {
     expect(
       await protectedAmong(['did:plc:a', 'did:plc:friend', 'did:plc:a']),
     ).toEqual(new Set(['did:plc:friend']));
+  });
+
+  it('counts a snapshot that ran as building the set, though every row in it was added by hand', async () => {
+    // Every account the owner follows is also a row added by hand, which a
+    // snapshot leaves as it is.
+    protectedRows.clear();
+    protectedRows.set('did:plc:friend', 'you follow them');
+    manual.add('did:plc:friend');
+    circle.push({ did: 'did:plc:friend' });
+    expect(await protectedAmong(['did:plc:a', 'did:plc:friend'])).toEqual(
+      new Set(['did:plc:friend']),
+    );
   });
 
   it('throws when the table cannot be read', async () => {

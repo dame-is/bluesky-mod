@@ -43,20 +43,38 @@ const VETO_UNREADABLE =
   'could not read the protected set, so the write is refused rather than risked';
 const FOLLOWS_UNREADABLE =
   'could not check who you follow, so the write is refused rather than risked';
-// Every snapshot puts the owner's follows in the table, so an empty table
-// means none has run yet, not that nobody is protected.
+// Every snapshot puts the owner's follows in the table, so a set no snapshot
+// has filled means none has run yet, not that nobody is protected. Rows added
+// by hand do not count: they can be there before the first snapshot.
 const VETO_EMPTY =
   'the protected set is not built yet, so nothing is added until it is. It builds by itself a few minutes after the bot starts';
 
 /** `getRelationships` takes at most 30 `others` per call. */
 const REL_BATCH = 30;
 
+/**
+ * Has a snapshot filled the protected set? Either it left a derived row, or
+ * it wrote the circle, which it does only once the set is in. The circle
+ * covers an owner whose every follow is also a row added by hand, which a
+ * snapshot leaves as it is.
+ */
+async function snapshotFilled() {
+  const derived = await select('protected', {
+    select: 'did',
+    eq: { source: 'derived' },
+    limit: 1,
+  });
+  if (derived?.length) return true;
+  const circle = await select('circle', { select: 'did', limit: 1 });
+  return Boolean(circle?.length);
+}
+
 /** did -> reason, for those of these DIDs in the `protected` table. */
 async function fromTable(dids) {
   const out = new Map();
-  let any;
+  let filled;
   try {
-    any = await select('protected', { select: 'did', limit: 1 });
+    filled = await snapshotFilled();
     for (let i = 0; i < dids.length; i += 50) {
       const rows = await select('protected', {
         select: 'did,reason',
@@ -67,7 +85,7 @@ async function fromTable(dids) {
   } catch {
     throw new Error(VETO_UNREADABLE);
   }
-  if (!any?.length) throw new Error(VETO_EMPTY);
+  if (!filled) throw new Error(VETO_EMPTY);
   return out;
 }
 

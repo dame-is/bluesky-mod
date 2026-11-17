@@ -75,12 +75,16 @@ async function seed() {
     }
   }
   await db.upsert('decision', rows);
-  // PROTECTED is read from this table at the write, and an empty table
-  // refuses every add.
+  // PROTECTED is read from this table at the write, and a table no snapshot
+  // has filled refuses every add.
   await db.upsert('protected', [
     ...rows
       .filter((r) => r.band === 'PROTECTED')
-      .map((r) => ({ did: r.did, reason: 'you follow them' })),
+      .map((r) => ({
+        did: r.did,
+        reason: 'you follow them',
+        source: 'derived',
+      })),
   ]);
 }
 
