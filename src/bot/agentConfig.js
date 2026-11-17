@@ -26,7 +26,7 @@
 //     "postReport": "The post scan template.",
 //     "model": "a model id, overriding MOD_AGENT_MODEL",
 //     "limits": { "maxTurns": 12, "maxSteps": 12, "historyHours": 4, "reviewRows": 40 },
-//     "barePost": "card"
+//     "barePost": "card"   (or "author"; agent mode only)
 //   }
 
 import fs from 'node:fs';

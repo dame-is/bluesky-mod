@@ -9,7 +9,9 @@
 //     is the security boundary, not the prompt.
 //  2. In classic mode the analyst has no write tools. It looks and explains,
 //     and acting goes through a typed command or a numbered menu, so a fully
-//     prompt-injected turn costs a wrong paragraph.
+//     prompt-injected turn cannot change the list. It can still write a wrong
+//     paragraph, and its lookups can still carry what the turn holds to a
+//     host the post names (see src/lib/agent.js).
 //
 // Agent mode (MOD_DM_MODE=agent) relaxes rule 2 on purpose: the model gets the
 // write tools and is talked to in sentences. Rule 1 still decides who is

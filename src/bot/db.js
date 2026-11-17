@@ -368,8 +368,10 @@ const FUNCTIONS = {
   /**
    * Turn a collected snapshot's raw edges into vouch counts.
    *
-   * Refuses while any circle member is unread, so a vouch table is always a
-   * complete count of its snapshot and never a partial one that looks done.
+   * Refuses while any circle member is still pending, so every member has
+   * been read or written off first. A member written off (counted in
+   * circle.unreadable) contributes no edges, so its vouches are missing from
+   * the count.
    */
   finalise_snapshot({ snapshot }) {
     const conn = openDb();

@@ -109,7 +109,9 @@ create table if not exists audit_item (
 );
 create index if not exists audit_item_band_idx on audit_item (audit_id, band);
 
--- The drift DM, so a week's brief is sent once.
+-- The drift DM. `id` is the audit it reports on and `for_date` the moment of
+-- the run. `sent_at` is set once every part has gone; until then each check
+-- sends it again.
 create table if not exists brief (
   id text primary key,
   for_date text not null,
