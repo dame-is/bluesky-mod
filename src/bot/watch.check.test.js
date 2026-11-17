@@ -81,6 +81,7 @@ vi.mock('./bulkPlan.js', async (importOriginal) => ({
 
 const { checkWatch, digestFor, startWatch } = await import('./watch.js');
 const { harvestPost } = await import('../lib/harvest.js');
+const { applyPlanToTriage } = await import('./bulkPlan.js');
 
 const PLAN_ID = '1c2d3e4f-0000-4000-8000-000000000000';
 const POST = 'at://did:plc:owner/app.bsky.feed.post/3abc';
@@ -221,6 +222,38 @@ describe('a watch reads what arrives while it runs', () => {
     const out = await checkWatch(w, deps());
     expect(out).toMatchObject({ fresh: 0, hostile: 1 });
     expect(w.stats.unread).toEqual([]);
+  });
+
+  it('keeps what a check found when its add fails', async () => {
+    harvest.participants = [person('eve', 'one'), person('fay', 'two')];
+    const w = watchRow('auto');
+    let fayFails = true;
+    const generate = vi.fn(async (opts) => {
+      if (fayFails && opts.messages[0].content.includes('two')) {
+        throw new Error('429');
+      }
+      return allHostile(opts);
+    });
+    applyPlanToTriage.mockRejectedValueOnce(new Error('FOLLOWS_UNREADABLE'));
+    const log = vi.fn();
+
+    const first = await checkWatch(w, { ...deps(), generate, log });
+    expect(first).toMatchObject({ fresh: 2, hostile: 1, added: 0 });
+    expect(w.stats).toMatchObject({
+      unread: ['did:plc:fay'],
+      newTotal: 2,
+      newSinceDigest: 2,
+      hostileSinceDigest: 1,
+    });
+    expect(log).toHaveBeenCalledWith(
+      'Watch add failed',
+      expect.objectContaining({ err: 'FOLLOWS_UNREADABLE' }),
+    );
+
+    fayFails = false;
+    const second = await checkWatch(w, { ...deps(), generate });
+    expect(second).toMatchObject({ fresh: 0, hostile: 1, added: 2 });
+    expect(w.stats).toMatchObject({ unread: [], newTotal: 2, addedTotal: 2 });
   });
 });
 

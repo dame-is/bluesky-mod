@@ -241,11 +241,20 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
   const hostileNow = await countDecisions(plan, { label: 'hostile' });
   const hostile = Math.max(0, hostileNow - hostileBefore);
 
+  // A failed add is logged and the check goes on, so what it found is still
+  // counted. The rows stay hostile and not acted on, and the next check
+  // tries them again.
   let added = 0;
   if (watch.mode === 'auto' && hostileNow && writeAgent) {
     const out = await applyPlanToTriage(writeAgent, plan, 'hostile', {
       by: 'watch',
       skipBands: HELD_BANDS,
+    }).catch((err) => {
+      log('Watch add failed', {
+        uri: watch.uri,
+        err: String(err?.message || err),
+      });
+      return { added: 0 };
     });
     added = out.added || 0;
   }
