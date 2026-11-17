@@ -742,6 +742,7 @@ export function buildActionTools(ctx, deps = DEPS) {
       source,
       fromOwner: source === 'attached' || source === 'said' || inOwnerText,
       label,
+      did,
       inPlan,
     };
   };
@@ -1101,8 +1102,10 @@ export function buildActionTools(ctx, deps = DEPS) {
           }),
           {
             pointedAt: infos.every((i) => i.fromOwner),
+            // By DID, so a 👍 up to 30 minutes later writes the account that
+            // was described, not whoever holds the handle by then.
             commands: actors.map(
-              (a) => `list ${adding ? 'add' : 'remove'} ${a}`,
+              (a, n) => `list ${adding ? 'add' : 'remove'} ${infos[n].did || a}`,
             ),
             describe: adding
               ? `add ${someNames(infos.map((i) => i.label))} to the list`

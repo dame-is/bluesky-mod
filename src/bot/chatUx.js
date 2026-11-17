@@ -280,11 +280,16 @@ export function cardChoices(plan) {
   const e = plan.fresh
     ? { ...plan.engagements, like: plan.fresh.likers }
     : plan.engagements || {};
+  // Written by DID: the card is answered up to 30 minutes later, and a handle
+  // resolved then can belong to someone else. The handle names them only
+  // while it verifies.
   if (a && !a.protectedReason && !a.alreadyListed) {
+    const name =
+      a.handle && a.handle !== 'handle.invalid' ? `@${a.handle}` : a.did;
     out.push({
       key: 'author',
-      label: `Add the author @${a.handle || a.did}`,
-      command: `list add @${a.handle || a.did}`,
+      label: `Add the author ${name}`,
+      command: `list add ${a.did}`,
     });
   }
   if (e.like) {

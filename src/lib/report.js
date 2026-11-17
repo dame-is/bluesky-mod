@@ -166,13 +166,20 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
 }
 
 /**
- * How a menu command names an account. A missing handle, or one that does not
- * verify ("handle.invalid"), cannot be resolved, so those use the DID, which
- * the command parser takes bare and not after an @.
+ * How a menu names an account. A missing handle, or one that does not verify
+ * ("handle.invalid"), cannot be resolved, so those use the DID, which the
+ * command parser takes bare and not after an @.
  */
 function actorRef(a) {
   return a.handle && a.handle !== 'handle.invalid' ? `@${a.handle}` : a.did;
 }
+
+/**
+ * How a write in a menu names an account: by DID. A menu is pressed up to 30
+ * minutes after it is shown, and a handle resolved then can point at someone
+ * else by that time.
+ */
+const writeRef = (a) => a.did || actorRef(a);
 
 /**
  * What the owner can do about this account, as parseable commands.
@@ -183,13 +190,14 @@ function actorRef(a) {
  */
 export function actionsFor(account, { hasModel = true } = {}) {
   const at = actorRef(account);
+  const did = writeRef(account);
   const out = [];
   if (!account.protectedReason) {
-    out.push({ label: `Add ${at} to the list`, command: `list add ${at}` });
+    out.push({ label: `Add ${at} to the list`, command: `list add ${did}` });
   }
   out.push({
     label: `Remove ${at} from the list`,
-    command: `list remove ${at}`,
+    command: `list remove ${did}`,
   });
   // A way to learn something before acting. The band answers "who would notice
   // if I blocked them" and says nothing about conduct, which is usually the
@@ -296,7 +304,7 @@ export function planActions(plan, { hasModel = true } = {}) {
   if (at && !author.protectedReason) {
     out.push({
       label: `Add the author ${at} to the list`,
-      command: `list add ${at}`,
+      command: `list add ${writeRef(author)}`,
     });
   }
   if (at && hasModel) {

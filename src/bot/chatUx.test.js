@@ -95,6 +95,22 @@ describe('the post card', () => {
     expect(renderCard(PLAN, { choices: [] })).not.toContain('Reply with');
   });
 
+  it("writes the author by DID, and names them by handle while it verifies", () => {
+    // A card is answered up to 30 minutes later, and a handle resolved then
+    // can belong to someone else.
+    expect(cardChoices(PLAN).find((o) => o.key === 'author')).toMatchObject({
+      label: 'Add the author @poster.example.social',
+      command: 'list add did:plc:author',
+    });
+    for (const handle of [null, 'handle.invalid']) {
+      const p = { ...PLAN, author: { ...PLAN.author, handle } };
+      expect(cardChoices(p).find((o) => o.key === 'author')).toMatchObject({
+        label: 'Add the author did:plc:author',
+        command: 'list add did:plc:author',
+      });
+    }
+  });
+
   it('never offers to add a PROTECTED author', () => {
     const p = {
       ...PLAN,

@@ -133,9 +133,20 @@ describe('actionsFor', () => {
   it('offers add, remove, and a way to look before acting', () => {
     const out = actionsFor(account);
     expect(out.map((o) => o.command)).toEqual([
-      'list add @stranger.test',
-      'list remove @stranger.test',
+      'list add did:plc:abc',
+      'list remove did:plc:abc',
       'read @stranger.test',
+    ]);
+  });
+
+  it('writes by DID and names the account by handle', () => {
+    // A menu is pressed up to 30 minutes later, and a handle resolved then
+    // can belong to someone else.
+    const out = actionsFor(account);
+    expect(out.map((o) => o.label)).toEqual([
+      'Add @stranger.test to the list',
+      'Remove @stranger.test from the list',
+      "Read @stranger.test's recent posts first",
     ]);
   });
 
@@ -156,7 +167,7 @@ describe('actionsFor', () => {
     // worse than no button. Reading them is still fine: it changes nothing.
     const out = actionsFor({ ...account, protectedReason: 'list:Friends' });
     expect(out.map((o) => o.command)).toEqual([
-      'list remove @stranger.test',
+      'list remove did:plc:abc',
       'read @stranger.test',
     ]);
   });
@@ -176,10 +187,11 @@ describe('planActions', () => {
     // account that wrote it.
     const out = planActions(plan);
     expect(out.map((o) => o.command)).toEqual([
-      'list add @author.test',
+      'list add did:plc:xyz',
       'read @author.test',
       'cancel afe16c3f',
     ]);
+    expect(out[0].label).toBe('Add the author @author.test to the list');
   });
 
   it('will not offer to add a PROTECTED author', () => {
@@ -187,7 +199,7 @@ describe('planActions', () => {
       ...plan,
       author: { ...plan.author, band: 'PROTECTED', protectedReason: 'follows' },
     });
-    expect(out.map((o) => o.command)).not.toContain('list add @author.test');
+    expect(out.map((o) => o.command)).not.toContain('list add did:plc:xyz');
     expect(out.map((o) => o.command)).toContain('read @author.test');
   });
 
@@ -197,7 +209,7 @@ describe('planActions', () => {
       total: 48,
       byBand: { UNKNOWN: 43, CONNECTED: 5 },
     });
-    expect(out[0].command).toBe('list add @author.test');
+    expect(out[0].command).toBe('list add did:plc:xyz');
     expect(out.map((o) => o.command)).toContain('approve afe16c3f UNKNOWN');
   });
 
@@ -214,13 +226,13 @@ describe('planActions', () => {
     );
     const out = planActions(withText, { hasModel: false });
     expect(out.map((o) => o.command)).toEqual([
-      'list add @author.test',
+      'list add did:plc:xyz',
       'approve afe16c3f UNKNOWN',
       'cancel afe16c3f',
     ]);
     expect(
       actionsFor(account, { hasModel: false }).map((o) => o.command),
-    ).toEqual(['list add @stranger.test', 'list remove @stranger.test']);
+    ).toEqual(['list add did:plc:abc', 'list remove did:plc:abc']);
   });
 });
 

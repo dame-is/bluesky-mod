@@ -651,9 +651,11 @@ describe('checked writes', () => {
     expect(out.waitingOnOwner).toBe(true);
     expect(deps.applyCommand).not.toHaveBeenCalled();
     // What a thumbs-up runs: the classic command, exactly, and a line written
-    // by code that says what it is.
+    // by code that says what it is. The command names the account by the DID
+    // it resolved to, so a handle that changes hands before the 👍 cannot
+    // redirect it.
     expect(ctx.pending).toEqual([
-      { commands: ['list add @a.test'], describe: 'add @a.test to the list' },
+      { commands: ['list add did:plc:a'], describe: 'add @a.test to the list' },
     ]);
   });
 
@@ -966,7 +968,10 @@ describe('where a target came from', () => {
     );
     expect(out.waitingOnOwner).toBe(true);
     expect(ctx.pending).toEqual([
-      { commands: ['list add @pest.test'], describe: 'add @pest.test to the list' },
+      {
+        commands: ['list add did:plc:pest'],
+        describe: 'add @pest.test to the list',
+      },
     ]);
   });
 

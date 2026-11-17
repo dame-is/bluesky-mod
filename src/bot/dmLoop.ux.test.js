@@ -381,7 +381,10 @@ describe('questions a thumbs-up answers', () => {
     expect(sent[0]).toBe(
       'Want me to block @a.test?\n\n👍 or "yes" to: add @a.test to the list',
     );
-    expect(db.dm_choice[0].pending.commands).toEqual(['list add @a.test']);
+    // Stored by the DID the handle resolved to when the question was asked.
+    expect(db.dm_choice[0].pending.commands).toEqual([
+      'list add did:plc:atest',
+    ]);
     expect(listWrite.applyCommand).not.toHaveBeenCalled();
 
     const generate = vi.fn();
@@ -390,7 +393,7 @@ describe('questions a thumbs-up answers', () => {
     expect(generate).not.toHaveBeenCalled();
     expect(listWrite.applyCommand.mock.calls[0].slice(1, 3)).toEqual([
       'list_add',
-      'a.test',
+      'did:plc:atest',
     ]);
     expect(db.dm_choice[0].pending).toBe(null);
   });
