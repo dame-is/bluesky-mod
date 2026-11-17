@@ -30,6 +30,8 @@ import {
   stopContinuation,
 } from './continuation.js';
 import { generateText } from 'ai';
+import { shieldTurn, runShieldCommand } from './shieldDm.js';
+import { isShieldCommand } from '../lib/shieldCommand.js';
 import { modelsEnabled } from '../models.js';
 
 import { OWNER_DID } from '../constants.js';
@@ -1540,7 +1542,7 @@ async function heldFor(plan, code) {
  */
 async function runPending(
   pending,
-  { writeAgent, getIo, convoId, generate, model, log },
+  { writeAgent, getIo, convoId, generate, model, log, isOwner = false },
 ) {
   const lines = [];
   const asks = [];
@@ -1562,6 +1564,14 @@ async function runPending(
           `${out.extended ? 'Still watching' : 'Watching'} it for ${hours}h${auto ? ', blocking the hostile ones as they come' : ''}. I'll send an update each hour there's something new.`,
         );
         changed = true;
+        continue;
+      }
+      // The shield's questions (shield.js): owner only, as typed ones are.
+      if (isShieldCommand(command)) {
+        const out = await runShieldCommand(command, { isOwner, convoId });
+        lines.push(out.text);
+        failed ||= out.outcome === 'failed';
+        changed ||= out.outcome === 'done';
         continue;
       }
       const hostile = /^hostile\s+([0-9a-f]{8})$/i.exec(command);
@@ -2352,6 +2362,7 @@ export async function runDmPass({
         generate,
         model: activeModel,
         log,
+        isOwner: r.reaction?.sender?.did === roster.owner,
       });
       await sendRun(send, r.convoId, out, { log });
       log('Ran a confirmed change', {
@@ -2477,6 +2488,7 @@ export async function runDmPass({
             generate,
             model: activeModel,
             log,
+            isOwner: entry.message?.sender?.did === roster.owner,
           });
           outcome = pendingOutcome(out);
           await sendRun(send, entry.convoId, out, { log });
@@ -2508,6 +2520,30 @@ export async function runDmPass({
           turns.push({ convoId: entry.convoId, pending: 'none' });
           continue;
         }
+      }
+
+      // The shield (shield.js): replies and quotes on the owner's own posts,
+      // and attack mode. Parsed, never sent to a model, in either mode; a
+      // number answers its menus here too.
+      const shielded = await shieldTurn({
+        text: said,
+        embedUri,
+        links: msgLinks,
+        isOwner: entry.message?.sender?.did === roster.owner,
+        choice: (n) => takeChoice(entry.convoId, n),
+        lastPost: () => lastPost(entry.convoId),
+        convoId: entry.convoId,
+      });
+      if (shielded) {
+        outcome = shielded.outcome;
+        const shown = await send(withMenu(shielded.text, shielded.options), {
+          allow: shielded.links,
+        });
+        if (shown?.length && shielded.options?.length) {
+          await offerChoices(entry.convoId, shielded.options);
+        }
+        turns.push({ convoId: entry.convoId, shield: true });
+        continue;
       }
 
       // Agent mode's lanes that need no model: "block" with one target,

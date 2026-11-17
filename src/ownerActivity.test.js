@@ -127,8 +127,10 @@ describe('coverage', () => {
     const a = createActivity({ now: () => t, coveredFromStart: false, ownerDid: OWNER });
     t = 60 * 60_000;
     expect(a.coversMs()).toBe(0);
+    expect(a.live()).toBe(false);
     expect(a.coveredSince(POST)).toBeNull();
     a.opened([]);
+    expect(a.live()).toBe(true);
     t += 10 * 60_000;
     expect(a.coversMs()).toBe(10 * 60_000);
     expect(a.coveredSince(POST)).toBe(60 * 60_000);

@@ -164,11 +164,23 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
     '  unblock @handle           take them back off',
     '  undo                      take back the last change when it was an add',
   ];
+  // The owner's own posts. Only the owner may run these; the shield says so
+  // to a writer who tries.
+  const shield = [
+    '',
+    'your own posts',
+    '  shield                    what is on, and what I have limited',
+    '  close replies <post>      only people you follow and mention can reply',
+    '  no quotes <post>          turn quote posts off (open / enable undo them)',
+    '  shields up / shields down lock every recent post, then put it all back',
+  ];
   const tail = [
     '',
     'Replies that end in a numbered menu take a number instead of retyping.',
   ];
-  return [...reads, ...(canWrite ? writes : []), ...tail].join('\n');
+  return [...reads, ...(canWrite ? [...writes, ...shield] : []), ...tail].join(
+    '\n',
+  );
 }
 
 /**

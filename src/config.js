@@ -8,6 +8,10 @@ import { OWNER_DID } from './constants.js';
 import { rosterFromEnv, parseDids } from './lib/senders.js';
 import { readFlag, badFlags } from './flags.js';
 import { modelProblems, modelsEnabled, PROVIDER } from './models.js';
+import { readShieldConfig } from './lib/shieldConfig.js';
+
+/** The shield's settings and what is wrong with them (lib/shieldConfig.js). */
+const shieldRead = readShieldConfig(process.env);
 
 /** Number settings that did not parse, reported by assertConfig. */
 const badNumbers = [];
@@ -233,6 +237,17 @@ export const config = {
         ),
 
   /**
+   * The shield (shield.js): closing replies and turning quotes off on the
+   * owner's posts when people outside their circle pile on, and attack mode,
+   * which does that to every recent post at once. Counted from the Spacedust
+   * stream, so it needs MOD_STREAM on. Writing the gates needs
+   * MOD_OWNER_APP_PASSWORD, an app password for the owner's own account;
+   * without it the shield only tells the owner. See lib/shieldConfig.js for
+   * every setting and its default.
+   */
+  shield: shieldRead.shield,
+
+  /**
    * How long a network digest may spend reading author feeds. When it runs
    * out, the digest says how many accounts went unread instead of returning a
    * short answer that looks complete.
@@ -338,6 +353,7 @@ export function assertConfig(env = process.env) {
   if (env.MOD_IDENTIFIER && config.roster.all.includes(env.MOD_IDENTIFIER)) {
     problems.push('the bot account is on its own roster, so it would answer itself');
   }
+  problems.push(...shieldRead.problems);
   problems.push(...badNumbers, ...new Set(badFlags));
   if (problems.length) {
     throw new Error(

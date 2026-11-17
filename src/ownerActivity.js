@@ -195,6 +195,11 @@ export function createActivity({
       return now() - startedAt;
     },
 
+    /** Connected, or back within the tolerance: the window is being kept. */
+    live() {
+      return startedAt !== null && !broken();
+    },
+
     /**
      * Since when interactions with this post have all been seen, or null.
      * The owner's posts are covered as long as the stream is; a watched post

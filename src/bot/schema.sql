@@ -213,3 +213,42 @@ create table if not exists lease (
   holder text not null,
   heartbeat_at text not null
 );
+
+-- The owner's own session, used for the shield's threadgates and postgates and
+-- nothing else (src/ownerAgent.js, src/gates.js). Only there when
+-- MOD_OWNER_APP_PASSWORD is set. It holds a refresh token for the OWNER's
+-- account.
+create table if not exists owner_session (
+  id integer primary key default 1 check (id = 1),
+  session JSON not null,
+  refreshed_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Every threadgate or postgate the shield wrote on one of the owner's posts,
+-- with what was there before, so it can be put back exactly (src/shield.js).
+-- `why` is what put it there: a threshold, attack mode, or the owner's own
+-- command. `restore_after` is when a gate a threshold put on may come off by
+-- itself; null means it stays until someone takes it off.
+create table if not exists shield_gate (
+  id text primary key,
+  post text not null,
+  kind text not null check (kind in ('threadgate', 'postgate')),
+  prior JSON,
+  applied JSON not null,
+  why text not null check (why in ('trigger', 'attack', 'manual')),
+  applied_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  restore_after text,
+  restored_at text,
+  restore_note text
+);
+create index if not exists shield_gate_live on shield_gate (post, kind) where restored_at is null;
+
+-- Attack mode, if it is on, and when each notice last went, so a pile-on is a
+-- message per post rather than one per reply.
+create table if not exists shield_state (
+  id integer primary key default 1 check (id = 1),
+  attack_since text,
+  attack_until text,
+  attack_why text,
+  notices JSON not null default '{}'
+);

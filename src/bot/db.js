@@ -51,7 +51,7 @@ export const ADDED_COLUMNS = [
 ];
 
 /** Tables whose `id` is a UUID filled in here when a row arrives without one. */
-const UUID_ID = new Set(['plan', 'audit', 'brief', 'memory', 'watch']);
+const UUID_ID = new Set(['plan', 'audit', 'brief', 'memory', 'watch', 'shield_gate']);
 
 /** A Postgres connection string, as opposed to a file path. */
 export const isPostgresUrl = (s) => /^postgres(ql)?:\/\//i.test(String(s || ''));
