@@ -163,6 +163,10 @@ async function getList(url, field, { fetchImpl, signal, delays, what }) {
   }
 }
 
+/** The bot's own DID: the repo that holds MOD_LIST_URI. */
+const botDid = (env = process.env) =>
+  /^at:\/\/(did:[^/]+)\//.exec(String(env.MOD_LIST_URI ?? ''))?.[1] ?? null;
+
 /**
  * Build a scorer over a set of precomputed reference data.
  *
@@ -178,10 +182,6 @@ async function getList(url, field, { fetchImpl, signal, delays, what }) {
  * @param {Set<string>} [ref.blockers]            accounts that block you
  * @param {object} [ref.thresholds]
  */
-/** The bot's own DID: the repo that holds MOD_LIST_URI. */
-const botDid = (env = process.env) =>
-  /^at:\/\/(did:[^/]+)\//.exec(String(env.MOD_LIST_URI ?? ''))?.[1] ?? null;
-
 export function createScorer(
   ref,
   {
@@ -331,14 +331,6 @@ export function createScorer(
 }
 
 /**
- * Join a harvest to scores and summarise it, in the shape replies render from.
- *
- * `requiresReview` is everything that is not UNKNOWN: the list a person is
- * expected to read. Keeping it short is the constraint on every threshold
- * above. If it is routinely longer than a screen the thresholds are wrong,
- * because a review nobody reads is not a review.
- */
-/**
  * A harvest without these accounts, its totals counted again without them.
  *
  * The owner, the bot and the post's author can all show up among a post's
@@ -366,6 +358,14 @@ export function withoutSelves(harvest, dids) {
   };
 }
 
+/**
+ * Join a harvest to scores and summarise it, in the shape replies render from.
+ *
+ * `requiresReview` is everything that is not UNKNOWN: the list a person is
+ * expected to read. Keeping it short is the constraint on every threshold
+ * above. If it is routinely longer than a screen the thresholds are wrong,
+ * because a review nobody reads is not a review.
+ */
 export function summarise(harvest, scores, { excludeSelf = null } = {}) {
   const rows = harvest.participants
     .filter((p) => p.did !== excludeSelf)

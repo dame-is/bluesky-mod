@@ -293,9 +293,21 @@ async function answerPublicly(t) {
   }
   await recordUsage(reply.usage);
 
-  // A turn with no text (it ended on a tool call at the step cap, or the
-  // provider sent nothing back) posts nothing. A placeholder under someone
-  // else's post is public and stays there.
+  // A turn the step cap cut short may be missing what its last tool calls
+  // found, so its narration is not posted: a reply under someone else's post
+  // is public and stays there. The mention stays marked answered, so it is
+  // not tried again in a loop.
+  if (reply.cutOff) {
+    logger.warn('The analyst ran out of steps; posting nothing', {
+      trigger: t.uri,
+      steps: reply.steps,
+      usage: reply.usage,
+    });
+    return;
+  }
+
+  // A turn with no text (the provider sent nothing back) posts nothing. A
+  // placeholder under someone else's post is public and stays there.
   if (!reply.text) {
     logger.warn('The analyst produced no answer; posting nothing', {
       trigger: t.uri,
@@ -593,9 +605,9 @@ async function start() {
   if (config.dryRun) {
     logger.info('DRY_RUN: DMs, the re-score, watches and alerts are off');
   } else {
-    // The first poll is queued now, ahead of any snapshot step. On a first
+    // The first poll is queued here, ahead of any snapshot step. On a first
     // start it records where the DM log ends at this moment, so a message
-    // sent from here on, such as a "help" during the first build, is answered
+    // sent from then on, such as a "help" during the first build, is answered
     // rather than filed as history.
     enqueue('dm', pollDms);
     scheduleDmPoll();

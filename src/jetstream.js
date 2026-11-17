@@ -84,8 +84,9 @@ export function connectJetstream({ onEvent }) {
     let retired = false;
 
     // Recycle the socket on a timer: the only way to notice a connection that
-    // died without a close frame on a stream this quiet. Armed now rather than
-    // on 'open', so a handshake that never completes is recycled too.
+    // died without a close frame on a stream this quiet. Armed when the socket
+    // is created rather than on 'open', so a handshake that never completes is
+    // recycled too.
     cycle = setTimeout(() => {
       if (retired) return;
       retired = true;
