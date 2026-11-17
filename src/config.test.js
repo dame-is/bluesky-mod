@@ -59,6 +59,9 @@ describe('number settings', () => {
 
   it.each([
     ['DM_POLL_MS', 1_000],
+    ['RECONNECT_BASE_MS', 100],
+    ['RECONNECT_MAX_MS', 1_000],
+    ['RECONNECT_EVERY_MS', 60_000],
     ['SNAPSHOT_CHECK_MS', 60_000],
     ['DRIFT_CHECK_MS', 60_000],
     ['MOD_WATCH_EVERY_MS', 60_000],

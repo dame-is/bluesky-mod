@@ -77,16 +77,25 @@ export const config = {
   /** Jetstream, for public mentions (see jetstream.js). */
   jetstreamHost:
     process.env.JETSTREAM_HOST || 'jetstream2.us-west.bsky.network',
-  reconnectBaseMs: delay('RECONNECT_BASE_MS', 1000, { positive: true }),
-  reconnectMaxMs: delay('RECONNECT_MAX_MS', 30_000, { positive: true }),
+  reconnectBaseMs: delay('RECONNECT_BASE_MS', 1000, {
+    positive: true,
+    min: 100,
+  }),
+  reconnectMaxMs: delay('RECONNECT_MAX_MS', 30_000, {
+    positive: true,
+    min: 1000,
+  }),
 
   /**
    * Force a reconnect on this interval. The subscription is silent for hours
    * at a time, so "no traffic" cannot be told apart from "the connection died
    * quietly". Reconnecting resumes from the stored cursor and misses nothing.
+   * The cycle starts before the handshake (jetstream.js), so the minimum also
+   * keeps it well above the time a connection takes to open.
    */
   reconnectEveryMs: delay('RECONNECT_EVERY_MS', 15 * 60_000, {
     positive: true,
+    min: 60_000,
   }),
 
   /**
