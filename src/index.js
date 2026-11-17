@@ -505,12 +505,14 @@ function scheduleWatching() {
   if (config.watchEveryMs > 0) {
     watchTimer = setInterval(() => {
       if (!quiet()) return;
-      enqueue('watch', () =>
+      // On the config file's model when it names one, as the DMs and public
+      // answers are, since a watch's triage can add people.
+      enqueue('watch', async () =>
         tickWatches({
           chat,
           agent,
           reference,
-          model,
+          model: (await loadAgentConfig())?.model || model,
           everyMs: config.watchEveryMs,
           log: (msg, fields) => logger.info(msg, fields),
         }),

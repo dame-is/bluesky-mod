@@ -104,6 +104,13 @@ vi.mock('./lib/agent.js', async (importOriginal) => ({
   },
 }));
 
+vi.mock('./watching.js', () => ({
+  tickWatches: async ({ model }) => {
+    h.events.push(`watch:${model}`);
+  },
+  tickAlerts: async () => {},
+}));
+
 vi.mock('./publicReply.js', () => ({
   replyInThread: async (agent, refs, chunks) => {
     h.posted.push(...chunks);
@@ -130,10 +137,18 @@ let dataDir;
 async function boot(extraEnv = {}) {
   savedEnv = { ...process.env };
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-index-'));
-  Object.assign(process.env, ENV, extraEnv, {
-    DATA_DIR: dataDir,
-    MOD_CONFIG_FILE: path.join(os.tmpdir(), 'bluesky-mod-no-such-config.json'),
-  });
+  Object.assign(
+    process.env,
+    ENV,
+    {
+      MOD_CONFIG_FILE: path.join(
+        os.tmpdir(),
+        'bluesky-mod-no-such-config.json',
+      ),
+    },
+    extraEnv,
+    { DATA_DIR: dataDir },
+  );
   await import('./index.js');
   // Let start() run up to its timers.
   await vi.advanceTimersByTimeAsync(10);
@@ -306,5 +321,18 @@ describe('a public mention', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(h.events).toContain('answer');
     expect(h.posted).toEqual([]);
+  });
+});
+
+describe('a watch', () => {
+  it("is read on the config file's model when it names one", async () => {
+    const file = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-config-')),
+      'bot.json',
+    );
+    fs.writeFileSync(file, JSON.stringify({ model: 'from/config-file' }));
+    await boot({ MOD_WATCH_EVERY_MS: '60000', MOD_CONFIG_FILE: file });
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(h.events).toContain('watch:from/config-file');
   });
 });
