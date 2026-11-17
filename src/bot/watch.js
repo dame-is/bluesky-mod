@@ -292,9 +292,9 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
       });
       return { added: 0 };
     });
-    // A batch whose earlier reply was lost and that this check found on the
-    // list counts as added here, since no earlier digest counted it.
-    added = (out.added || 0) + (out.recorded || 0);
+    // Each account counts once, when it is recorded: a batch written but not
+    // stamped counts at the check that finds it on the list and stamps it.
+    added = (out.added || 0) - (out.unstamped || 0) + (out.recorded || 0);
   }
   const held =
     watch.mode === 'auto'

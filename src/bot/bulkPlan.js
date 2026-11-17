@@ -591,7 +591,9 @@ const unmarked = (plan, r) => ({
  *
  * `added` counts the accounts this call wrote. `recorded` counts the ones an
  * earlier call sent that this one found on the list and stamped, kept out of
- * `added` so that two receipts never count one account twice. `note` is a
+ * `added` so that two receipts never count one account twice. `unstamped`
+ * counts the ones in `added` whose stamp failed, which a later call records;
+ * a caller that counts them only when recorded counts each account once. `note` is a
  * sentence for the reply when the run stopped early for a reason other than
  * the rate limit.
  */
@@ -599,6 +601,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
   let added = 0;
   let recorded = 0;
   let failed = 0;
+  let unstamped = 0;
   let note = '';
   const veto = await protectedAmong(rows.map((r) => r.did));
   const allowed = rows.filter((r) => !veto.has(r.did));
@@ -711,6 +714,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       }
     }
     if (unrecorded) {
+      unstamped = batch.length;
       note = ` ${batch.length} of them could not be recorded (${brief(unrecorded)}), so I stopped there. The same approval sent again records them.`;
       break;
     }
@@ -718,6 +722,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
   return {
     added,
     recorded,
+    unstamped,
     failed,
     rateLimited: false,
     already,
@@ -817,12 +822,20 @@ export async function applyPlanToTriage(
     ...(asOf ? [`asof=${asOf}`] : []),
   ].join(' ');
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, recorded, failed, rateLimited, already, vetoed, note } =
-    await writeRows(agent, plan, slice, {
-      uri,
-      bot,
-      via: viaFor(`triage:${label}`, by),
-    });
+  const {
+    added,
+    recorded,
+    unstamped,
+    failed,
+    rateLimited,
+    already,
+    vetoed,
+    note,
+  } = await writeRows(agent, plan, slice, {
+    uri,
+    bot,
+    via: viaFor(`triage:${label}`, by),
+  });
   const withReason = noteWithReason(plan, reason);
   if (withReason) {
     await update('plan', { eq: { id: plan.id } }, { note: withReason });
@@ -850,6 +863,7 @@ export async function applyPlanToTriage(
     ok: true,
     added,
     recorded,
+    unstamped,
     failed,
     already,
     remaining,

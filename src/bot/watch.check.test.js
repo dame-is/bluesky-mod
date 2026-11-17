@@ -300,6 +300,23 @@ describe('a watch reads what arrives while it runs', () => {
     expect(out).toMatchObject({ hostile: 1, added: 1 });
     expect(w.stats).toMatchObject({ addedSinceDigest: 1, addedTotal: 1 });
   });
+
+  it('counts a batch once when its stamp failed and a later check records it', async () => {
+    harvest.participants = [person('eve', 'one')];
+    const w = watchRow('auto');
+    applyPlanToTriage.mockResolvedValueOnce({
+      ok: true,
+      added: 1,
+      unstamped: 1,
+      recorded: 0,
+    });
+    expect(await checkWatch(w, deps())).toMatchObject({ added: 0 });
+
+    applyPlanToTriage.mockResolvedValueOnce({ ok: true, added: 0, recorded: 1 });
+    harvest.participants = [person('eve', 'one'), person('fay', 'two')];
+    await checkWatch(w, deps());
+    expect(w.stats).toMatchObject({ addedTotal: 1 });
+  });
 });
 
 describe('an auto watch reads each post alone', () => {
