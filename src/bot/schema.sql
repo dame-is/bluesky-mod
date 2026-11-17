@@ -263,3 +263,33 @@ create table if not exists shield_guard (
   until text not null,
   stopped_at text
 );
+
+-- The web panel (src/panel). A sign-in code is DMed to someone on the roster
+-- who asks for one, works once and for a few minutes, and is kept only as a
+-- hash. A session is the cookie a code was exchanged for, also as a hash.
+create table if not exists panel_code (
+  code_hash text primary key,
+  did text not null,
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  expires_at text not null,
+  used_at text
+);
+
+create table if not exists panel_session (
+  token_hash text primary key,
+  did text not null,
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  expires_at text not null,
+  last_seen_at text
+);
+create index if not exists panel_session_did_idx on panel_session (did);
+
+-- An account on the list that the owner looked at in the panel's review queue
+-- and chose to leave there. `band` is how close they were then: they come
+-- back to the queue only if a later re-score puts them closer.
+create table if not exists review_keep (
+  did text primary key,
+  band text not null,
+  kept_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  kept_by text
+);

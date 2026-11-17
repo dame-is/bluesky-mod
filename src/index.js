@@ -64,6 +64,7 @@ import { acquireLease, acquireDbLease, HEARTBEAT_MS } from './lease.js';
 import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
 import { diskSpace, isLow, describe as describeDisk } from './disk.js';
 import { pruneData } from './retention.js';
+import { startPanel } from './panel/attach.js';
 
 const model = MODELS.agent;
 
@@ -313,10 +314,33 @@ function enqueue(label, job) {
   return chain;
 }
 
+/**
+ * Queue a job and hand back what it returned, for the web panel, which has a
+ * browser waiting on the answer. A job that throws is the caller's to
+ * report, so it is not counted as a failed job, unless the session died,
+ * which the queue has to hear about to log in again.
+ */
+function queued(label, job) {
+  return new Promise((resolve, reject) => {
+    enqueue(label, async () => {
+      try {
+        resolve(await job());
+      } catch (err) {
+        reject(err);
+        if (isAuthError(err)) throw err;
+      }
+    });
+  });
+}
+
 // --- the DM path -------------------------------------------------------------
 let dmTimer = null;
 /** When a DM last arrived. The slow loops wait for a quiet minute. */
 let lastDmAt = 0;
+/** When the DM log was last read, for the panel's health page. */
+let lastPollAt = 0;
+/** The web panel, when PANEL_PORT is set (src/panel). */
+let panel = null;
 
 async function pollDms() {
   const res = await runDmPass({
@@ -330,8 +354,11 @@ async function pollDms() {
     botDid,
     roster: config.roster,
     mode: config.dmMode,
+    // "panel" in a DM is answered with a sign-in code while there is a panel.
+    signIn: panel ? (did) => panel.codeFor(did) : null,
     log: (msg, fields) => logger.info(msg, fields),
   });
+  lastPollAt = Date.now();
   if (res.answered) {
     stats.dmAnswers += res.answered;
     lastDmAt = Date.now();
@@ -821,6 +848,28 @@ async function start() {
   // so a misconfigured URL shows up now rather than mid-answer.
   await atmosphereTools();
 
+  // The web panel. Signing in is a DM, and a dry run reads none, so it stays
+  // off then. A port that cannot be opened is logged and the bot carries on.
+  if (config.panel.port && config.dryRun) {
+    logger.info('DRY_RUN: the panel is off, since signing in to it is a DM');
+  } else if (config.panel.port) {
+    panel = await startPanel({
+      queued,
+      agent: () => agent,
+      chat: () => chat,
+      reference,
+      vitals: () => ({
+        queued: pending,
+        dmAnswers: stats.dmAnswers,
+        errors: stats.errors,
+        lastPollAt: lastPollAt ? new Date(lastPollAt).toISOString() : null,
+        lastDmAt: lastDmAt ? new Date(lastDmAt).toISOString() : null,
+        snapshotBusy,
+        reference: cached ? 'held' : 'released',
+      }),
+    });
+  }
+
   // The config file's model, when it names one, takes the place of the
   // environment's for DMs and the write check.
   const fileModel = (await loadAgentConfig())?.model;
@@ -865,6 +914,7 @@ async function shutdown(signal) {
   if (retentionTimer) clearTimeout(retentionTimer);
   stream?.close();
   dust?.close();
+  await panel?.close().catch(() => {});
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),
   // systemd 90s.

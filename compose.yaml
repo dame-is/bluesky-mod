@@ -9,6 +9,9 @@ services:
       # Optional voice and limits. Read-only, so the bot cannot rewrite the
       # instructions it runs under.
       - ./config:/app/config:ro
+    # The web panel (docs/PANEL.md): set PANEL_PORT=8787 and PANEL_HOST=0.0.0.0
+    # in .env, then publish the port to this machine only.
+    # ports: ["127.0.0.1:8787:8787"]
     # For a model server on this machine, such as Ollama, reached as
     # host.docker.internal (see .env.example).
     # extra_hosts: ["host.docker.internal:host-gateway"]
