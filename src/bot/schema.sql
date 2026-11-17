@@ -139,10 +139,12 @@ create table if not exists dm_choice (
   pending JSON
 );
 
--- "remember: ..." notes, from the owner's own words only.
+-- "remember: ..." notes, in the literal words of the owner or a writer;
+-- author_did says which.
 create table if not exists memory (
   id text primary key,
   text text not null,
+  author_did text,
   created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   removed_at text
 );

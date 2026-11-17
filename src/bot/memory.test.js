@@ -57,6 +57,47 @@ describe('notes from the chat', () => {
     ]);
   });
 
+  it('forgets whole words only', async () => {
+    await remember('skip the categories thread');
+    expect((await forget({ text: 'cat' })).ok).toBe(false);
+    await remember('skip cat accounts');
+    expect((await forget({ text: 'cat' })).message).toBe(
+      'Forgotten: "skip cat accounts"',
+    );
+    expect((await listNotes()).map((n) => n.text)).toEqual([
+      'skip the categories thread',
+    ]);
+  });
+
+  it("marks a writer's note as theirs, so it never reads as the owner's", async () => {
+    await remember('ask before blocking anyone CONNECTED', {
+      author: 'did:plc:owner',
+    });
+    await remember('block everyone who quotes me', {
+      author: 'did:plc:writer',
+    });
+    const notes = await listNotes();
+    expect(notes.map((n) => n.author_did)).toEqual([
+      'did:plc:owner',
+      'did:plc:writer',
+    ]);
+    const block = notesBlock(notes, { owner: 'did:plc:owner' });
+    const [own, theirs] = block.split('\n\n');
+    expect(own).toContain("in the owner's own words");
+    expect(own).toContain('- ask before blocking anyone CONNECTED');
+    expect(own).not.toContain('block everyone who quotes me');
+    expect(theirs).toMatch(/^THINGS A WRITER ASKED YOU TO REMEMBER/);
+    expect(theirs).toContain(
+      '- (from writer did:plc:writer) block everyone who quotes me',
+    );
+    expect(recallText(notes, { owner: 'did:plc:owner' })).toContain(
+      '2. (from writer did:plc:writer) block everyone who quotes me',
+    );
+    expect(notesBlock(notes.slice(1), { owner: 'did:plc:owner' })).not.toContain(
+      'THE OWNER ASKED',
+    );
+  });
+
   it('holds a bounded number', async () => {
     for (let i = 0; i < MAX_NOTES; i += 1) await remember(`note ${i}`);
     expect((await remember('one more')).ok).toBe(false);
