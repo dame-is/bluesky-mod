@@ -1,6 +1,6 @@
 # Setting it up on a VPS
 
-This walks through a fresh Linux server with Docker. Any VPS running Ubuntu or Debian works the same way. Notes for other kinds of hosting are at the end.
+This walks through a fresh Linux server with Docker, such as a DigitalOcean droplet. Any VPS running Ubuntu or Debian works the same way. [DEPLOY.md](DEPLOY.md) covers the easier hosts.
 
 Budget about half an hour the first time.
 
@@ -14,16 +14,9 @@ While logged in as the bot:
 2. Tick **Allow access to your direct messages**. Without it the bot can't read DMs and will hear nothing, silently.
 3. Copy the password. You won't see it again.
 
-Look up both DIDs (yours and the bot's). A DID is the permanent ID behind a handle:
-
-```bash
-curl "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=your-handle.bsky.social"
-curl "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=the-bot.bsky.social"
-```
-
 ## 2. Make the server
 
-At any VPS provider, pick Ubuntu 24.04 LTS and a plan with **1 GB of memory**. 512 MB can work for someone who follows a few hundred accounts, but the follow-graph snapshot is held in memory while the bot answers, and 1 GB leaves room. Add your SSH key, create the server, and note its IP address.
+At any VPS provider, pick Ubuntu 24.04 LTS and a plan with **1 GB of memory** (on DigitalOcean, the 1 GB Basic droplet). 512 MB can work for someone who follows a few hundred accounts, but the follow-graph snapshot is held in memory while the bot answers, and 1 GB leaves room. Add your SSH key, create the server, and note its IP address.
 
 Log in and install Docker:
 
@@ -43,43 +36,29 @@ nano .env
 
 Fill in:
 
-- `MOD_OWNER_DID`: your DID
-- `MOD_IDENTIFIER`: the bot's DID
+- `MOD_OWNER_DID`: your handle, like `you.bsky.social`
+- `MOD_IDENTIFIER`: the bot's handle
 - `MOD_APP_PASSWORD`: the app password from step 1
 - a model, if you want one (see the comments in the file). Leave the model section empty to run with commands only; you can add one later.
 
-Leave `MOD_LIST_URI` empty for now.
-
-## 4. Run setup
-
-```bash
-docker compose run --rm bot npm run setup -- --name "a plain name"
-```
-
-This builds the image, logs in as the bot, checks it can read DMs, lets anyone start a DM with the bot (so you can reach it without the bot following you; it still answers only you), and creates the list. It prints a line like:
-
-```
-MOD_LIST_URI=at://did:plc:.../app.bsky.graph.list/3abc...
-```
-
-Paste that into `.env`.
-
-## 5. Start it
+## 4. Start it
 
 ```bash
 docker compose up -d
 docker compose logs -f
 ```
 
-You should see `Chat access confirmed`, then `No follow-graph snapshot yet; building one`, then snapshot steps, then `Snapshot finalised`. The build reads who you follow and who each of them follows, so it takes a few minutes for a few hundred follows. The bot answers DMs while it runs.
+On its first start the bot opens its DMs to everyone, so you can reach it without it following you (it still answers only you), and makes a moderation list. You should see `Made a moderation list for the bot` with a `subscribe` link, `Chat access confirmed`, then `No follow-graph snapshot yet; building one`, snapshot steps, and `Snapshot finalised`.
+
+To check the account and the app password before the first start, `docker compose run --rm bot npm run setup` does the same setup from the command line and says what it found. The build reads who you follow and who each of them follows, so it takes a few minutes for a few hundred follows. The bot answers DMs while it runs.
 
 Press Ctrl-C to stop watching the logs; the bot keeps running.
 
-## 6. Subscribe, and say hello
+## 5. Subscribe, and say hello
 
 From your own account:
 
-1. Open the bot's profile, go to **Lists**, open the list.
+1. Open the `subscribe` link from the log, or the bot's profile, **Lists**, and the list.
 2. Choose **Subscribe** and then **Block** or **Mute**. Blocking makes a public record in your repo that points at the list; muting is private. See the README for what that means.
 3. Send the bot a DM: `help`.
 
@@ -121,40 +100,37 @@ Without the `delete from dm_cursor` step, the bot answers every DM sent since th
 
 Copy `config/bot.example.json` to `config/bot.json` and edit it. The bot reads it on every answer; no restart needed. It's mounted read-only, so the bot can't change its own instructions.
 
-## Other hosts
+## Without Docker
 
-The bot is one long-running process that needs to keep a small file between restarts. Anywhere that gives you both will do.
+Install Node 22.13 or newer, create a `bluesky-mod` user, put the code in `/opt/bluesky-mod`, run `npm ci --omit=dev`, fill in `.env`, give that user the `data` directory (`chown -R bluesky-mod data`), and use a systemd unit like this one:
 
-- **Fly.io, Railway, Render and similar.** Deploy the Dockerfile, set the variables from `.env.example` in the host's settings, and attach a persistent volume at `/app/data`. Railway mounts volumes as root while the image runs as the `node` user, so set `RAILWAY_RUN_UID=0` on the service there, or the bot cannot create its database. Run exactly one instance, and turn off anything that scales to zero. A second copy on the same volume waits until the first stops, so a deploy that starts the new copy before stopping the old one waits up to 90 seconds; a copy on a different volume would answer every DM again. Run setup once with the host's "run a command" feature (`npm run setup`).
-- **A machine at home** (a spare laptop, a Raspberry Pi). Docker works the same way. Without Docker, install Node 22.13 or newer, create a `bluesky-mod` user, run setup, then give that user the checkout's `data` directory and the database setup made in it (`chown -R bluesky-mod data`), and use a systemd unit like this one:
+```ini
+# /etc/systemd/system/bluesky-mod.service
+[Unit]
+Description=bluesky-mod
+After=network-online.target
+Wants=network-online.target
 
-  ```ini
-  # /etc/systemd/system/bluesky-mod.service
-  [Unit]
-  Description=bluesky-mod
-  After=network-online.target
-  Wants=network-online.target
+[Service]
+WorkingDirectory=/opt/bluesky-mod
+EnvironmentFile=/opt/bluesky-mod/.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/main.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+User=bluesky-mod
 
-  [Service]
-  WorkingDirectory=/opt/bluesky-mod
-  EnvironmentFile=/opt/bluesky-mod/.env
-  ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/index.js
-  Restart=always
-  RestartSec=5
-  TimeoutStopSec=60
-  User=bluesky-mod
-
-  [Install]
-  WantedBy=multi-user.target
-  ```
-
-- **Serverless functions** (Vercel, Netlify, Cloudflare Workers) don't fit: DMs can only be read by polling, every two seconds, and that needs a process that stays up.
+[Install]
+WantedBy=multi-user.target
+```
 
 ## When something's wrong
 
 | Symptom | Likely cause |
 | --- | --- |
-| The bot never answers | The app password lacks DM access, or your DID isn't `MOD_OWNER_DID`. Check the log for `Chat access FAILED`. |
+| The bot never answers | The app password lacks DM access, or `MOD_OWNER_DID` isn't your account. Check the log for `Chat access FAILED`. |
 | `the configuration is not usable` on start | The log lists each missing or malformed setting. |
 | "the follow-graph snapshot is not built yet" | First start; wait for `Snapshot finalised` in the log. |
 | Answers about the wrong person's circle | `MOD_OWNER_DID` is set to the wrong account. |
+| `now belongs to a different account` on start | A handle in `MOD_OWNER_DID` or `MOD_IDENTIFIER` moved to someone else since the first start. If that's really your new account, delete `identity.json` in the data volume, or set the DID instead. |
+| `the bot has N moderation lists` on start | Set `MOD_LIST_URI` to the one to use; the log lists them. |

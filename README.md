@@ -41,42 +41,27 @@ The bot does not try to decide who is bad. It answers a narrower question: if yo
 
 You approve batches by band. Approving `UNKNOWN` is a claim you can defend about a category; the closer bands are where you'd want to look first. [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) has the full reasoning, every command, and the security model.
 
-## Quick start (Docker)
+## Run it
 
-You need a server that stays on (a small VPS is plenty), Docker, and two Bluesky accounts: yours and a new one for the bot.
+You need two Bluesky accounts, yours and a new one for the bot, and somewhere to run it that stays on. The easiest is Render:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/dame-is/bluesky-mod)
+
+It asks for three things: your handle, the bot's handle, and an app password for the bot with DM access. [docs/DEPLOY.md](docs/DEPLOY.md) explains those, and also covers Railway, Docker at home, Fly.io and a VPS such as a DigitalOcean droplet, with what each costs and how much disk the bot needs.
+
+With Docker on any machine:
 
 ```bash
 git clone https://github.com/dame-is/bluesky-mod.git
 cd bluesky-mod
-cp .env.example .env && chmod 600 .env
-# fill in MOD_OWNER_DID, MOD_IDENTIFIER, MOD_APP_PASSWORD (and a model key if you want one)
-
-docker compose run --rm bot npm run setup -- --name "a plain name"
-# paste the MOD_LIST_URI line it prints into .env
-
+cp .env.example .env && chmod 600 .env   # fill in the three required lines
 docker compose up -d
 docker compose logs -f
 ```
 
-Then, from your own account: open the bot's profile, find the list under Lists, and subscribe to it (Block or Mute). DM the bot "help".
+On its first start the bot makes its list and logs a link to it. From your own account, open the link and subscribe (Block or Mute), then DM the bot "help". It spends a few minutes reading who you follow and who they follow, and answers DMs in between.
 
-On first start the bot reads who you follow and who they follow. That takes a few minutes; it answers DMs in between, and anything that needs scores says so until it's done.
-
-[docs/SETUP-VPS.md](docs/SETUP-VPS.md) walks through all of it on a fresh VPS, with notes for other hosts.
-
-## Without Docker
-
-Node 22.13 or newer (for the built-in SQLite).
-
-```bash
-npm ci --omit=dev
-cp .env.example .env && chmod 600 .env   # and fill it in
-npm run setup -- --name "a plain name"
-# paste the MOD_LIST_URI line it prints into .env
-npm start
-```
-
-Keep it running with whatever your machine uses for services (systemd, launchd, pm2). Run one copy only: two bots polling the same DMs will both answer.
+Without Docker, use Node 22.13 or newer: `npm ci --omit=dev`, fill in `.env`, `npm start`.
 
 ## Models
 
@@ -95,7 +80,7 @@ On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepse
 
 ## What it stores
 
-One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
+One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls from the last 90 days. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
 
 The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off). A post the analyst reads can try to steer those lookups. Lookups by URL or host are refused, but looking up a handle still reaches the host it names.
 

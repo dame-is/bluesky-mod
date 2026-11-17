@@ -1,0 +1,22 @@
+# Fly.io (docs/DEPLOY.md). `fly launch --copy-config --no-deploy` names the
+# app, then `fly deploy --ha=false` runs one machine: two would answer every
+# DM twice. There is no web service, so nothing stops the machine when idle.
+
+app = "bluesky-mod"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "bluesky_mod_data"
+  destination = "/app/data"
+  initial_size = "2gb"
+  # Grows by itself before it fills, up to 10 GB.
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = "1GB"
+  auto_extend_size_limit = "10GB"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

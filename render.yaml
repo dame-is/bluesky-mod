@@ -1,0 +1,23 @@
+# One-click deploy to Render (docs/DEPLOY.md). A background worker, because
+# the bot needs no web address, with a disk for its database. Render asks for
+# the three settings on the first deploy; add a model key in the dashboard
+# later if you want one.
+services:
+  - type: worker
+    name: bluesky-mod
+    runtime: docker
+    plan: 0.5c-512mb
+    # A deploy button deploys this repository; off, so a change here does not
+    # redeploy your bot without you choosing to.
+    autoDeployTrigger: off
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 2
+    envVars:
+      - key: MOD_OWNER_DID
+        sync: false
+      - key: MOD_IDENTIFIER
+        sync: false
+      - key: MOD_APP_PASSWORD
+        sync: false
