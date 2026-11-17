@@ -25,6 +25,7 @@ import { untrusted, MODEL_TIMEOUT_MS } from '../lib/agent.js';
 // import the database.
 import { LABELS } from '../lib/command.js';
 import { selectAll, upsert } from './db.js';
+import { protectedAmong } from './listWrite.js';
 import { ESCALATION_MODEL, escalationEnabled } from './tiers.js';
 
 /** getPosts takes at most 25 URIs per call. */
@@ -310,7 +311,7 @@ export async function runTriage(
       wordless: all.filter((r) => r.triage === 'wordless').length,
       gone: all.filter((r) => r.triage === 'gone').length,
       counts: countLabels(all),
-      pending: countLabels(all.filter(addable)),
+      pending: countLabels(await addableNow(all)),
       total: all.length,
     };
   }
@@ -473,21 +474,35 @@ export async function runTriage(
     counts: countLabels(after),
     // What approving would still add, as opposed to what was found, so a menu
     // offers a number someone can act on.
-    pending: countLabels(after.filter(addable)),
+    pending: countLabels(await addableNow(after)),
     total: after.length,
   };
 }
 
 /**
- * Would approving this label still add this row? The same test
- * applyPlanToTriage applies at the write and countDecisions applies when the
- * agent asks, so a menu never offers more than the write will add.
- * PROTECTED is never added, someone already on the list through another plan
- * is skipped, and an undone row keeps its acted_at, which the write reads as
- * done already.
+ * Would approving this label still add this row? PROTECTED is never added,
+ * someone already on the list through another plan is skipped, and an undone
+ * row keeps its acted_at, which the write reads as done already.
  */
 const addable = (r) =>
   !r.acted_at && !r.already_listed && r.band !== 'PROTECTED';
+
+/**
+ * The rows approving would still add, without the accounts in the protected
+ * table as it stands now: the test applyPlanToTriage applies at the write and
+ * countDecisions when the agent asks, so a menu never offers more than the
+ * write will add. Best effort: when the table cannot be read nothing is
+ * dropped, and the write refuses on its own.
+ */
+async function addableNow(rows) {
+  const open = rows.filter(addable);
+  if (!open.length) return open;
+  const veto = await protectedAmong(
+    open.map((r) => r.did),
+    { follows: false },
+  ).catch(() => null);
+  return veto?.size ? open.filter((r) => !veto.has(r.did)) : open;
+}
 
 function countLabels(rows) {
   const out = { hostile: 0, arguing: 0, neutral: 0 };
@@ -507,7 +522,7 @@ export async function reviewTriage(plan, label, { limit = 10 } = {}) {
   // Rows already added are counted but not shown: a review is for what is
   // still undecided.
   const done = rows.filter((r) => r.acted_at && !r.undone_at);
-  const pending = rows.filter(addable);
+  const pending = await addableNow(rows);
 
   // Most connected first, as in every queue a person reads here. A DM shows a
   // spot check, not every quote, so it starts with the accounts whose

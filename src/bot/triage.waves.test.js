@@ -4,10 +4,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const db = { decision: [], usage: [] };
+const db = { decision: [], usage: [], protected: [] };
 
 vi.mock('./db.js', () => ({
-  select: vi.fn(async () => []),
+  select: vi.fn(async (table) => (table === 'protected' ? db.protected : [])),
   selectAll: vi.fn(async (table, opts = {}) => {
     const rows = table === 'decision' ? db.decision : [];
     const eq = opts.eq || {};
@@ -53,6 +53,7 @@ function labeller(map) {
 }
 
 beforeEach(() => {
+  db.protected = [];
   db.decision = Object.keys(POSTS).map((uri, i) => ({
     plan_id: PLAN.id,
     did: `did:plc:p${i + 1}`,
@@ -317,6 +318,28 @@ describe('what is left to add', () => {
 
     const review = await reviewTriage(PLAN, 'hostile');
     expect(review).toMatchObject({ total: 5, pending: 1, added: 1 });
+    expect(review.rows.map((r) => r.did)).toEqual(['did:plc:fresh']);
+  });
+
+  it('leaves out an account the protected table holds now', async () => {
+    // Followed since the plan was scored: its band is still UNKNOWN, and the
+    // write would refuse it.
+    db.decision = [
+      ['did:plc:fresh', 'UNKNOWN'],
+      ['did:plc:followed', 'UNKNOWN'],
+    ].map(([did, band]) => ({
+      plan_id: PLAN.id,
+      did,
+      band,
+      evidence_uri: `at://${did}/app.bsky.feed.post/1`,
+      triage: 'hostile',
+      triage_quote: 'pile on',
+    }));
+    db.protected = [{ did: 'did:plc:followed', reason: 'you follow them' }];
+    const out = await runTriage(PLAN, { generate: vi.fn(), model: 'm' });
+    expect(out.pending.hostile).toBe(1);
+    const review = await reviewTriage(PLAN, 'hostile');
+    expect(review.pending).toBe(1);
     expect(review.rows.map((r) => r.did)).toEqual(['did:plc:fresh']);
   });
 });
