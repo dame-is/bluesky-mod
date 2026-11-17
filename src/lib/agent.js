@@ -501,8 +501,8 @@ export async function answer({
         spent.outputTokens += call?.usage?.outputTokens ?? 0;
       },
       // The gate's tools go last so nothing merged in can shadow them: a
-      // remote `preflight_post` must never replace the one whose output is
-      // reproducible.
+      // remote `preflight_post` must never replace the one that scores
+      // against the owner's own snapshot.
       tools: { ...extraTools, ...buildTools(io, { reviewRows }) },
       stopWhen: stepCountIs(maxSteps),
       messages: [...history, { role: 'user', content: message }],
