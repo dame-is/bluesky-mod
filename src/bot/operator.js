@@ -1224,10 +1224,12 @@ export function buildActionTools(ctx, deps = DEPS) {
               where.pointedAt &&
               (!named ||
                 named.every((i) => i.inPlan && i.inPlan !== 'not in this plan')),
+            // By DID, so a 👍 up to 30 minutes later adds the accounts that
+            // were described, not whoever holds the handles by then.
             commands: [
               `approve ${which} ${
                 named
-                  ? actors.join(' ')
+                  ? named.map((i, n) => i.did || actors[n]).join(' ')
                   : label
                     ? `${label} asof=${asOf}`
                     : bands.join(',')

@@ -759,6 +759,32 @@ describe('checked writes', () => {
     ]);
   });
 
+  it('puts an approval by name to the owner by DID, so a 👍 later adds who was described', async () => {
+    const deps = refusing({
+      decisionsFor: vi.fn(
+        async (_plan, dids) =>
+          new Map(dids.map((d) => [d, { did: d, band: 'UNKNOWN' }])),
+      ),
+    });
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: 'add @a.test and @b.test from 3f9a2c1b?',
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).approve_plan.execute({
+      code: '3f9a2c1b',
+      accounts: ['@a.test', '@b.test'],
+      ask_first: true,
+    });
+    expect(out.waitingOnOwner).toBe(true);
+    expect(ctx.pending).toEqual([
+      {
+        commands: ['approve 3f9a2c1b did:plc:a did:plc:b'],
+        describe: 'add @a.test, @b.test from plan 3f9a2c1b',
+      },
+    ]);
+  });
+
   it('asks first when told to, without consulting the check or writing', async () => {
     const deps = fakeDeps({ countDecisions: vi.fn(async () => 14) });
     const ctx = ctxFor({
