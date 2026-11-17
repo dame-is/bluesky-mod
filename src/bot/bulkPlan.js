@@ -19,8 +19,9 @@
 // asked, which `by` marks in the log.
 //
 // PROTECTED is never written, whatever is approved. The veto is checked here
-// as well as in the parser, and against the live `protected` table at the
-// write, because a plan's bands are as old as the plan.
+// as well as in the parser, and again at the write against the `protected`
+// table and the owner's follows as the AppView reports them then, because a
+// plan's bands are as old as the plan.
 
 import crypto from 'node:crypto';
 
@@ -32,7 +33,7 @@ import { createScorer, summarise, BANDS } from '../lib/score.js';
 import { KINDS } from '../lib/command.js';
 import { select, selectAll, upsert, update, count } from './db.js';
 import { loadReference } from './reference.js';
-import { listUri, protectedAmong } from './listWrite.js';
+import { listUri, ownerOf, protectedAmong } from './listWrite.js';
 import { evidenceUriFor } from './triage.js';
 import { closeAdds } from './closeAdds.js';
 import {
@@ -104,13 +105,46 @@ async function splitListed(uri, rows) {
 }
 
 /**
+ * A harvest without these accounts, its totals counted again without them.
+ *
+ * The owner, the bot and the post's author can all show up among a post's
+ * participants: the author by gating replies or answering in their own
+ * thread, the bot by answering a mention there. None of them is one of the
+ * people who engaged with the post. The author has a choice of their own on
+ * the card, so a band approval never takes them along.
+ */
+function withoutSelves(harvest, dids) {
+  const skip = new Set(dids.filter(Boolean));
+  const participants = harvest.participants.filter((p) => !skip.has(p.did));
+  const engagements = {};
+  for (const p of participants) {
+    for (const [k, n] of Object.entries(p.engagements || {})) {
+      engagements[k] = (engagements[k] || 0) + n;
+    }
+  }
+  return {
+    ...harvest,
+    participants,
+    totals: {
+      ...harvest.totals,
+      participants: participants.length,
+      engagements,
+    },
+  };
+}
+
+/**
  * Harvest a post, score everyone on it, and store an unapproved plan.
  *
  * @returns {Promise<{code, uri, kind, total, byBand, truncated, protectedCount}>}
  */
 export async function proposePlan({ link, kind }) {
   const target = await resolveTarget(link);
-  const harvest = await harvestPost(target.uri);
+  const harvest = withoutSelves(await harvestPost(target.uri), [
+    OWNER_DID,
+    ownerOf(listUri()),
+    target.did,
+  ]);
   const { ref, takenAt } = await loadReference();
   const scorer = createScorer(ref);
 
@@ -121,7 +155,7 @@ export async function proposePlan({ link, kind }) {
   const scores = await scorer.score([
     ...new Set([...harvest.participants.map((p) => p.did), target.did]),
   ]);
-  const summary = summarise(harvest, scores, { excludeSelf: OWNER_DID });
+  const summary = summarise(harvest, scores);
   const author = scores.get(target.did) ?? null;
 
   // Filtered to the kind after scoring, so the plan's totals keep the whole
@@ -273,34 +307,33 @@ export async function applyPlan(
   }
 
   const rows = await selectAll('decision', {
-    select: 'did,band,acted_at,engaged,already_listed',
+    select: 'did,band,action,acted_at,undone_at,engaged,already_listed',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
-  const pending = rows.filter(
-    (r) =>
-      wanted.includes(r.band) &&
-      !r.acted_at &&
-      !r.already_listed &&
-      engagedAs(r, kinds),
+  const asked = rows.filter(
+    (r) => wanted.includes(r.band) && engagedAs(r, kinds),
   );
+  const pending = asked.filter((r) => !r.acted_at && !r.already_listed);
   if (!pending.length) {
     return {
       ok: true,
       added: 0,
       remaining: 0,
-      message: 'Nothing left to add for those bands.',
+      message:
+        'Nothing left to add for those bands.' +
+        undoneNote(asked.filter((r) => r.undone_at).length),
     };
   }
 
   const again = `approve ${shortCode(plan.id)} ${[...wanted, ...(kinds || [])].join(',')}`;
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, rateLimited, already, vetoed } = await writeRows(
-    agent,
-    plan,
-    slice,
-    { uri, bot, via: viaFor('band', by) },
-  );
+  const { added, failed, rateLimited, already, vetoed, note } =
+    await writeRows(agent, plan, slice, {
+      uri,
+      bot,
+      via: viaFor('band', by),
+    });
 
   // Recorded as soon as anything was attempted, rate limit or not. Bands
   // approved earlier stay in the record.
@@ -337,6 +370,7 @@ export async function applyPlan(
       `Added ${added} to the list${failed ? `, ${failed} failed` : ''}.` +
       alreadyNote(already) +
       vetoNote(vetoed) +
+      note +
       (remaining
         ? ` ${remaining} left. Send "${again}" again to continue.`
         : ''),
@@ -355,6 +389,28 @@ function vetoNote(n) {
 }
 
 /**
+ * Why an approval finds nothing to add when an undo took this plan's adds
+ * back off. An undone row stays done for its own plan, so a fresh scan is the
+ * way back.
+ */
+function undoneNote(n) {
+  if (!n) return '';
+  return ` ${n === 1 ? '1 was' : `${n} were`} taken off by an earlier undo; scan the post again to add them back.`;
+}
+
+/**
+ * Set at shutdown, so no new batch is started while the process is on its way
+ * out. A batch already sent is left to finish and be recorded.
+ */
+let stopping = false;
+export function stopWrites() {
+  stopping = true;
+}
+
+/** An error's message, short enough for a DM. */
+const brief = (err) => String(err?.message || err).slice(0, 160);
+
+/**
  * Create the listitems for a set of already-chosen rows.
  *
  * Every plan approval writes through here, so there is one place that knows
@@ -363,21 +419,34 @@ function vetoNote(n) {
  * wrote and I approved that reading" are different answers to why someone is
  * on the list, and the log has to tell them apart.
  *
- * Rows are checked against the live `protected` table first, since a plan's
- * bands date from when it was made. That read failing throws, so nothing is
- * written.
+ * Rows are checked against the veto as it stands at the write (protectedAmong
+ * in listWrite.js), since a plan's bands date from when it was made. That check
+ * failing throws, so nothing is written.
+ *
+ * Each batch is marked as asked for (`action` set, `acted_at` not yet) before
+ * it is sent, and stamped `acted_at` once the PDS has taken it. A batch whose
+ * reply was lost, or whose stamp failed, is then found on the list by the
+ * next approval or undo and recorded as this plan's add, rather than as
+ * someone another plan put there. A stamp that fails stops the run, since
+ * every batch after it would go unrecorded too.
+ *
+ * `note` is a sentence for the reply when the run stopped early for a reason
+ * other than the rate limit.
  */
 async function writeRows(agent, plan, rows, { uri, bot, via }) {
   let added = 0;
   let failed = 0;
+  let note = '';
   const veto = await protectedAmong(rows.map((r) => r.did));
   const allowed = rows.filter((r) => !veto.has(r.did));
   const vetoed = rows.length - allowed.length;
   const { fresh, listed } = await splitListed(uri, allowed);
-  if (listed.length) {
+  const landed = listed.filter((r) => r.action === 'list_add' && !r.acted_at);
+  const others = listed.filter((r) => !landed.includes(r));
+  if (others.length) {
     await upsert(
       'decision',
-      listed.map((r) => ({
+      others.map((r) => ({
         plan_id: plan.id,
         did: r.did,
         band: r.band,
@@ -385,11 +454,31 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       })),
     ).catch(() => {});
   }
-  const already = listed.length;
-  for (let i = 0; i < fresh.length; i += BATCH) {
+  if (landed.length) {
+    await upsert('decision', stampRows(plan, landed, via));
+    added += landed.length;
+  }
+  const already = others.length;
+  for (let i = 0; i < fresh.length && !stopping; i += BATCH) {
     const batch = fresh.slice(i, i + BATCH);
     try {
-      const res = await agent.com.atproto.repo.applyWrites({
+      await upsert(
+        'decision',
+        batch.map((r) => ({
+          plan_id: plan.id,
+          did: r.did,
+          band: r.band,
+          action: 'list_add',
+          approved_via: via,
+        })),
+      );
+    } catch (err) {
+      note = ` Nothing more was written, because the approval could not be recorded first (${brief(err)}).`;
+      break;
+    }
+    let res;
+    try {
+      res = await agent.com.atproto.repo.applyWrites({
         repo: bot,
         writes: batch.map((r) => ({
           $type: 'com.atproto.repo.applyWrites#create',
@@ -402,40 +491,51 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
           },
         })),
       });
-      const created = res?.data?.results || [];
-      batch.forEach((r, n) =>
-        noteListed(
-          uri,
-          r.did,
-          String(created[n]?.uri || '')
-            .split('/')
-            .pop(),
-        ),
-      );
-      const now = new Date().toISOString();
-      await upsert(
-        'decision',
-        batch.map((r) => ({
-          plan_id: plan.id,
-          did: r.did,
-          band: r.band,
-          action: 'list_add',
-          acted_at: now,
-          approved_via: via,
-        })),
-      );
-      added += batch.length;
     } catch (err) {
       failed += batch.length;
-      const message = String(err?.message || err);
       // A rate limit means stop, not retry. The remaining budget is gone and
       // approving again in an hour is the correct backoff.
-      if (/rate ?limit/i.test(message)) {
-        return { added, failed, rateLimited: true, already, vetoed };
+      if (/rate ?limit/i.test(String(err?.message || err))) {
+        return { added, failed, rateLimited: true, already, vetoed, note };
       }
+      continue;
+    }
+    const created = res?.data?.results || [];
+    batch.forEach((r, n) =>
+      noteListed(
+        uri,
+        r.did,
+        String(created[n]?.uri || '')
+          .split('/')
+          .pop(),
+      ),
+    );
+    added += batch.length;
+    try {
+      await upsert('decision', stampRows(plan, batch, via));
+    } catch (err) {
+      note = ` ${batch.length} of them could not be recorded (${brief(err)}), so I stopped there. The same approval sent again records them.`;
+      break;
     }
   }
-  return { added, failed, rateLimited: false, already, vetoed };
+  return { added, failed, rateLimited: false, already, vetoed, note };
+}
+
+/**
+ * Decision rows saying these accounts were added by this plan, stamped with
+ * the current time. Without `via`, each row keeps the one it was marked with
+ * when it was sent.
+ */
+function stampRows(plan, rows, via = null) {
+  const now = new Date().toISOString();
+  return rows.map((r) => ({
+    plan_id: plan.id,
+    did: r.did,
+    band: r.band,
+    action: 'list_add',
+    acted_at: now,
+    ...(via ? { approved_via: via } : {}),
+  }));
 }
 
 /**
@@ -456,7 +556,7 @@ export async function applyPlanToTriage(
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
-    select: 'did,band,triage,acted_at,already_listed',
+    select: 'did,band,triage,action,acted_at,undone_at,already_listed',
     eq: { plan_id: plan.id, triage: label },
     order: 'did.asc',
   });
@@ -470,11 +570,17 @@ export async function applyPlanToTriage(
       !r.already_listed,
   );
   if (!pending.length) {
-    return { ok: true, added: 0, message: `Nothing left to add for ${label}.` };
+    return {
+      ok: true,
+      added: 0,
+      message:
+        `Nothing left to add for ${label}.` +
+        undoneNote(rows.filter((r) => r.undone_at).length),
+    };
   }
 
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, already, vetoed } = await writeRows(
+  const { added, failed, already, vetoed, note } = await writeRows(
     agent,
     plan,
     slice,
@@ -491,6 +597,7 @@ export async function applyPlanToTriage(
       `Added ${added} that a model read as ${label}${failed ? `, ${failed} failed` : ''}.` +
       alreadyNote(already) +
       vetoNote(vetoed) +
+      note +
       (remaining
         ? ` ${remaining} left, send "approve ${shortCode(plan.id)} ${label}" again.`
         : ''),
@@ -513,7 +620,8 @@ export async function countDecisions(
     order: 'did.asc',
   });
   return rows.filter((r) => {
-    // Mirrors undoPlan's own filter, so the number checked is the number undone.
+    // This plan's recorded adds, the most an undo of it takes off. It takes
+    // fewer when another plan also added someone by name.
     if (state === 'live') {
       return r.acted_at && r.action === 'list_add' && !r.undone_at;
     }
@@ -630,7 +738,7 @@ export async function applyPlanToActors(
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
-    select: 'did,band,acted_at,already_listed',
+    select: 'did,band,action,acted_at,undone_at,already_listed',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
@@ -639,6 +747,7 @@ export async function applyPlanToActors(
   // Keyed by DID, so one account named twice is written once.
   const resolved = new Map();
   const unknown = [];
+  const undone = [];
   for (const a of actors) {
     let did;
     try {
@@ -648,14 +757,19 @@ export async function applyPlanToActors(
       continue;
     }
     const row = byDid.get(did);
-    if (!row) unknown.push(a);
-    else resolved.set(did, row);
+    if (!row) {
+      unknown.push(a);
+      continue;
+    }
+    // An undo is final for its own plan, the same as for a band approval.
+    if (row.undone_at && !resolved.has(did)) undone.push(a);
+    resolved.set(did, row);
   }
 
   // Approving someone by name does not outrank the veto.
   const named = [...resolved.values()];
   const banned = named.filter((r) => r.band === 'PROTECTED').length;
-  const { added, failed, already, vetoed } = await writeRows(
+  const { added, failed, already, vetoed, note } = await writeRows(
     agent,
     plan,
     named.filter((r) => r.band !== 'PROTECTED' && !r.acted_at),
@@ -663,10 +777,15 @@ export async function applyPlanToActors(
   );
 
   const parts = [
-    `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${alreadyNote(already)}`,
+    `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${alreadyNote(already)}${note}`,
   ];
   if (banned + vetoed) parts.push(`${banned + vetoed} refused: PROTECTED.`);
   if (unknown.length) parts.push(`Not in this plan: ${unknown.join(', ')}.`);
+  if (undone.length) {
+    parts.push(
+      `Taken off by an earlier undo: ${undone.join(', ')}. Block them by name to add them back.`,
+    );
+  }
   return {
     ok: true,
     added,
@@ -809,6 +928,38 @@ async function deleteListitems(agent, bot, rkeys) {
 }
 
 /**
+ * Was this add the owner choosing one account by name, rather than a
+ * category: a typed block, agent mode adding a named account, or an approval
+ * by name.
+ */
+const byName = (via) =>
+  via === 'command' || via === 'agent' || /(^|:)individual$/.test(via || '');
+
+/** Which of these accounts another plan added by name and still holds. */
+async function heldByName(plan, dids) {
+  const out = new Set();
+  for (let i = 0; i < dids.length; i += 50) {
+    const rows = await selectAll('decision', {
+      select: 'plan_id,did,approved_via',
+      eq: { action: 'list_add' },
+      where: {
+        did: `in.(${dids
+          .slice(i, i + 50)
+          .map((d) => `"${d}"`)
+          .join(',')})`,
+        acted_at: 'not.is.null',
+        undone_at: 'is.null',
+      },
+      order: 'did.asc',
+    });
+    for (const r of rows) {
+      if (r.plan_id !== plan.id && byName(r.approved_via)) out.add(r.did);
+    }
+  }
+  return out;
+}
+
+/**
  * Take a plan's additions back off the list.
  *
  * The decision rows stay, stamped undone rather than deleted, so the log can
@@ -824,6 +975,13 @@ async function deleteListitems(agent, bot, rkeys) {
  * seen the whole repo, an account it did not find is off the list (taken off
  * outside the bot, say), and the record says so. Left open, the plan would
  * stay live and every undo would answer "1 left, send undo again".
+ *
+ * An add this plan sent but never saw confirmed (see writeRows) is looked for
+ * too, and if it is on the list it is recorded and taken off with the rest.
+ *
+ * An account the owner also added by name through another plan stays on the
+ * list: undoing a batch takes back the batch, not their own choice. Only this
+ * plan's row is closed.
  */
 export async function undoPlan(
   agent,
@@ -835,31 +993,45 @@ export async function undoPlan(
   if (!uri.startsWith(`at://${bot}/`)) return { ok: false, message: NOT_OURS };
 
   const rows = await selectAll('decision', {
-    select: 'did,band,acted_at,action,undone_at',
+    select: 'did,band,acted_at,action,approved_via,undone_at',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
-  const live = rows.filter(
-    (r) => r.acted_at && r.action === 'list_add' && !r.undone_at,
-  );
-  if (!live.length) {
-    return {
-      ok: true,
-      removed: 0,
-      message: 'Nothing from that plan is still on the list.',
-    };
-  }
+  const open = rows.filter((r) => r.action === 'list_add' && !r.undone_at);
+  const nothing = {
+    ok: true,
+    removed: 0,
+    message: 'Nothing from that plan is still on the list.',
+  };
+  if (!open.length) return nothing;
 
-  const dids = live.map((r) => r.did);
-  const { byDid, exhaustive } = await listitemsFor(agent, { bot, uri, dids });
+  const { byDid, exhaustive } = await listitemsFor(agent, {
+    bot,
+    uri,
+    dids: open.map((r) => r.did),
+  });
+  const landed = open.filter((r) => !r.acted_at && byDid.has(r.did));
+  if (landed.length) {
+    await upsert('decision', stampRows(plan, landed));
+  }
+  // An unconfirmed add not found on the list is left as it is: a later
+  // approval writes it.
+  const live = open.filter((r) => r.acted_at || landed.includes(r));
+  if (!live.length) return nothing;
 
   let alreadyOff = 0;
   if (exhaustive) {
-    const missing = dids.filter((did) => !byDid.has(did));
+    const missing = live.map((r) => r.did).filter((did) => !byDid.has(did));
     if (missing.length) {
       await closeAdds(missing, 'already off the list');
       alreadyOff = missing.length;
     }
+  }
+
+  const held = await heldByName(plan, [...byDid.keys()]);
+  if (held.size) {
+    await closeAdds([...held], reason, { plan: plan.id });
+    for (const did of held) byDid.delete(did);
   }
 
   // Batched by account, so every copy of one account (two plans added them)
@@ -893,15 +1065,20 @@ export async function undoPlan(
     }
   }
 
-  const remaining = live.length - removed - alreadyOff;
+  const kept = held.size;
+  const remaining = live.length - removed - alreadyOff - kept;
   return {
     ok: true,
     removed,
     remaining,
     alreadyOff,
+    kept,
     message:
       `Took ${removed} back off the list.` +
       (alreadyOff ? ` ${alreadyOff} had already come off another way.` : '') +
+      (kept
+        ? ` ${kept === 1 ? '1 stays' : `${kept} stay`} on the list, since you also added them by name.`
+        : '') +
       (remaining
         ? ` ${remaining} left, send "undo ${shortCode(plan.id)}" again.`
         : ''),

@@ -7,13 +7,17 @@
 //
 // The PROTECTED veto is enforced here, at the write, and not only in the
 // scorer, so a mistake upstream cannot get past it. The `protected` table
-// holds the owner's follows, members of their curation lists and anyone added
-// by hand, and no automated path may add them. A typed command still runs
-// through this system, so it is refused too. The owner can still do it by
-// hand in a client.
+// holds the owner's follows as of the last snapshot, members of their curation
+// lists and anyone added by hand, and no automated path may add them. A follow
+// made since the snapshot is read live from the AppView at the write. A typed
+// command still runs through this system, so it is refused too. The owner can
+// still do it by hand in a client. The owner's own account and the bot's are
+// never written either.
 
 import crypto from 'node:crypto';
 
+import { APPVIEW, OWNER_DID } from '../constants.js';
+import { fetchWithTimeout } from '../lib/atproto.js';
 import { resolveActor } from '../lib/target.js';
 import { select, upsert } from './db.js';
 import { rkeysForWrite, noteListed, noteUnlisted } from './graphFacts.js';
@@ -27,55 +31,117 @@ export function listUri() {
   return process.env.MOD_LIST_URI || '';
 }
 
-function ownerOf(uri) {
+/** The DID whose repo an at:// URI points into, or null. */
+export function ownerOf(uri) {
   const m = /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''));
   return m ? m[1] : null;
 }
 
-// A veto table that cannot be read is a veto that cannot be honoured, so the
-// write is refused. Guessing wrong here blocks someone the owner follows.
+// A veto that cannot be read is a veto that cannot be honoured, so the write
+// is refused. Guessing wrong here blocks someone the owner follows.
 const VETO_UNREADABLE =
   'could not read the protected set, so the write is refused rather than risked';
+const FOLLOWS_UNREADABLE =
+  'could not check who you follow, so the write is refused rather than risked';
+// Every snapshot puts the owner's follows in the table, so an empty table
+// means none has run yet, not that nobody is protected.
+const VETO_EMPTY =
+  'the protected set is not built yet, so nothing is added until it is. It builds by itself a few minutes after the bot starts';
 
-/** Is this DID in the veto set, and why? */
-async function protectedReason(did) {
+/** `getRelationships` takes at most 30 `others` per call. */
+const REL_BATCH = 30;
+
+/** did -> reason, for those of these DIDs in the `protected` table. */
+async function fromTable(dids) {
+  const out = new Map();
+  let any;
   try {
-    const rows = await select('protected', {
-      select: 'reason',
-      eq: { did },
-    });
-    return rows?.[0]?.reason ?? null;
+    any = await select('protected', { select: 'did', limit: 1 });
+    for (let i = 0; i < dids.length; i += 50) {
+      const rows = await select('protected', {
+        select: 'did,reason',
+        where: {
+          did: `in.(${dids
+            .slice(i, i + 50)
+            .map((d) => `"${d}"`)
+            .join(',')})`,
+        },
+      });
+      for (const r of rows || []) out.set(r.did, r.reason);
+    }
   } catch {
     throw new Error(VETO_UNREADABLE);
   }
+  if (!any?.length) throw new Error(VETO_EMPTY);
+  return out;
 }
 
 /**
- * Which of these DIDs are in the veto set now.
+ * Which of these DIDs the owner follows, asked of the AppView at the write.
+ *
+ * The table is as old as the last snapshot, so a follow made since then is
+ * only found here. Throws if any batch cannot be read.
+ */
+async function followedNow(dids) {
+  const out = new Set();
+  for (let i = 0; i < dids.length; i += REL_BATCH) {
+    const q = dids
+      .slice(i, i + REL_BATCH)
+      .map((d) => `others=${encodeURIComponent(d)}`)
+      .join('&');
+    let body = null;
+    try {
+      const res = await fetchWithTimeout(
+        `${APPVIEW}/xrpc/app.bsky.graph.getRelationships?actor=${encodeURIComponent(OWNER_DID)}&${q}`,
+        { headers: { Accept: 'application/json' } },
+      );
+      if (res.ok) body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (!Array.isArray(body?.relationships)) {
+      throw new Error(FOLLOWS_UNREADABLE);
+    }
+    for (const r of body.relationships) {
+      if (r?.did && r.following) out.add(r.did);
+    }
+  }
+  return out;
+}
+
+/** Is this DID in the veto set, and why? Throws when that cannot be known. */
+async function protectedReason(did) {
+  const [table, followed] = await Promise.all([
+    fromTable([did]),
+    followedNow([did]),
+  ]);
+  return table.get(did) || (followed.has(did) ? 'you follow them' : null);
+}
+
+/**
+ * Which of these DIDs may not be added: the `protected` table, the
+ * owner's follows as the AppView reports them, and the owner's and the bot's
+ * own accounts.
  *
  * For bulk writes, whose bands were scored when the plan was made: someone
- * the owner followed since then is PROTECTED now, whatever the plan says.
- * Throws if the table cannot be read.
+ * the owner followed since then is refused here, whatever the plan says.
+ * Throws if the table or the follows cannot be read.
  *
  * @param {string[]} dids
  * @returns {Promise<Set<string>>}
  */
 export async function protectedAmong(dids) {
+  const self = new Set([OWNER_DID, ownerOf(listUri())].filter(Boolean));
   const wanted = [...new Set(dids.filter(Boolean))];
-  const out = new Set();
-  for (let i = 0; i < wanted.length; i += 50) {
-    const chunk = wanted.slice(i, i + 50);
-    let rows;
-    try {
-      rows = await select('protected', {
-        select: 'did',
-        where: { did: `in.(${chunk.map((d) => `"${d}"`).join(',')})` },
-      });
-    } catch {
-      throw new Error(VETO_UNREADABLE);
-    }
-    for (const r of rows || []) out.add(r.did);
-  }
+  const out = new Set(wanted.filter((did) => self.has(did)));
+  const others = wanted.filter((did) => !self.has(did));
+  if (!others.length) return out;
+  const [table, followed] = await Promise.all([
+    fromTable(others),
+    followedNow(others),
+  ]);
+  for (const did of table.keys()) out.add(did);
+  for (const did of followed) out.add(did);
   return out;
 }
 
@@ -132,13 +198,27 @@ export async function applyCommand(
     };
   }
 
+  // A post the owner shared of their own, or a mention of the bot, names one
+  // of these as its author. Neither belongs on the list.
+  if (action === 'list_add' && (did === OWNER_DID || did === bot)) {
+    return {
+      ok: false,
+      did,
+      message:
+        did === OWNER_DID
+          ? `${actor} is your own account, so I have not added it. If you meant someone else, name them.`
+          : `${actor} is this bot's own account, so I have not added it.`,
+    };
+  }
+
   // Scored before the write, so the log records what the gate saw rather than
   // UNSCORED, and the decision can be replayed. Best effort: a scoring failure
   // must not stop the owner acting.
   //
-  // In parallel with the veto and the membership check. The membership check
-  // is one Constellation request (rkeysForWrite in graphFacts.js), and walks
-  // the repo only when Constellation cannot answer.
+  // In parallel with the veto (the table and one AppView request) and the
+  // membership check. The membership check is one Constellation request
+  // (rkeysForWrite in graphFacts.js), and walks the repo only when
+  // Constellation cannot answer.
   const [account, reason, rkeys] = await Promise.all([
     !band && lookUp
       ? Promise.resolve(lookUp(actor)).catch(() => null)
@@ -149,20 +229,26 @@ export async function applyCommand(
   const scored = band || account?.band || null;
 
   if (action === 'list_add') {
-    if (reason) {
+    // What the lookup saw counts as well, so an account the bot has just
+    // called PROTECTED is never written.
+    const vetoed = reason || account?.protectedReason || null;
+    if (vetoed) {
       return {
         ok: false,
         did,
-        vetoed: reason,
+        vetoed,
         account,
         message:
-          `${actor} is PROTECTED (${reason}). You follow them, or they are on one of your curation lists. ` +
+          `${actor} is PROTECTED (${vetoed}). You follow them, or they are on one of your curation lists. ` +
           'No automated path acts on those, including this one. Do it in your client if you mean it.',
       };
     }
     // `rkeys` is null when membership could not be read. That still writes: a
     // duplicate listitem is a cheaper mistake than a block that did not happen.
     if (rkeys?.length) {
+      // Recorded although nothing is written, so an undo of the plan that put
+      // them on first leaves them where the owner's own words put them.
+      await log(did, 'list_add', raw, scored, via, { already: true });
       return {
         ok: true,
         did,
@@ -253,12 +339,20 @@ export async function applyCommand(
  * A command is a plan of one, approved at the moment it was typed, so it goes
  * in `plan` + `decision` like every other action. `note` keeps the owner's
  * literal words: "the owner typed this sentence on this date" is the whole
- * answer, with nothing to reconstruct.
+ * answer, with nothing to reconstruct. `already` marks an add of someone who
+ * was on the list already, for which nothing was written.
  *
  * Best effort. A write that is not logged is bad; refusing to write because
  * the log is down is worse, and the repo itself is the record.
  */
-async function log(did, action, raw, band, via = 'command') {
+async function log(
+  did,
+  action,
+  raw,
+  band,
+  via = 'command',
+  { already = false } = {},
+) {
   try {
     const planId = crypto.randomUUID();
     await upsert('plan', [
@@ -278,6 +372,7 @@ async function log(did, action, raw, band, via = 'command') {
         action,
         acted_at: new Date().toISOString(),
         approved_via: via,
+        ...(already ? { already_listed: true } : {}),
       },
     ]);
   } catch {

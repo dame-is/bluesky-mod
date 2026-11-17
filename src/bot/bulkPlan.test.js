@@ -7,7 +7,16 @@ const LIST = 'at://did:plc:bot/app.bsky.graph.list/3list';
 const PLAN_A = '1c2d3e4f-0000-4000-8000-000000000001';
 const PLAN_B = '9e8d7c6b-0000-4000-8000-000000000002';
 
-const db = { plan: [], decision: [], protected: [], writes: [], reads: [] };
+const db = {
+  plan: [],
+  decision: [],
+  protected: [],
+  writes: [],
+  reads: [],
+  // When set, recording that a write happened fails, as a locked or full
+  // database would.
+  failStamp: null,
+};
 
 /** Enough of db.js's filter grammar for what bulkPlan.js sends. */
 function matches(row, { eq = {}, where = {} } = {}) {
@@ -17,6 +26,8 @@ function matches(row, { eq = {}, where = {} } = {}) {
       const val = row[k];
       if (v === 'not.is.null' && val == null) return false;
       if (v === 'is.null' && val != null) return false;
+      if (v === 'is.true' && val !== true) return false;
+      if (v === 'is.false' && val !== false) return false;
       if (v.startsWith('gte.') && !(String(val) >= v.slice(4))) return false;
       if (v.startsWith('lte.') && !(String(val) <= v.slice(4))) return false;
       if (v.startsWith('in.(')) {
@@ -59,6 +70,9 @@ vi.mock('./db.js', () => ({
     for (const row of query(table, match)) Object.assign(row, patch);
   }),
   upsert: vi.fn(async (table, rows) => {
+    if (table === 'decision' && db.failStamp && rows.some((r) => r.acted_at)) {
+      throw new Error(db.failStamp);
+    }
     db.writes.push({ table, rows });
     const keys = rows.map((r) => `${r.plan_id}|${r.did}`);
     // One upsert should never name the same row twice.
@@ -89,6 +103,7 @@ vi.mock('./graphFacts.js', () => graph);
 const veto = { unreadable: false };
 vi.mock('./listWrite.js', () => ({
   listUri: () => LIST,
+  ownerOf: (uri) => /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''))?.[1] ?? null,
   protectedAmong: async (dids) => {
     if (veto.unreadable) throw new Error('could not read the protected set');
     return new Set(
@@ -181,11 +196,35 @@ beforeEach(() => {
   db.protected = [];
   db.writes = [];
   db.reads = [];
+  db.failStamp = null;
   veto.unreadable = false;
   constellation.clear();
   repo = new Map();
-  for (const fn of Object.values(graph)) fn.mockClear();
+  for (const fn of Object.values(graph)) fn.mockReset();
+  graph.rkeysForWrite.mockImplementation(
+    async (list, did) => constellation.get(did) ?? [],
+  );
+  graph.isListed.mockReturnValue(null);
+  graph.graphFacts.mockResolvedValue(null);
 });
+
+/** The held copy of the list reads the fake repo, as it would after a reload. */
+function heldCopyReadsRepo() {
+  graph.graphFacts.mockResolvedValue({ listed: new Map() });
+  graph.isListed.mockImplementation((list, did) =>
+    [...repo.values()].includes(did),
+  );
+}
+
+/** A repo whose next applyWrites commits and then loses its reply. */
+function losesReply(agent) {
+  const write = agent.com.atproto.repo.applyWrites.getMockImplementation();
+  agent.com.atproto.repo.applyWrites.mockImplementationOnce(async (args) => {
+    await write(args);
+    throw new Error('socket hang up');
+  });
+  return agent;
+}
 
 describe('finding a plan', () => {
   it('asks for the uuid range a code names, not for every plan', async () => {
@@ -249,6 +288,85 @@ describe('approve', () => {
     expect(out).toMatchObject({ added: 0, remaining: 1 });
     expect(db.plan[0].approved_at).toBeTruthy();
     expect(db.plan[0].approved_bands).toEqual(['UNKNOWN', 'NOTABLE']);
+  });
+
+  it('records a batch the PDS took when the reply was lost, on the next approval, so undo finds it', async () => {
+    heldCopyReadsRepo();
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:c', 'UNKNOWN'),
+    ];
+
+    const first = await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
+    expect(first).toMatchObject({ added: 0, failed: 2 });
+    expect(repo.size).toBe(2);
+
+    const again = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(again).toMatchObject({ added: 2, already: 0 });
+    // Not written a second time.
+    expect(repo.size).toBe(2);
+    expect(row(PLAN_A, 'did:plc:a')).toMatchObject({
+      action: 'list_add',
+      approved_via: 'band',
+    });
+    expect(row(PLAN_A, 'did:plc:a').acted_at).toBeTruthy();
+
+    const undo = await undoPlan(bot(), db.plan[0]);
+    expect(undo).toMatchObject({ removed: 2, remaining: 0 });
+    expect(repo.size).toBe(0);
+  });
+
+  it('undoes a batch the PDS took when the reply was lost, without approving again', async () => {
+    db.decision = [
+      scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:c', 'UNKNOWN'),
+    ];
+    await applyPlan(losesReply(bot()), db.plan[0], ['UNKNOWN']);
+    expect(repo.size).toBe(2);
+
+    const undo = await undoPlan(bot(), db.plan[0], { reason: 'undo' });
+
+    expect(undo).toMatchObject({ removed: 2, remaining: 0 });
+    expect(repo.size).toBe(0);
+    expect(row(PLAN_A, 'did:plc:a').undone_at).toBeTruthy();
+  });
+
+  it('counts a batch it wrote but could not record as added, stops there, and records it on the next approval', async () => {
+    heldCopyReadsRepo();
+    db.decision = Array.from({ length: 60 }, (_, i) =>
+      scanned(PLAN_A, `did:plc:u${String(i).padStart(2, '0')}`, 'UNKNOWN'),
+    );
+    db.failStamp = 'database is locked';
+
+    const first = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+
+    expect(first).toMatchObject({ added: 50, failed: 0, remaining: 10 });
+    expect(first.message).toMatch(/could not be recorded/);
+    expect(first.message).toMatch(/database is locked/);
+    // The second batch was not started.
+    expect(repo.size).toBe(50);
+
+    db.failStamp = null;
+    const again = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(again).toMatchObject({ added: 60, already: 0, remaining: 0 });
+    expect(repo.size).toBe(60);
+    expect(db.decision.every((r) => r.acted_at)).toBe(true);
+
+    const undo = await undoPlan(bot(), db.plan[0]);
+    expect(undo).toMatchObject({ removed: 60, remaining: 0 });
+    expect(repo.size).toBe(0);
+  });
+
+  it('writes nothing it could not first record as asked for', async () => {
+    db.decision = [scanned(PLAN_A, 'did:plc:a', 'UNKNOWN')];
+    const { upsert } = await import('./db.js');
+    upsert.mockRejectedValueOnce(new Error('database is locked'));
+
+    const out = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+
+    expect(out).toMatchObject({ added: 0, remaining: 1 });
+    expect(out.message).toMatch(/database is locked/);
+    expect(repo.size).toBe(0);
   });
 
   it('writes an account named twice once, and refuses PROTECTED by name', async () => {
@@ -355,6 +473,56 @@ describe('undo', () => {
     expect(await lastActedPlan()).toBe(null);
   });
 
+  it('leaves on the list someone the owner also blocked by name, and closes only this plan', async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', {
+        approved_via: 'band',
+      }),
+      added(PLAN_A, 'did:plc:c', '2026-10-01T10:00:00Z', {
+        approved_via: 'band',
+      }),
+      // "block @a, he is the worst", typed while they were already listed.
+      added(PLAN_B, 'did:plc:a', '2026-10-01T11:00:00Z', {
+        approved_via: 'command',
+        already_listed: true,
+      }),
+    ];
+    constellation.set('did:plc:a', ['rk-a']);
+    constellation.set('did:plc:c', ['rk-c']);
+    repo.set('rk-a', 'did:plc:a');
+    repo.set('rk-c', 'did:plc:c');
+
+    const out = await undoPlan(bot(), { id: PLAN_A }, { reason: 'too broad' });
+
+    expect(out).toMatchObject({ removed: 1, remaining: 0, kept: 1 });
+    expect(out.message).toMatch(/1 stays on the list/);
+    expect([...repo.values()]).toEqual(['did:plc:a']);
+    expect(row(PLAN_A, 'did:plc:a')).toMatchObject({ undo_reason: 'too broad' });
+    expect(row(PLAN_B, 'did:plc:a').undone_at).toBe(null);
+    expect((await lastActedPlan()).id).toBe(PLAN_B);
+  });
+
+  it("does not stamp a typed block undone when a band plan's duplicate comes off", async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:y', '2026-10-01T10:00:00Z', {
+        approved_via: 'command',
+      }),
+      // Written again while the held copy could not be read.
+      added(PLAN_B, 'did:plc:y', '2026-10-01T11:00:00Z', {
+        approved_via: 'band',
+      }),
+    ];
+    constellation.set('did:plc:y', ['rk-y1', 'rk-y2']);
+    repo.set('rk-y1', 'did:plc:y');
+    repo.set('rk-y2', 'did:plc:y');
+
+    await undoPlan(bot(), { id: PLAN_B });
+
+    expect([...repo.values()]).toContain('did:plc:y');
+    expect(row(PLAN_A, 'did:plc:y').undone_at).toBe(null);
+    expect(row(PLAN_B, 'did:plc:y').undone_at).toBeTruthy();
+  });
+
   it('walks the repo once when Constellation cannot answer, not once per account', async () => {
     db.decision = [
       added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z'),
@@ -389,6 +557,44 @@ describe('undo', () => {
 
     expect(agent.com.atproto.repo.deleteRecord).toHaveBeenCalled();
     expect(out).toMatchObject({ removed: 2, remaining: 0 });
+    expect(repo.size).toBe(0);
+  });
+});
+
+describe('approving after an undo', () => {
+  it('adds through another plan the accounts an undo took off', async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:q', '2026-10-01T10:00:00Z', {
+        approved_via: 'triage:hostile',
+      }),
+      // Plan B scanned the same post while plan A had them on the list.
+      { ...scanned(PLAN_B, 'did:plc:q', 'UNKNOWN'), already_listed: true },
+    ];
+    constellation.set('did:plc:q', ['rk-q']);
+    repo.set('rk-q', 'did:plc:q');
+
+    await undoPlan(bot(), { id: PLAN_A });
+    expect(row(PLAN_B, 'did:plc:q').already_listed).toBe(false);
+
+    const out = await applyPlan(bot(), db.plan[1], ['UNKNOWN']);
+    expect(out).toMatchObject({ added: 1 });
+    expect([...repo.values()]).toEqual(['did:plc:q']);
+  });
+
+  it('says when an undo is why a plan has nothing left to add', async () => {
+    db.decision = [
+      added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', {
+        engaged: ['like'],
+        undone_at: '2026-10-01T12:00:00Z',
+      }),
+    ];
+
+    const bands = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(bands.message).toMatch(/^Nothing left to add for those bands\./);
+    expect(bands.message).toMatch(/1 was taken off by an earlier undo/);
+
+    const named = await applyPlanToActors(bot(), db.plan[0], ['did:plc:a']);
+    expect(named.message).toMatch(/Taken off by an earlier undo: did:plc:a\./);
     expect(repo.size).toBe(0);
   });
 });

@@ -4,17 +4,13 @@ const protectedRows = new Map();
 const veto = { unreadable: false };
 const decisions = [];
 vi.mock('./db.js', () => ({
-  select: vi.fn(async (table, { eq = {}, where = {} }) => {
+  select: vi.fn(async (table, { eq = {}, where = {}, limit } = {}) => {
     if (table !== 'protected') return [];
     if (veto.unreadable) throw new Error('no such table: protected');
-    if (eq.did) {
-      return protectedRows.has(eq.did)
-        ? [{ reason: protectedRows.get(eq.did) }]
-        : [];
-    }
-    return [...protectedRows.keys()]
-      .filter((did) => where.did.includes(`"${did}"`))
-      .map((did) => ({ did }));
+    let rows = [...protectedRows].map(([did, reason]) => ({ did, reason }));
+    if (eq.did) rows = rows.filter((r) => r.did === eq.did);
+    if (where.did) rows = rows.filter((r) => where.did.includes(`"${r.did}"`));
+    return limit ? rows.slice(0, limit) : rows;
   }),
   selectAll: vi.fn(async (table, { eq = {}, where = {} }) =>
     table === 'decision'
@@ -27,6 +23,7 @@ vi.mock('./db.js', () => ({
         )
       : [],
   ),
+  update: vi.fn(async () => null),
   upsert: vi.fn(async (table, rows) => {
     if (table === 'decision') {
       for (const row of rows) {
@@ -38,6 +35,26 @@ vi.mock('./db.js', () => ({
       }
     }
     return rows.length;
+  }),
+}));
+// Who the owner follows right now, as the AppView's getRelationships answers.
+const live = { follows: new Set(), unreadable: false, asked: [] };
+vi.mock('../lib/atproto.js', () => ({
+  fetchWithTimeout: vi.fn(async (url) => {
+    const q = new URL(url).searchParams;
+    live.asked.push(q.getAll('others'));
+    if (live.unreadable) return { ok: false, json: async () => ({}) };
+    return {
+      ok: true,
+      json: async () => ({
+        relationships: q.getAll('others').map((did) => ({
+          did,
+          ...(live.follows.has(did)
+            ? { following: `at://owner/app.bsky.graph.follow/${did}` }
+            : {}),
+        })),
+      }),
+    };
   }),
 }));
 const graph = {
@@ -53,6 +70,7 @@ vi.mock('../lib/target.js', () => ({
 }));
 
 const { applyCommand, protectedAmong } = await import('./listWrite.js');
+const { OWNER_DID } = await import('../constants.js');
 
 process.env.MOD_LIST_URI = 'at://did:plc:bot/app.bsky.graph.list/3list';
 
@@ -77,7 +95,12 @@ function agent() {
 
 beforeEach(() => {
   protectedRows.clear();
+  // A snapshot has run, so the protected set holds the owner's follows.
+  protectedRows.set('did:plc:oldfollow', 'you follow them');
   veto.unreadable = false;
+  live.follows.clear();
+  live.unreadable = false;
+  live.asked.length = 0;
   decisions.length = 0;
   graph.rkeysForWrite.mockReset();
   graph.noteListed.mockReset();
@@ -134,6 +157,81 @@ describe('one block', () => {
     expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
   });
 
+  it('refuses someone the owner followed since the last snapshot', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    live.follows.add('did:plc:friendtest');
+    const a = agent();
+    const out = await applyCommand(a, 'list_add', 'friend.test');
+    expect(out).toMatchObject({ ok: false, vetoed: 'you follow them' });
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
+  it('refuses someone the lookup just scored PROTECTED', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    const lookUp = vi.fn(async () => ({
+      band: 'PROTECTED',
+      protectedReason: 'in your circle snapshot',
+    }));
+    const a = agent();
+    const out = await applyCommand(a, 'list_add', 'x.test', { lookUp });
+    expect(out).toMatchObject({
+      ok: false,
+      vetoed: 'in your circle snapshot',
+    });
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
+  it('refuses when who the owner follows cannot be checked', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    live.unreadable = true;
+    const a = agent();
+    await expect(applyCommand(a, 'list_add', 'x.test')).rejects.toThrow(
+      /who you follow/,
+    );
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
+  it('adds nobody before the first snapshot has filled the protected set', async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    protectedRows.clear();
+    const a = agent();
+    await expect(applyCommand(a, 'list_add', 'x.test')).rejects.toThrow(
+      /not built yet/,
+    );
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+  });
+
+  it("refuses the owner's own account and the bot's", async () => {
+    graph.rkeysForWrite.mockResolvedValue([]);
+    const a = agent();
+    const own = await applyCommand(a, 'list_add', OWNER_DID);
+    expect(own).toMatchObject({ ok: false, did: OWNER_DID });
+    expect(own.message).toMatch(/your own account/);
+    const bot = await applyCommand(a, 'list_add', 'did:plc:bot');
+    expect(bot).toMatchObject({ ok: false, did: 'did:plc:bot' });
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+    expect(decisions).toEqual([]);
+  });
+
+  it('records a block of someone already on the list, so a batch undo leaves them', async () => {
+    graph.rkeysForWrite.mockResolvedValue(['r1']);
+    const a = agent();
+    const out = await applyCommand(a, 'list_add', 'x.test', {
+      raw: 'block @x.test, he is the worst',
+    });
+    expect(out).toMatchObject({ ok: true, already: true, changed: false });
+    expect(a.com.atproto.repo.createRecord).not.toHaveBeenCalled();
+    expect(decisions).toEqual([
+      expect.objectContaining({
+        did: 'did:plc:xtest',
+        action: 'list_add',
+        approved_via: 'command',
+        already_listed: true,
+      }),
+    ]);
+    expect(decisions[0].acted_at).toBeTruthy();
+  });
+
   it('refuses an action it does not know rather than removing', async () => {
     graph.rkeysForWrite.mockResolvedValue(['r1']);
     const a = agent();
@@ -155,6 +253,26 @@ describe('the protected set for a bulk write', () => {
     await expect(protectedAmong(['did:plc:a'])).rejects.toThrow(
       /protected set/,
     );
+  });
+
+  it('names accounts the owner followed since the last snapshot, asking 30 at a time', async () => {
+    const batch = Array.from({ length: 31 }, (_, i) => `did:plc:n${i}`);
+    live.follows.add('did:plc:n30');
+    expect(await protectedAmong(batch)).toEqual(new Set(['did:plc:n30']));
+    expect(live.asked.map((a) => a.length)).toEqual([30, 1]);
+  });
+
+  it('throws when who the owner follows cannot be checked', async () => {
+    live.unreadable = true;
+    await expect(protectedAmong(['did:plc:a'])).rejects.toThrow(
+      /who you follow/,
+    );
+  });
+
+  it("names the owner's own account and the bot's", async () => {
+    expect(
+      await protectedAmong([OWNER_DID, 'did:plc:bot', 'did:plc:a']),
+    ).toEqual(new Set([OWNER_DID, 'did:plc:bot']));
   });
 });
 
