@@ -62,28 +62,35 @@ vi.mock('../lib/harvest.js', () => ({
   })),
 }));
 
-vi.mock('./bulkPlan.js', async (importOriginal) => ({
-  ...(await importOriginal()),
-  applyPlanToTriage: vi.fn(async (agent, plan, label, { skipBands = [] }) => {
-    const rows = db.decision.filter(
-      (r) =>
-        r.plan_id === plan.id &&
-        r.triage === label &&
-        r.band !== 'PROTECTED' &&
-        !skipBands.includes(r.band) &&
-        !r.acted_at &&
-        !r.already_listed,
-    );
-    for (const r of rows) r.acted_at = new Date().toISOString();
-    return { ok: true, added: rows.length };
-  }),
-}));
+vi.mock('./bulkPlan.js', async (importOriginal) => {
+  const real = await importOriginal();
+  return {
+    ...real,
+    proposePlan: vi.fn(real.proposePlan),
+    applyPlanToTriage: vi.fn(async (agent, plan, label, { skipBands = [] }) => {
+      const rows = db.decision.filter(
+        (r) =>
+          r.plan_id === plan.id &&
+          r.triage === label &&
+          r.band !== 'PROTECTED' &&
+          !skipBands.includes(r.band) &&
+          !r.acted_at &&
+          !r.already_listed,
+      );
+      for (const r of rows) r.acted_at = new Date().toISOString();
+      return { ok: true, added: rows.length };
+    }),
+  };
+});
 
 const { checkWatch, digestFor, startWatch } = await import('./watch.js');
 const { harvestPost } = await import('../lib/harvest.js');
-const { applyPlanToTriage } = await import('./bulkPlan.js');
+const { applyPlanToTriage, proposePlan } = await import('./bulkPlan.js');
+const { runTriage } = await import('./triage.js');
 
 const PLAN_ID = '1c2d3e4f-0000-4000-8000-000000000000';
+/** The scan startWatch makes of everyone already there. */
+const BASE_ID = '0a0b0c0d-0000-4000-8000-000000000000';
 const POST = 'at://did:plc:owner/app.bsky.feed.post/3abc';
 const TEXT = {};
 
@@ -101,13 +108,16 @@ const person = (name, text) => {
 
 /** A row as startWatch's baseline leaves it: scored, with words, unread. */
 const baselineRow = (name, extra = {}) => ({
-  plan_id: PLAN_ID,
+  plan_id: BASE_ID,
   did: `did:plc:${name}`,
   band: 'UNKNOWN',
   evidence_uri: `at://did:plc:${name}/app.bsky.feed.post/r-${name}`,
   triage: null,
   ...extra,
 });
+
+/** A newcomer an earlier check put on the watch's plan, still unread. */
+const earlierRow = (name) => ({ ...baselineRow(name), plan_id: PLAN_ID });
 
 /** A model that calls every post hostile, one line per item. */
 const allHostile = vi.fn(async ({ messages }) => {
@@ -138,14 +148,17 @@ const watchRow = (mode, stats = {}) => {
     plan_id: PLAN_ID,
     mode,
     until: new Date(Date.now() + 3_600_000).toISOString(),
-    stats: { baseline: 4, ...stats },
+    stats: { baseline: 4, baselinePlan: BASE_ID, ...stats },
   };
   db.watch.push(w);
   return w;
 };
 
 beforeEach(() => {
-  db.plan = [{ id: PLAN_ID, created_at: '2026-11-01T00:00:00Z' }];
+  db.plan = [
+    { id: PLAN_ID, created_at: '2026-11-01T00:00:00Z' },
+    { id: BASE_ID, created_at: '2026-11-01T00:00:00Z' },
+  ];
   db.decision = [];
   db.watch = [];
   db.llm_usage = [];
@@ -182,6 +195,26 @@ describe('a watch reads what arrives while it runs', () => {
     expect(db.decision.filter((r) => r.acted_at).map((r) => r.did)).toEqual([
       'did:plc:eve',
     ]);
+  });
+
+  it('never adds the baseline, even once another triage labels it', async () => {
+    // As "triage <code>" or the agent's triage_plan leaves it, with no
+    // limit on whom it reads.
+    db.decision = ['ann', 'bob'].map((n) =>
+      baselineRow(n, { triage: 'hostile', triage_at: '2026-11-01T01:00:00Z' }),
+    );
+    harvest.participants = [
+      person('ann', 'go away'),
+      person('bob', 'go away'),
+      person('eve', 'go away'),
+    ];
+    const w = watchRow('auto');
+    const out = await checkWatch(w, deps());
+    expect(out).toMatchObject({ fresh: 1, added: 1, held: 0 });
+    expect(db.decision.filter((r) => r.acted_at).map((r) => r.did)).toEqual([
+      'did:plc:eve',
+    ]);
+    expect(db.decision.filter((r) => r.plan_id === PLAN_ID)).toHaveLength(1);
   });
 
   it("never reads or adds the post's author or the bot", async () => {
@@ -276,7 +309,7 @@ describe('an auto watch reads each post alone', () => {
     // newcomer whose DID sorts first arrives now.
     const waiting = Array.from({ length: 13 }, (_, i) => `w${10 + i}`);
     for (const n of waiting) person(n, 'go away');
-    db.decision = waiting.map((n) => baselineRow(n));
+    db.decision = waiting.map((n) => earlierRow(n));
     harvest.participants = [
       ...waiting.map((n) => person(n, 'go away')),
       person('aaa', 'go away'),
@@ -324,6 +357,36 @@ describe('the thumbs-up in a digest', () => {
 });
 
 describe('starting a watch', () => {
+  it('keeps the baseline on a scan of its own, apart from what the watch adds', async () => {
+    harvest.participants = [person('ann', 'go away'), person('bob', 'go away')];
+    proposePlan.mockImplementationOnce(async () => {
+      db.decision.push(baselineRow('ann'), baselineRow('bob'));
+      return { planId: BASE_ID, code: '0a0b0c0d', total: 2 };
+    });
+    const { watch, plan } = await startWatch({
+      convoId: 'c1',
+      target: POST,
+      auto: true,
+    });
+    expect(plan).toMatchObject({ planId: BASE_ID, total: 2 });
+    expect(watch.plan_id).not.toBe(BASE_ID);
+    expect(watch.stats).toMatchObject({ baseline: 2, baselinePlan: BASE_ID });
+    expect(db.plan.find((p) => p.id === watch.plan_id)).toMatchObject({
+      totals: { uri: POST },
+    });
+
+    // The owner reads what is already there with the code they were given.
+    await runTriage({ id: plan.planId }, { generate: allHostile, model: 'm' });
+    expect(db.decision.filter((r) => r.triage === 'hostile')).toHaveLength(2);
+
+    const out = await checkWatch(watch, deps());
+    expect(out).toEqual({ fresh: 0, hostile: 0, added: 0, held: 0 });
+    expect(db.decision.filter((r) => r.acted_at)).toEqual([]);
+    expect(
+      await digestFor(watch, { now: Date.now(), ending: true }),
+    ).toMatchObject({ pending: null });
+  });
+
   it('watches only a post, never a list', async () => {
     harvestPost.mockClear();
     await expect(

@@ -1,11 +1,13 @@
 // Watching a post. Pile-ons run for hours, and a watch keeps up without the
 // owner sending the same post again.
 //
-// A watch is a plan that keeps growing. Every few minutes the post's quotes and
-// replies are harvested again; anyone new is scored, added to the watch's plan
-// with what they wrote, and read by the same triage as everything else. The
-// baseline, everyone already there when the watch started, is never read or
-// added by the watch. Then, depending on what the owner asked for:
+// A watch has a plan of its own that keeps growing. Every few minutes the
+// post's quotes and replies are harvested again; anyone new is scored, added
+// to the watch's plan with what they wrote, and read by the same triage as
+// everything else. The baseline, everyone already there when the watch
+// started, is a scan of its own and never on the watch's plan, so the watch
+// never reads or adds it, whatever else labels it. Then, depending on what
+// the owner asked for:
 //
 //   ask   (the default) nothing is added. The hourly digest says what was found
 //         and a 👍 adds the hostile ones.
@@ -20,6 +22,8 @@
 //
 // Also here: noticing when one of the owner's own posts suddenly draws quotes
 // and replies, so the bot can offer a watch before the owner has to ask.
+
+import crypto from 'node:crypto';
 
 import { OWNER_DID, APPVIEW } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
@@ -89,25 +93,43 @@ export async function startWatch({
     const plan = running.plan_id ? await findPlanById(running.plan_id) : null;
     return { watch: { ...running, until, mode }, plan, extended: true };
   }
-  // The baseline: everyone so far, scored, with what they wrote. Later checks
-  // only add the new ones to this same plan.
+  // The baseline: everyone so far, scored, with what they wrote, as a scan
+  // of its own. The watch's plan starts empty and holds only who arrives
+  // later, so its adds, its counts and the 👍 on its digest never reach
+  // anyone who was already there, even once a triage of the scan labels them.
   const plan = await proposePlan({
     link: resolved.uri,
     kind: 'everyone',
     signal,
   });
+  const planId = crypto.randomUUID();
+  await upsert('plan', [
+    {
+      id: planId,
+      created_at: new Date(now).toISOString(),
+      approved_at: null,
+      approved_bands: null,
+      totals: { uri: resolved.uri, kind: 'watch' },
+      note: `watch of ${resolved.uri}`,
+    },
+  ]);
   const watch = {
     convo_id: convoId,
     uri: resolved.uri,
-    plan_id: plan.planId,
+    plan_id: planId,
     mode,
     until,
-    stats: { baseline: plan.total, newSinceDigest: 0, checks: 0 },
+    stats: {
+      baseline: plan.total,
+      baselinePlan: plan.planId,
+      newSinceDigest: 0,
+      checks: 0,
+    },
   };
   await upsert('watch', [watch]);
   const [row] = await select('watch', {
     select: 'id,convo_id,uri,plan_id,mode,created_at,until,stats',
-    eq: { plan_id: plan.planId },
+    eq: { plan_id: planId },
     limit: 1,
   });
   return { watch: row || watch, plan, extended: false };
@@ -172,15 +194,16 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     only: READ_KINDS,
     maxPages: 20,
   });
-  const known = new Set(
-    (
-      await selectAll('decision', {
-        select: 'did',
-        eq: { plan_id: plan.id },
-        order: 'did.asc',
-      })
-    ).map((r) => r.did),
-  );
+  // Known: on the watch's plan already, or in the baseline scan.
+  const known = new Set();
+  for (const id of [plan.id, stats.baselinePlan].filter(Boolean)) {
+    const rows = await selectAll('decision', {
+      select: 'did',
+      eq: { plan_id: id },
+      order: 'did.asc',
+    });
+    for (const r of rows) known.add(r.did);
+  }
   // Never the owner, the bot or the watched post's author, whose replies in
   // their own thread are not a pile-on, as a scan leaves them out.
   const skip = new Set([OWNER_DID, ownerOf(watch.uri), ownerOf(listUri())]);
@@ -215,8 +238,8 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
 
   // Triage reads newcomers from earlier checks that no model has labelled
   // yet, oldest first, then this check's. One check reads one wave of model
-  // calls, and the rest wait in `unread` for the next. It never reads the
-  // baseline, so the watch never adds anyone who was already there when it
+  // calls, and the rest wait in `unread` for the next. The baseline is not on
+  // this plan, so the watch never adds anyone who was already there when it
   // started, including accounts the owner had just taken off the list.
   const toRead = [
     ...new Set([...(stats.unread || []), ...newcomers.map((p) => p.did)]),
