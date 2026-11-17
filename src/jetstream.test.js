@@ -31,6 +31,10 @@ class SilentSocket {
 }
 
 const made = () => SilentSocket.made;
+const WANT = {
+  dids: ['did:plc:owner0000000000000000000'],
+  collections: ['app.bsky.graph.follow', 'app.bsky.graph.listitem'],
+};
 const CYCLE = config.reconnectEveryMs + config.reconnectBaseMs;
 
 let stream;
@@ -53,7 +57,7 @@ afterEach(() => {
 
 describe('the liveness cycle', () => {
   it('opens a new connection when the old one never reports closing', async () => {
-    stream = connectJetstream({ onEvent: () => {} });
+    stream = connectJetstream({ ...WANT, onEvent: () => {} });
     made()[0].fire('open');
     await vi.advanceTimersByTimeAsync(CYCLE);
     expect(made()).toHaveLength(2);
@@ -61,14 +65,14 @@ describe('the liveness cycle', () => {
   });
 
   it('recycles a connection whose handshake never completes', async () => {
-    stream = connectJetstream({ onEvent: () => {} });
+    stream = connectJetstream({ ...WANT, onEvent: () => {} });
     await vi.advanceTimersByTimeAsync(CYCLE);
     expect(made()).toHaveLength(2);
   });
 
   it('ignores late events from a socket it has replaced', async () => {
     const onEvent = vi.fn();
-    stream = connectJetstream({ onEvent });
+    stream = connectJetstream({ ...WANT, onEvent });
     made()[0].fire('open');
     await vi.advanceTimersByTimeAsync(CYCLE);
     made()[1].fire('open');
@@ -87,7 +91,7 @@ describe('the liveness cycle', () => {
 
   it('still reconnects once when the server closes the socket', async () => {
     const onEvent = vi.fn();
-    stream = connectJetstream({ onEvent });
+    stream = connectJetstream({ ...WANT, onEvent });
     made()[0].fire('open');
     made()[0].fire('message', { data: JSON.stringify({ time_us: 1 }) });
     await vi.advanceTimersByTimeAsync(0);
@@ -101,11 +105,22 @@ describe('the liveness cycle', () => {
   });
 
   it('opens nothing after close()', async () => {
-    stream = connectJetstream({ onEvent: () => {} });
+    stream = connectJetstream({ ...WANT, onEvent: () => {} });
     made()[0].fire('open');
     stream.close();
     made()[0].fire('close');
     await vi.advanceTimersByTimeAsync(CYCLE * 2);
     expect(made()).toHaveLength(1);
+  });
+});
+
+describe('the subscription', () => {
+  it('asks only for the given repos and record types', () => {
+    stream = connectJetstream({ ...WANT, onEvent: () => {} });
+    const url = new URL(made()[0].url);
+    expect(url.searchParams.getAll('wantedDids')).toEqual(WANT.dids);
+    expect(url.searchParams.getAll('wantedCollections')).toEqual(
+      WANT.collections,
+    );
   });
 });

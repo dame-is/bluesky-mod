@@ -1,14 +1,9 @@
 // One filtered Jetstream subscription, reconnecting on its own.
 //
-// FILTERED TO THE ROSTER. Jetstream filters by `wantedCollections` and
+// FILTERED AT THE TRANSPORT. Jetstream filters by `wantedCollections` and
 // `wantedDids`, and `wantedDids` matches a record's AUTHOR, not its subject.
-// Here that is exactly right: the only posts this bot acts on are written by
-// accounts on the roster. The alternative is the whole post firehose,
-// gigabytes a day, to find a handful of posts we could ask for by name.
-//
-// EVERY ANSWERED DID MUST BE HERE, or that account's mentions never arrive:
-// the transport drops them before `classify` sees them, with nothing in the
-// log to say why.
+// The bot only needs records from the owner's own repo (ownerGraph.js), so it
+// asks for exactly those rather than reading the whole firehose.
 //
 // The socket is idle almost all the time, and with no traffic a dead
 // connection looks like a quiet one. So config carries a forced reconnect
@@ -20,19 +15,23 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 import { getCursor } from './state.js';
 
-function buildUrl() {
+function buildUrl({ dids, collections }) {
   const params = new URLSearchParams();
-  params.append('wantedCollections', 'app.bsky.feed.post');
-  // One parameter per DID, which is how Jetstream expects a repeated filter.
-  // Some hosts sit behind an edge that rejects a long URL with a 414, which
-  // is why the default host is us-west. Mind the length if the roster grows.
-  for (const did of config.roster.all) params.append('wantedDids', did);
+  // One parameter per value, which is how Jetstream expects a repeated filter.
+  for (const c of collections) params.append('wantedCollections', c);
+  for (const did of dids) params.append('wantedDids', did);
   const cursor = getCursor();
   if (cursor) params.append('cursor', cursor);
   return `wss://${config.jetstreamHost}/subscribe?${params}`;
 }
 
-export function connectJetstream({ onEvent }) {
+/**
+ * @param {object} opts
+ * @param {string[]} opts.dids         whose repos to follow
+ * @param {string[]} opts.collections  which record types
+ * @param {Function} opts.onEvent      called with each parsed event
+ */
+export function connectJetstream({ dids, collections, onEvent }) {
   let ws = null;
   let backoff = config.reconnectBaseMs;
   let cycle = null;
@@ -55,10 +54,10 @@ export function connectJetstream({ onEvent }) {
 
   function connect() {
     if (closedByUs) return;
-    const url = buildUrl();
+    const url = buildUrl({ dids, collections });
     logger.info('Connecting to Jetstream', {
       host: config.jetstreamHost,
-      dids: config.roster.all.join(','),
+      dids: dids.join(','),
       resumingFrom: getCursor() ?? '(live tail)',
     });
     let sock;

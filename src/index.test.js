@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   steps: 0,
   stepsToFinish: 5,
   stepScript: [],
+  stream: null,
 }));
 
 vi.mock('./bot/dmLoop.js', async (importOriginal) => ({
@@ -55,6 +56,7 @@ vi.mock('./bot/botAgent.js', () => {
 });
 
 vi.mock('./snapshot.js', () => ({
+  UNPROTECTED_LISTS: [],
   hasSnapshot: async () => h.snapshotExists,
   snapshotStep: async () => {
     h.events.push('step');
@@ -65,6 +67,14 @@ vi.mock('./snapshot.js', () => ({
     return h.steps < h.stepsToFinish
       ? { state: 'collecting', remaining: 100, indexed: h.steps }
       : { state: 'finalised', snapshot: 's', vouches: 1, unreadableMembers: 0 };
+  },
+}));
+
+vi.mock('./jetstream.js', () => ({
+  connectJetstream: ({ dids, collections }) => {
+    h.events.push('jetstream');
+    h.stream = { dids, collections };
+    return { close() {} };
   },
 }));
 
@@ -149,6 +159,7 @@ beforeEach(() => {
     steps: 0,
     stepsToFinish: 5,
     stepScript: [],
+    stream: null,
   });
   vi.resetModules();
   vi.useFakeTimers();
@@ -228,6 +239,16 @@ describe('DMs while the snapshot builds', () => {
     await vi.advanceTimersByTimeAsync(h.stepsToFinish * 26_000);
     expect(h.steps).toBe(h.stepsToFinish);
     expect(h.events).not.toContain('dm');
+  });
+});
+
+describe('the Jetstream subscription', () => {
+  it("follows only the owner's own follows and list items", async () => {
+    await boot();
+    expect(h.stream).toEqual({
+      dids: ['did:plc:owner0000000000000000000'],
+      collections: ['app.bsky.graph.follow', 'app.bsky.graph.listitem'],
+    });
   });
 });
 

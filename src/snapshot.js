@@ -36,7 +36,7 @@ import {
 } from './bot/db.js';
 
 /** Curation lists whose members are NOT protected (at:// URIs). */
-const UNPROTECTED_LISTS = String(process.env.MOD_UNPROTECTED_LISTS || '')
+export const UNPROTECTED_LISTS = String(process.env.MOD_UNPROTECTED_LISTS || '')
   .split(/[\s,]+/)
   .filter(Boolean);
 
@@ -185,6 +185,12 @@ async function startSnapshot(pds) {
       where: { did: { in: stale.slice(i, i + 50) } },
     });
   }
+  // Rows the Jetstream watch added before this read began are covered by it,
+  // or came off a list since. Ones added during the read stay until the next.
+  await del('protected', {
+    eq: { source: 'live' },
+    where: { added_at: `lt.${takenAt}` },
+  });
 
   await upsert(
     'circle',

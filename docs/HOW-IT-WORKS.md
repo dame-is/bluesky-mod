@@ -38,7 +38,7 @@ Curation lists you made count toward PROTECTED. If some of yours are filled auto
 
 PROTECTED is checked in the scorer, again where plans are approved, and again in `src/bot/listWrite.js`, at the moment a list item would be written. That last check is the one that matters: every path that adds someone, including a command you typed yourself and anything agent mode does, goes through it. A typed `block @friend` is refused with a message telling you to do it from your own client if you really mean it.
 
-At the write it also asks the AppView whether you follow the account at that moment, so a follow made since the last snapshot counts. If either the table or that check cannot be read, nothing is written. Until the first snapshot has filled the protected set, nothing is added at all. Your own account and the bot's are never written. Someone added to one of your curation lists counts from the next snapshot.
+At the write it also asks the AppView whether you follow the account at that moment, so a follow made since the last snapshot counts. If either the table or that check cannot be read, nothing is written. Until the first snapshot has filled the protected set, nothing is added at all. Your own account and the bot's are never written. The bot also follows your own repo on Jetstream, so someone you follow or add to a curation list is protected within seconds. An unfollow or a removal from a list takes effect at the next snapshot, since a deleted record no longer says who it was.
 
 ### The snapshot
 

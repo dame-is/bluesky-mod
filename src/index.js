@@ -1,12 +1,15 @@
 // The bot: one long-running process.
 //
-// Two inputs feeding one work queue:
+// Three inputs:
 //
 //   1. chat.bsky.convo.getLog on a 2s poll, the only way to read DMs. Chat
 //      lives in the chat service (did:web:api.bsky.chat), not in any repo,
 //      so it never reaches the firehose or Jetstream and there is no push.
 //   2. Timers: the follow-graph snapshot, the weekly re-score of the list,
 //      watched posts, and alerts when one of the owner's posts takes off.
+//   3. Jetstream, for the owner's own new follows and list items, so they are
+//      protected before the next snapshot (ownerGraph.js). This one writes a
+//      row and needs no queue.
 //
 // The bot never posts in public. Everything it says goes to a DM.
 //
@@ -25,7 +28,10 @@ import { stopWrites } from './bot/bulkPlan.js';
 import { checkModelFor, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
 import { openDb, closeDb } from './bot/db.js';
-import { snapshotStep, hasSnapshot } from './snapshot.js';
+import { snapshotStep, hasSnapshot, UNPROTECTED_LISTS } from './snapshot.js';
+import { connectJetstream } from './jetstream.js';
+import { loadState, setCursor } from './state.js';
+import { ownerGraphHandler, OWNER_GRAPH_COLLECTIONS } from './ownerGraph.js';
 import { installProvider, MODELS, modelsEnabled } from './models.js';
 
 import { config, assertConfig } from './config.js';
@@ -384,6 +390,7 @@ function logStats() {
 
 // --- start -------------------------------------------------------------------
 let statsTimer = null;
+let stream = null;
 let shuttingDown = false;
 
 async function start() {
@@ -392,6 +399,7 @@ async function start() {
   assertConfig();
   installProvider();
   openDb();
+  loadState();
 
   const session = await connectAtBoot();
   try {
@@ -447,6 +455,24 @@ async function start() {
 
   scheduleSnapshot();
 
+  const protect = ownerGraphHandler({
+    ownerDid: config.ownerDid,
+    excluded: UNPROTECTED_LISTS,
+    // The held reference has the old protected set; the next use reloads it.
+    onProtect: () => {
+      cached = null;
+    },
+    log: (msg, fields) => logger.info(msg, fields),
+  });
+  stream = connectJetstream({
+    dids: [config.ownerDid],
+    collections: OWNER_GRAPH_COLLECTIONS,
+    onEvent: async (event) => {
+      await protect(event);
+      if (event?.time_us) setCursor(event.time_us);
+    },
+  });
+
   if (config.statsIntervalMs > 0) {
     statsTimer = setInterval(logStats, config.statsIntervalMs);
     if (statsTimer.unref) statsTimer.unref();
@@ -491,6 +517,7 @@ async function shutdown(signal) {
   if (watchTimer) clearInterval(watchTimer);
   if (alertTimer) clearInterval(alertTimer);
   if (statsTimer) clearInterval(statsTimer);
+  stream?.close();
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),
   // systemd 90s.

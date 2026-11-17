@@ -45,11 +45,13 @@ vi.mock('./bot/db.js', () => ({
   del: vi.fn(async (table, { eq = {}, where = {} }) => {
     db.writes.push(`del ${table}`);
     const ids = where.did ? where.did.in : null;
+    const before = where.added_at ? where.added_at.replace(/^lt\./, '') : null;
     db[table] = db[table].filter(
       (r) =>
         !(
           Object.entries(eq).every(([k, v]) => r[k] === v) &&
-          (!ids || ids.includes(r.did))
+          (!ids || ids.includes(r.did)) &&
+          (!before || r.added_at < before)
         ),
     );
   }),
@@ -96,7 +98,33 @@ describe('starting a snapshot', () => {
       'did:plc:friend',
       'did:plc:newfriend',
     ]);
-    expect(db.writes).toEqual(['protected', 'del protected', 'circle']);
+    expect(db.writes).toEqual([
+      'protected',
+      'del protected',
+      'del protected',
+      'circle',
+    ]);
+  });
+
+  it('drops rows the live watch added before the read, and keeps later ones', async () => {
+    db.protected.push(
+      {
+        did: 'did:plc:listedmonday',
+        reason: 'list:Friends',
+        source: 'live',
+        added_at: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        did: 'did:plc:listedduring',
+        reason: 'list:Friends',
+        source: 'live',
+        added_at: '2999-01-01T00:00:00.000Z',
+      },
+    );
+    await snapshotStep({ restart: true });
+    const dids = db.protected.map((r) => r.did);
+    expect(dids).not.toContain('did:plc:listedmonday');
+    expect(dids).toContain('did:plc:listedduring');
   });
 
   it('leaves the old set and no new snapshot when the write fails', async () => {
