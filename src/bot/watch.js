@@ -3,8 +3,9 @@
 //
 // A watch is a plan that keeps growing. Every few minutes the post's quotes and
 // replies are harvested again; anyone new is scored, added to the watch's plan
-// with what they wrote, and read by the same triage as everything else. Then,
-// depending on what the owner asked for:
+// with what they wrote, and read by the same triage as everything else. The
+// baseline, everyone already there when the watch started, is never read or
+// added by the watch. Then, depending on what the owner asked for:
 //
 //   ask   (the default) nothing is added. The hourly digest says what was found
 //         and a 👍 adds the hostile ones.
@@ -154,6 +155,7 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
   const { score, writeAgent, generate, model, log = () => {} } = deps;
   const plan = await findPlanById(watch.plan_id);
   if (!plan) return { fresh: 0, hostile: 0, added: 0, held: 0 };
+  const stats = watch.stats || {};
 
   const harvest = await harvestPost(watch.uri, {
     only: READ_KINDS,
@@ -197,17 +199,31 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     );
   }
 
-  // Triage reads whatever on the plan has words and no label yet: the
-  // newcomers, and anything from the baseline not read before.
+  // Triage reads the newcomers, and newcomers from earlier checks that no
+  // model has labelled yet. It never reads the baseline, so the watch never
+  // adds anyone who was already there when it started, including accounts the
+  // owner had just taken off the list.
+  const toRead = [
+    ...new Set([...newcomers.map((p) => p.did), ...(stats.unread || [])]),
+  ];
   const hostileBefore = await countDecisions(plan, { label: 'hostile' });
-  if (newcomers.length) {
-    await runTriage(plan, { generate, model, log }).catch((err) =>
+  if (toRead.length) {
+    await runTriage(plan, {
+      generate,
+      model,
+      log,
+      dids: toRead,
+      // An auto watch adds what it reads before anyone looks, so each post
+      // gets a model call of its own and can sway no label but its own.
+      ...(watch.mode === 'auto' ? { perCall: 1 } : {}),
+    }).catch((err) =>
       log('Watch triage failed', {
         uri: watch.uri,
         err: String(err?.message || err),
       }),
     );
   }
+  const unread = toRead.length ? await stillUnread(plan, toRead) : [];
   const hostileNow = await countDecisions(plan, { label: 'hostile' });
   const hostile = Math.max(0, hostileNow - hostileBefore);
 
@@ -226,8 +242,10 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
           bands: ['CONNECTED', 'NOTABLE'],
         })
       : hostileNow;
+  // A 👍 on the digest adds only what was labelled by now. The labels of
+  // later checks carry later times, so they wait for the next digest.
+  const heldAsOf = held ? await newestLabel(plan, 'hostile') : null;
 
-  const stats = watch.stats || {};
   const next = {
     ...stats,
     checks: (stats.checks || 0) + 1,
@@ -237,6 +255,8 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     addedTotal: (stats.addedTotal || 0) + added,
     newTotal: (stats.newTotal || 0) + newcomers.length,
     held,
+    heldAsOf,
+    unread,
   };
   await update(
     'watch',
@@ -254,9 +274,36 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
   return { fresh: newcomers.length, hostile, added, held };
 }
 
+/** Which of these accounts have words that no model has labelled yet. */
+async function stillUnread(plan, dids) {
+  const wanted = new Set(dids);
+  const rows = await selectAll('decision', {
+    select: 'did,evidence_uri,triage',
+    eq: { plan_id: plan.id },
+    order: 'did.asc',
+  });
+  return rows
+    .filter((r) => wanted.has(r.did) && r.evidence_uri && !r.triage)
+    .map((r) => r.did);
+}
+
+/** When the newest `label` on the plan was given, or null. */
+async function newestLabel(plan, label) {
+  const [row] =
+    (await select('decision', {
+      select: 'triage_at',
+      eq: { plan_id: plan.id, triage: label },
+      order: 'triage_at.desc',
+      limit: 1,
+    })) || [];
+  return row?.triage_at ?? null;
+}
+
 /**
- * The hourly digest for a watch, or null when there is nothing to say. Also
- * resets the per-digest counters. `pending` is the classic command a 👍 runs.
+ * The hourly digest for a watch, or null when there is nothing to say.
+ * `pending` is the classic command a 👍 runs. Nothing is written here:
+ * digestSent records the digest once it has gone, so one that fails to send
+ * goes again with the same counts.
  *
  * @returns {Promise<null | { text: string, pending: string[]|null, describe: string|null }>}
  */
@@ -296,22 +343,12 @@ export async function digestFor(
         ? `${s.held} hostile ${s.held === 1 ? 'one is' : 'ones are'} CONNECTED or NOTABLE, so I held ${s.held === 1 ? 'it' : 'them'}. Read them: review ${code} hostile`
         : `Read them: review ${code} hostile`,
     );
-    pending = [`approve ${code} hostile`];
+    // The accounts `held` counts and nothing labelled after them: hostile
+    // labels up to the last check, and on an auto watch only the held bands.
+    const bands = watch.mode === 'auto' ? ' CONNECTED,NOTABLE' : '';
+    pending = [`approve ${code} hostile${bands} asof=${s.heldAsOf}`];
     describe = `add the ${s.held} read as hostile on the watched post (plan ${code})`;
   }
-  await update(
-    'watch',
-    { eq: { id: watch.id } },
-    {
-      last_digest_at: new Date(now).toISOString(),
-      stats: {
-        ...s,
-        newSinceDigest: 0,
-        hostileSinceDigest: 0,
-        addedSinceDigest: 0,
-      },
-    },
-  );
   return {
     text: lines.join('\n'),
     pending,
@@ -320,23 +357,40 @@ export async function digestFor(
   };
 }
 
-/** Watches whose time is up, stopped, each with a closing digest. */
-export async function endExpired({ now = Date.now() } = {}) {
+/** Record that a digest went: the next one is about what came after it. */
+export async function digestSent(watch, { now = Date.now() } = {}) {
+  const stats = {
+    ...watch.stats,
+    newSinceDigest: 0,
+    hostileSinceDigest: 0,
+    addedSinceDigest: 0,
+  };
+  const patch = { last_digest_at: new Date(now).toISOString(), stats };
+  await update('watch', { eq: { id: watch.id } }, patch);
+  Object.assign(watch, patch);
+}
+
+/**
+ * Watches whose time is up and that are not closed yet. Each is closed with
+ * endWatch once its closing digest has gone, so a digest that fails to send
+ * is tried again. liveWatches already leaves them out, so nothing reads them
+ * in between.
+ */
+export async function expiredWatches({ now = Date.now() } = {}) {
   const rows = await select('watch', {
     select: 'id,convo_id,uri,plan_id,mode,until,last_digest_at,stats',
     is: { stopped_at: 'null' },
   });
-  const ended = [];
-  for (const w of rows || []) {
-    if (Date.parse(w.until) > now) continue;
-    await update(
-      'watch',
-      { eq: { id: w.id } },
-      { stopped_at: new Date(now).toISOString() },
-    );
-    ended.push(w);
-  }
-  return ended;
+  return (rows || []).filter((w) => !(Date.parse(w.until) > now));
+}
+
+/** Close a watch whose time is up. */
+export async function endWatch(watch, { now = Date.now() } = {}) {
+  await update(
+    'watch',
+    { eq: { id: watch.id } },
+    { stopped_at: new Date(now).toISOString() },
+  );
 }
 
 // --- the owner's own posts ---------------------------------------------------
@@ -357,7 +411,8 @@ const RECENT_MS = 48 * 3_600_000;
  * Each post's count is kept with when it was taken. A count at least an hour
  * old becomes the new baseline; growth past the threshold since a baseline
  * under an hour old is an alert, at most once every six hours per post, and
- * never for a post already being watched.
+ * never for a post already being watched. The six hours start when alertSent
+ * records that the alert went, so one that failed to send is offered again.
  *
  * @returns {Promise<Array<{ uri: string, growth: number, count: number }>>}
  */
@@ -422,16 +477,15 @@ export async function ownPostAlerts({
       : true;
     if (growth >= threshold && quietSince && !watched.has(p.uri)) {
       alerts.push({ uri: p.uri, growth, count });
-      writes.push({
-        uri: p.uri,
-        last_count: row.last_count,
-        last_seen_at: row.last_seen_at,
-        alerted_at: new Date(now).toISOString(),
-      });
     }
   }
   if (writes.length) await upsert('post_alert', writes).catch(() => {});
   return alerts;
+}
+
+/** Record that an alert went. */
+export async function alertSent({ uri }, { now = Date.now() } = {}) {
+  await upsert('post_alert', [{ uri, alerted_at: new Date(now).toISOString() }]);
 }
 
 /** The message for one alert, and what a 👍 does. */

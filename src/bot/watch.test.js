@@ -25,8 +25,14 @@ vi.mock('./db.js', () => ({
   }),
 }));
 
-const { digestFor, ownPostAlerts, alertText, watchesText } =
-  await import('./watch.js');
+const {
+  digestFor,
+  digestSent,
+  ownPostAlerts,
+  alertSent,
+  alertText,
+  watchesText,
+} = await import('./watch.js');
 
 const HOUR = 3_600_000;
 const URI = `at://${OWNER_DID}/app.bsky.feed.post/3abc`;
@@ -44,7 +50,12 @@ describe('the hourly digest', () => {
     mode: 'ask',
     until: new Date(10 * HOUR).toISOString(),
     last_digest_at: new Date(0).toISOString(),
-    stats: { newSinceDigest: 12, hostileSinceDigest: 3, held: 3 },
+    stats: {
+      newSinceDigest: 12,
+      hostileSinceDigest: 3,
+      held: 3,
+      heldAsOf: '2026-11-01T10:00:00.000Z',
+    },
     ...extra,
   });
 
@@ -55,9 +66,28 @@ describe('the hourly digest', () => {
     expect(out.text).toContain(
       '(8h left): 12 new quotes and replies since the last update, 3 read as hostile.',
     );
-    expect(out.pending).toEqual(['approve 1c2d3e4f hostile']);
+    expect(out.pending).toEqual([
+      'approve 1c2d3e4f hostile asof=2026-11-01T10:00:00.000Z',
+    ]);
+    await digestSent(w, { now: 2 * HOUR });
     // Counters reset, so the next digest is about the next hour.
     expect(db.watch[0].stats.newSinceDigest).toBe(0);
+  });
+
+  it('records nothing until the digest has gone', async () => {
+    const w = watch();
+    db.watch.push(w);
+    await digestFor(w, { now: 2 * HOUR });
+    // A send that fails leaves the counts for the next try.
+    expect(db.watch[0].stats.newSinceDigest).toBe(12);
+    expect(db.watch[0].last_digest_at).toBe(new Date(0).toISOString());
+    await digestSent(w, { now: 2 * HOUR });
+    expect(db.watch[0].stats).toMatchObject({
+      newSinceDigest: 0,
+      hostileSinceDigest: 0,
+      held: 3,
+    });
+    expect(db.watch[0].last_digest_at).toBe(new Date(2 * HOUR).toISOString());
   });
 
   it('says who was added on an auto watch, and what was held', async () => {
@@ -68,6 +98,7 @@ describe('the hourly digest', () => {
         hostileSinceDigest: 5,
         addedSinceDigest: 4,
         held: 1,
+        heldAsOf: '2026-11-01T10:00:00.000Z',
       },
     });
     db.watch.push(w);
@@ -122,11 +153,26 @@ describe("alerts on the owner's own posts", () => {
       now: 1000 + 40 * 60_000,
     });
     expect(alerts).toEqual([{ uri: URI, growth: 22, count: 25 }]);
+    await alertSent(alerts[0], { now: 1000 + 40 * 60_000 });
     // Not again for six hours.
     expect(
       await ownPostAlerts({ fetchImpl: feed(60), now: 1000 + 50 * 60_000 }),
     ).toEqual([]);
     expect(alertText(alerts[0]).pending).toEqual([`watch ${URI}`]);
+  });
+
+  it('offers an alert again when it was not sent', async () => {
+    await ownPostAlerts({ fetchImpl: feed(3), now: 1000 });
+    const first = await ownPostAlerts({
+      fetchImpl: feed(25),
+      now: 1000 + 20 * 60_000,
+    });
+    expect(first).toHaveLength(1);
+    const again = await ownPostAlerts({
+      fetchImpl: feed(26),
+      now: 1000 + 25 * 60_000,
+    });
+    expect(again).toEqual([{ uri: URI, growth: 23, count: 26 }]);
   });
 
   it('alerts once on a post that is in the feed twice', async () => {

@@ -12,8 +12,11 @@ import {
   liveWatches,
   checkWatch,
   digestFor,
-  endExpired,
+  digestSent,
+  expiredWatches,
+  endWatch,
   ownPostAlerts,
+  alertSent,
   alertText,
   WATCH_EVERY_MS,
 } from './bot/watch.js';
@@ -61,6 +64,12 @@ export async function say(
 }
 
 /**
+ * How long after a watch ends its closing digest is retried before the watch
+ * is closed without it.
+ */
+const CLOSE_RETRY_MS = 24 * 3_600_000;
+
+/**
  * Read every watch that is due, send the digests that are, end the expired.
  * `everyMs` is how often a watch is read again (MOD_WATCH_EVERY_MS).
  *
@@ -68,6 +77,10 @@ export async function say(
  * the watch keeps reading, its counts keep adding up, and the update goes once
  * the owner has answered or the question has lapsed. A closing digest cannot
  * wait, so say() sends that one without a question of its own.
+ *
+ * A digest is recorded only once it has gone, and an expired watch is closed
+ * only once its closing digest has gone, so a failed send is tried again on
+ * the next tick. One watch failing does not stop the others.
  */
 export async function tickWatches({
   chat,
@@ -85,9 +98,20 @@ export async function tickWatches({
     }
     return asking.get(convoId);
   };
-  for (const w of await endExpired({ now })) {
-    const d = await digestFor(w, { now, ending: true });
-    if (d) await say(chat, w.convo_id, d);
+  for (const w of await expiredWatches({ now })) {
+    try {
+      const d = await digestFor(w, { now, ending: true });
+      if (d) await say(chat, w.convo_id, d);
+      await endWatch(w, { now });
+    } catch (err) {
+      log('Closing digest failed', {
+        uri: w.uri,
+        err: String(err?.message || err),
+      });
+      if (now - Date.parse(w.until) >= CLOSE_RETRY_MS) {
+        await endWatch(w, { now }).catch(() => {});
+      }
+    }
   }
   for (const w of await liveWatches({ now })) {
     // Half a minute of slack, so timer jitter does not skip a round.
@@ -115,11 +139,19 @@ export async function tickWatches({
       });
       continue;
     }
-    if (await busy(w.convo_id)) continue;
-    const d = await digestFor(w, { now });
-    if (d) {
-      await say(chat, w.convo_id, d);
-      log('Sent a watch digest', { uri: w.uri });
+    try {
+      if (await busy(w.convo_id)) continue;
+      const d = await digestFor(w, { now });
+      if (d) {
+        await say(chat, w.convo_id, d);
+        await digestSent(w, { now });
+        log('Sent a watch digest', { uri: w.uri });
+      }
+    } catch (err) {
+      log('Watch digest failed', {
+        uri: w.uri,
+        err: String(err?.message || err),
+      });
     }
   }
 }
@@ -129,7 +161,8 @@ export async function tickWatches({
  *
  * An alert is offered once, so it waits for the next tick while there is no
  * convo to send it to, or while a question from the conversation is open
- * (it would go out without the 👍 that is the point of it).
+ * (it would go out without the 👍 that is the point of it). It counts as
+ * offered only once it has gone, so a failed send is offered again.
  */
 export async function tickAlerts({
   chat,
@@ -140,13 +173,19 @@ export async function tickAlerts({
   const convoId = await convoFor();
   if (!convoId || (await questionOpen(convoId, { now }))) return 0;
   const alerts = await ownPostAlerts({ now });
-  if (!alerts.length) return 0;
+  let sent = 0;
   for (const a of alerts) {
-    await say(chat, convoId, alertText(a));
-    log('Offered a watch on a post taking off', {
-      uri: a.uri,
-      growth: a.growth,
-    });
+    try {
+      await say(chat, convoId, alertText(a));
+      await alertSent(a, { now });
+      sent += 1;
+      log('Offered a watch on a post taking off', {
+        uri: a.uri,
+        growth: a.growth,
+      });
+    } catch (err) {
+      log('Alert failed', { uri: a.uri, err: String(err?.message || err) });
+    }
   }
-  return alerts.length;
+  return sent;
 }

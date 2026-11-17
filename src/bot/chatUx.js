@@ -160,11 +160,10 @@ export function noteQuiet(convoId, item, now = Date.now()) {
 export function takeDueSummaries({
   now = Date.now(),
   quietMs = QUIET_MS,
-  force = false,
 } = {}) {
   const out = [];
   for (const [convoId, entry] of quiet) {
-    if (!force && now - entry.lastAt < quietMs) continue;
+    if (now - entry.lastAt < quietMs) continue;
     quiet.delete(convoId);
     if (entry.items.length >= 2) out.push({ convoId, ...entry });
   }

@@ -115,7 +115,7 @@ describe('the burst summary', () => {
     const due = takeDueSummaries({ now: 95_000 });
     expect(due.map((d) => d.convoId)).toEqual(['c2']);
     // c1 was taken too, and dropped: its ✅ said everything.
-    expect(takeDueSummaries({ now: 999_999, force: true })).toEqual([]);
+    expect(takeDueSummaries({ now: 999_999 })).toEqual([]);
   });
 
   it('says who, what was already there, and who already blocks you', () => {

@@ -74,6 +74,19 @@ describe('reading the model back', () => {
     expect(parseLabels('0: hostile\n1: arguing', 2)).toEqual(['arguing', null]);
   });
 
+  it('trusts nothing in a reply that numbers an item twice', () => {
+    // A post's words read back after the real answer look like this. Taking
+    // the last line would let one post decide another post's label.
+    expect(
+      parseLabels('1: neutral\n2: neutral\n3: neutral\n2: hostile\n3: hostile', 3),
+    ).toEqual([null, null, null]);
+    expect(parseLabels('1: neutral\n1: hostile', 1)).toEqual([null]);
+    expect(parseLabels('1: hostile\n2: arguing\n1. hostile', 2)).toEqual([
+      null,
+      null,
+    ]);
+  });
+
   it('only accepts the three labels', () => {
     for (const label of LABELS) {
       expect(parseLabels(`1: ${label}`, 1)).toEqual([label]);

@@ -27,8 +27,11 @@ const watch = {
   liveWatches: vi.fn(async () => []),
   checkWatch: vi.fn(async () => {}),
   digestFor: vi.fn(async () => null),
-  endExpired: vi.fn(async () => []),
+  digestSent: vi.fn(async () => {}),
+  expiredWatches: vi.fn(async () => []),
+  endWatch: vi.fn(async () => {}),
   ownPostAlerts: vi.fn(async () => []),
+  alertSent: vi.fn(async () => {}),
 };
 vi.mock('./bot/watch.js', () => ({
   ...watch,
@@ -45,14 +48,16 @@ const { say, tickWatches, tickAlerts } = await import('./watching.js');
 const { savePending, readPending } =
   await import('./bot/chatUx.js');
 
-function chat() {
+/** A chat whose sends to the convos in `down` fail. */
+function chat({ down = [] } = {}) {
   const sent = [];
   return {
     sent,
     chat: {
       bsky: {
         convo: {
-          sendMessage: async ({ message }) => {
+          sendMessage: async ({ convoId, message }) => {
+            if (down.includes(convoId)) throw new Error('502 Bad Gateway');
             sent.push(message.text);
             return { data: { id: `m${sent.length}` } };
           },
@@ -136,6 +141,84 @@ describe('how often a watch is read', () => {
     expect(watch.checkWatch).toHaveBeenCalledTimes(1);
     await tick(5 * 60_000);
     expect(watch.checkWatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a send that fails', () => {
+  const tick = (c) =>
+    tickWatches({
+      chat: c,
+      agent: {},
+      reference: async () => ({ io: { score: () => {} } }),
+      model: 'm',
+      now: Date.parse('2026-11-01T12:00:00Z'),
+    });
+
+  it('keeps an expired watch open until its closing digest has gone', async () => {
+    const w = {
+      id: 'w1',
+      convo_id: 'convo1',
+      uri: 'at://p',
+      until: '2026-11-01T11:00:00Z',
+    };
+    watch.expiredWatches.mockResolvedValue([w]);
+    watch.digestFor.mockResolvedValue({ text: 'Stopped watching: 12 added.' });
+    try {
+      await tick(chat({ down: ['convo1'] }));
+      expect(watch.endWatch).not.toHaveBeenCalled();
+
+      const c = chat();
+      await tick(c);
+      expect(c.sent).toEqual(['Stopped watching: 12 added.']);
+      expect(watch.endWatch).toHaveBeenCalledWith(w, expect.anything());
+    } finally {
+      watch.expiredWatches.mockReset();
+      watch.expiredWatches.mockResolvedValue([]);
+      watch.digestFor.mockReset();
+      watch.digestFor.mockResolvedValue(null);
+    }
+  });
+
+  it('gives up on a closing digest a day after the watch ended', async () => {
+    const w = { id: 'w1', convo_id: 'convo1', until: '2026-10-31T11:00:00Z' };
+    watch.expiredWatches.mockResolvedValueOnce([w]);
+    watch.digestFor.mockResolvedValueOnce({ text: 'Stopped watching.' });
+    await tick(chat({ down: ['convo1'] }));
+    expect(watch.endWatch).toHaveBeenCalledWith(w, expect.anything());
+  });
+
+  it('records a digest only once it has gone, and goes on to the next watch', async () => {
+    const a = { id: 'a', convo_id: 'convo1', uri: 'at://a' };
+    const b = { id: 'b', convo_id: 'convo2', uri: 'at://b' };
+    watch.liveWatches.mockResolvedValueOnce([a, b]);
+    watch.digestFor
+      .mockResolvedValueOnce({ text: 'Added 12 on a.' })
+      .mockResolvedValueOnce({ text: 'Added 3 on b.' });
+    const c = chat({ down: ['convo1'] });
+    await tick(c);
+    expect(c.sent).toEqual(['Added 3 on b.']);
+    expect(watch.digestSent).toHaveBeenCalledTimes(1);
+    expect(watch.digestSent).toHaveBeenCalledWith(b, expect.anything());
+  });
+
+  it('records an alert only once it has gone', async () => {
+    watch.ownPostAlerts.mockResolvedValueOnce([{ uri: 'at://p', growth: 20 }]);
+    const n = await tickAlerts({
+      chat: chat({ down: ['convo1'] }),
+      convoFor: async () => 'convo1',
+    });
+    expect(n).toBe(0);
+    expect(watch.alertSent).not.toHaveBeenCalled();
+
+    watch.ownPostAlerts.mockResolvedValueOnce([{ uri: 'at://p', growth: 20 }]);
+    const c = chat();
+    expect(await tickAlerts({ chat: c, convoFor: async () => 'convo1' })).toBe(
+      1,
+    );
+    expect(watch.alertSent).toHaveBeenCalledWith(
+      { uri: 'at://p', growth: 20 },
+      expect.anything(),
+    );
   });
 });
 

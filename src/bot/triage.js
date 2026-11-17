@@ -115,18 +115,35 @@ Reply with one line per item, nothing else:
 
 Every number gets exactly one line. No commentary, no explanation, no blank lines.`;
 
-/** Parse "3: hostile" lines back into labels, tolerating stray output. */
+/**
+ * Parse "3: hostile" lines back into labels, tolerating stray output.
+ *
+ * A reply that numbers any item twice is not trusted at all. Every post in the
+ * batch shares the call, so a second "2: hostile" is most likely one post's
+ * words read back as an answer, and taking either line would let that post
+ * decide another post's label. The whole batch stays unlabelled instead.
+ */
 export function parseLabels(text, count) {
   const out = new Array(count).fill(null);
+  const seen = new Set();
   for (const line of String(text ?? '').split('\n')) {
     const m = /^\s*(\d+)\s*[:.)-]\s*([a-z]+)/i.exec(line);
     if (!m) continue;
-    const i = Number(m[1]) - 1;
+    const n = Number(m[1]);
+    if (seen.has(n)) return new Array(count).fill(null);
+    seen.add(n);
     const label = m[2].toLowerCase();
-    if (i >= 0 && i < count && LABELS.includes(label)) out[i] = label;
+    if (n >= 1 && n <= count && LABELS.includes(label)) out[n - 1] = label;
   }
   return out;
 }
+
+/**
+ * A post's text on one line, so nothing a stranger wrote can start a line
+ * that reads like an answer or like another post's number.
+ */
+const oneLine = (text) =>
+  String(text ?? '').replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
 
 /**
  * Read and label one batch.
@@ -136,7 +153,9 @@ export function parseLabels(text, count) {
  */
 async function labelBatch(items, { generate, model, usage = [] }) {
   const body = items
-    .map((it, i) => `${i + 1}. ${untrusted(`post-${i + 1}`, it.text)}`)
+    .map(
+      (it, i) => `${i + 1}. ${untrusted(`post-${i + 1}`, oneLine(it.text))}`,
+    )
     .join('\n');
   const result = await generate({
     model,
@@ -167,22 +186,18 @@ const SECOND_CONCURRENCY = 4;
  *
  * @returns {Promise<Map<object, string|null>>}
  */
-async function secondWave(items, { generate, model, usage, log }) {
+async function secondWave(items, { generate, model, usage, perCall, fail }) {
   const labels = new Map();
   const batches = [];
-  for (let i = 0; i < items.length; i += PER_CALL) {
-    batches.push(items.slice(i, i + PER_CALL));
+  for (let i = 0; i < items.length; i += perCall) {
+    batches.push(items.slice(i, i + perCall));
   }
   for (let w = 0; w < batches.length; w += SECOND_CONCURRENCY) {
     await Promise.all(
       batches.slice(w, w + SECOND_CONCURRENCY).map((batch) =>
         labelBatch(batch, { generate, model, usage })
           .then((out) => batch.forEach((row, n) => labels.set(row, out[n])))
-          .catch((err) =>
-            log('Second-wave triage batch failed', {
-              err: String(err?.message || err),
-            }),
-          ),
+          .catch((err) => fail('Second-wave triage batch failed', err)),
       ),
     );
   }
@@ -215,6 +230,15 @@ async function recordUsage(rows) {
  *
  * Resumable and idempotent in the same shape as an approval: rows already
  * carrying a label are skipped, so sending it again continues.
+ *
+ * `perCall` is how many posts share one model call. At 1, no stranger's words
+ * are ever in the same call as another's, so a post that talks to the model
+ * can only sway its own label. `dids`, when given, limits the read, and the
+ * `remaining` count, to those accounts.
+ *
+ * `failed` counts the rows whose first-wave call threw, and `error` is the
+ * last failure from either wave, so an outage is not mistaken for rows simply
+ * left for the next run.
  */
 export async function runTriage(
   plan,
@@ -222,6 +246,8 @@ export async function runTriage(
     generate,
     model,
     perRun = PER_RUN,
+    perCall = PER_CALL,
+    dids = null,
     log = () => {},
     escalation = ESCALATION_MODEL,
   },
@@ -236,6 +262,14 @@ export async function runTriage(
   let escalated = 0;
   let overturned = 0;
   let secondFailed = 0;
+  let error = null;
+  const fail = (msg, err) => {
+    const text = String(err?.message || err);
+    error = text.slice(0, 200);
+    log(msg, { err: text });
+  };
+  const size = Math.max(1, Math.floor(perCall) || 1);
+  const only = dids ? new Set(dids) : null;
   const rows = await selectAll('decision', {
     select: 'did,band,evidence_uri,triage',
     eq: { plan_id: plan.id },
@@ -243,7 +277,9 @@ export async function runTriage(
   });
 
   const withText = rows.filter((r) => r.evidence_uri);
-  const pending = withText.filter((r) => !r.triage).slice(0, perRun);
+  const pending = withText
+    .filter((r) => !r.triage && (!only || only.has(r.did)))
+    .slice(0, perRun);
   const noText = rows.length - withText.length;
 
   if (!pending.length) {
@@ -254,6 +290,8 @@ export async function runTriage(
     });
     return {
       labelled: 0,
+      failed: 0,
+      error: null,
       remaining: 0,
       noText,
       gone: all.filter((r) => r.triage === 'gone').length,
@@ -294,8 +332,8 @@ export async function runTriage(
 
   const now = new Date().toISOString();
   const batches = [];
-  for (let i = 0; i < items.length; i += PER_CALL) {
-    batches.push(items.slice(i, i + PER_CALL));
+  for (let i = 0; i < items.length; i += size) {
+    batches.push(items.slice(i, i + size));
   }
 
   let labelled = 0;
@@ -313,7 +351,7 @@ export async function runTriage(
           // counted and logged, so it cannot pass for the model skipping rows.
           .catch((err) => {
             failed += batch.length;
-            log('Triage batch failed', { err: String(err?.message || err) });
+            fail('Triage batch failed', err);
             return null;
           }),
       ),
@@ -332,7 +370,8 @@ export async function runTriage(
           generate,
           model: escalation,
           usage: secondUsage,
-          log,
+          perCall: size,
+          fail,
         })
       : new Map();
     escalated += candidates.length;
@@ -379,6 +418,8 @@ export async function runTriage(
   });
   return {
     labelled,
+    failed,
+    error,
     ...(twoWaves
       ? {
           secondWave: {
@@ -389,7 +430,9 @@ export async function runTriage(
           },
         }
       : {}),
-    remaining: after.filter((r) => r.evidence_uri && !r.triage).length,
+    remaining: after.filter(
+      (r) => r.evidence_uri && !r.triage && (!only || only.has(r.did)),
+    ).length,
     noText,
     gone: after.filter((r) => r.triage === 'gone').length,
     counts: countLabels(after),
