@@ -171,11 +171,13 @@ A band answers *who would notice if I blocked them*. On a post with hundreds of 
 
 | Label | Is |
 | --- | --- |
-| `hostile` | Aimed at a person: insults, slurs, dehumanising language, calls to pile on |
+| `hostile` | Aimed at the post's author or people standing with them: insults, slurs, dehumanising language, calls to pile on |
 | `arguing` | Disagrees with the claim or the decision, including bluntly or angrily |
 | `neutral` | Neither: commentary, jokes, questions, agreement |
 
 Three labels, because the only line that carries weight is between attacking a person and attacking an argument. Heat is not the test: "this policy is cowardly" is `arguing`; "you are a worthless piece of shit" is `hostile`. Ties go to the less severe label, because someone gets added to a block list off the back of this and the two mistakes don't cost the same.
+
+The model sees the original post, and for a reply to another reply, the one it answers. So someone telling an attacker to back off is read as defending the author, not as hostile to them.
 
 This is still a bulk sweep, with a model's reading in place of the follow graph. What makes it defensible is that the subset is smaller and better justified than "everyone who engaged", the words behind each label are stored next to it, `review <code> hostile` shows them before anything is approved, and approving is a separate human step with the PROTECTED veto still in place.
 

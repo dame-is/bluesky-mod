@@ -500,3 +500,56 @@ describe('a triage the turn ran out of time for', () => {
     expect(seen[0].aborted).toBe(true);
   });
 });
+
+describe('what each call is shown', () => {
+  it('shows the original post, and the reply a reply answers', async () => {
+    const SUBJECT = 'at://did:plc:op/app.bsky.feed.post/0';
+    const ATTACKER = 'at://did:plc:p4/app.bsky.feed.post/4';
+    const texts = {
+      ...POSTS,
+      [SUBJECT]: 'here is my zine, made it this summer',
+    };
+    // p1 answers p4, the attacker; the others answer the post itself.
+    const parentOf = { 'at://did:plc:p1/app.bsky.feed.post/1': ATTACKER };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        const uris = [...new URL(url).searchParams.getAll('uris')];
+        return {
+          ok: true,
+          json: async () => ({
+            posts: uris.map((uri) => ({
+              uri,
+              record: {
+                text: texts[uri],
+                reply: { parent: { uri: parentOf[uri] || SUBJECT } },
+              },
+            })),
+          }),
+        };
+      }),
+    );
+    const generate = vi.fn(async ({ messages }) => ({
+      text: messages[0].content
+        .split(/\n(?=\d+\. )/)
+        .filter((item) => /^\d+\. /.test(item))
+        .map((_, i) => `${i + 1}: neutral`)
+        .join('\n'),
+      usage: {},
+    }));
+    await runTriage(
+      { id: PLAN.id, totals: { uri: SUBJECT } },
+      { generate, model: 'm', perCall: 20, escalation: 'off' },
+    );
+    const body = generate.mock.calls[0][0].messages[0].content;
+    expect(body).toMatch(
+      /^The original post:\n<untrusted source="original">\nhere is my zine/,
+    );
+    expect(body).toContain(
+      `In reply to <untrusted source="answers-1">\n${POSTS[ATTACKER]}\n</untrusted>`,
+    );
+    // A reply to the post itself shows no second copy of it.
+    expect(body.match(/In reply to/g)).toHaveLength(1);
+    expect(db.decision.every((r) => r.triage === 'neutral')).toBe(true);
+  });
+});

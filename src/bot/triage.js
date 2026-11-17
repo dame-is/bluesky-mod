@@ -64,12 +64,13 @@ export function evidenceUriFor(row) {
  * Reports which URIs the AppView answered about (`asked`), which posts it
  * returned (`returned`), and which of those had text. A post it answered
  * about and did not return will never arrive; one whose whole request failed
- * might be there next time.
+ * might be there next time. `parents` maps a reply to the post it answers.
  */
 async function textsFor(uris) {
   const texts = new Map();
   const asked = new Set();
   const returned = new Set();
+  const parents = new Map();
   for (let i = 0; i < uris.length; i += POSTS_PER_CALL) {
     const slice = uris.slice(i, i + POSTS_PER_CALL);
     const q = slice.map((u) => `uris=${encodeURIComponent(u)}`).join('&');
@@ -84,21 +85,25 @@ async function textsFor(uris) {
         returned.add(post.uri);
         const text = String(post?.record?.text ?? '').trim();
         if (text) texts.set(post.uri, text);
+        const parent = post?.record?.reply?.parent?.uri;
+        if (typeof parent === 'string') parents.set(post.uri, parent);
       }
     } catch {
       // The request failed, so these stay pending and get another go.
     }
   }
-  return { texts, asked, returned };
+  return { texts, asked, returned, parents };
 }
 
-const PROMPT = `You are sorting short posts by TONE for a moderation review. Each numbered item is one post somebody wrote about a thread.
+const PROMPT = `You are sorting short posts by TONE for a moderation review. The thread's original post comes first. Each numbered item is one post somebody wrote replying to or quoting it, and an item that answers another reply shows that reply before it. Only the numbered posts are labelled.
 
 Label each with exactly one of:
 
-hostile  - aimed at a person rather than an argument: insults, slurs, dehumanising language, wishing harm, telling others to go after someone.
+hostile  - aimed at the original post's author, or at people standing with them, rather than at an argument: insults, slurs, dehumanising language, wishing harm, telling others to go after someone.
 arguing  - disagrees with the claim or the decision, including bluntly, angrily, sarcastically or rudely. Still about the substance.
 neutral  - neither: commentary, jokes, questions, links, agreement, or too little to tell.
+
+Read who each post is aimed at. A reply that defends the original poster, or pushes back at someone attacking them, is not hostile to them, however heated it is: label it arguing.
 
 The line between hostile and arguing is the one that matters and it is not about heat. "This policy is cowardly and indefensible" is arguing. "You are a worthless piece of shit" is hostile. Anger at an institution is arguing; contempt for a person is hostile. When it is genuinely unclear, choose the less severe label: someone will be added to a block list off the back of this, and the cost of the two mistakes is not symmetric.
 
@@ -148,12 +153,23 @@ const oneLine = (text) =>
  * A row the model did not answer for stays null and is left unlabelled, so a
  * malformed reply costs a retry rather than a wrong label.
  */
-async function labelBatch(items, { generate, model, usage = [], signal }) {
-  const body = items
-    .map(
-      (it, i) => `${i + 1}. ${untrusted(`post-${i + 1}`, oneLine(it.text))}`,
-    )
-    .join('\n');
+async function labelBatch(
+  items,
+  { generate, model, usage = [], signal, subject = null },
+) {
+  const original = subject
+    ? `The original post:\n${untrusted('original', oneLine(subject))}\n\n`
+    : '';
+  const body =
+    original +
+    items
+      .map((it, i) => {
+        const answers = it.parentText
+          ? `In reply to ${untrusted(`answers-${i + 1}`, oneLine(it.parentText))}\n`
+          : '';
+        return `${i + 1}. ${answers}${untrusted(`post-${i + 1}`, oneLine(it.text))}`;
+      })
+      .join('\n');
   const result = await generate({
     model,
     instructions: { role: 'system', content: PROMPT },
@@ -188,7 +204,7 @@ const SECOND_CONCURRENCY = 4;
  */
 async function secondWave(
   items,
-  { generate, model, usage, perCall, fail, signal },
+  { generate, model, usage, perCall, fail, signal, subject },
 ) {
   const labels = new Map();
   const batches = [];
@@ -198,7 +214,7 @@ async function secondWave(
   for (let w = 0; w < batches.length; w += SECOND_CONCURRENCY) {
     const done = await Promise.all(
       batches.slice(w, w + SECOND_CONCURRENCY).map((batch) =>
-        labelBatch(batch, { generate, model, usage, signal })
+        labelBatch(batch, { generate, model, usage, signal, subject })
           .then((out) => {
             batch.forEach((row, n) => labels.set(row, out[n]));
             return true;
@@ -332,11 +348,36 @@ export async function runTriage(
     };
   }
 
-  const { texts, asked, returned } = await textsFor(
+  const { texts, asked, returned, parents } = await textsFor(
     pending.map((r) => r.evidence_uri),
   );
+  // The post the plan is about, and the reply each reply answers when that
+  // is not the post itself, so a defender is not read as an attacker. Read
+  // as context only; nothing here is labelled.
+  const subjectUri = plan.totals?.uri || null;
+  const answered = [
+    ...new Set(
+      pending
+        .map((r) => parents.get(r.evidence_uri))
+        .filter((u) => u && u !== subjectUri),
+    ),
+  ];
+  const context = await textsFor(
+    [subjectUri, ...answered].filter(Boolean),
+  );
+  const subject = subjectUri ? context.texts.get(subjectUri) || null : null;
   const items = pending
-    .map((r) => ({ ...r, text: texts.get(r.evidence_uri) }))
+    .map((r) => {
+      const parent = parents.get(r.evidence_uri);
+      return {
+        ...r,
+        text: texts.get(r.evidence_uri),
+        parentText:
+          parent && parent !== subjectUri
+            ? context.texts.get(parent) || null
+            : null,
+      };
+    })
     .filter((r) => r.text);
 
   // Posts with nothing to read. No later run will read them either, so they
@@ -393,7 +434,13 @@ export async function runTriage(
       const waveItems = wave.flat();
       const results = await Promise.all(
         wave.map((batch) =>
-          labelBatch(batch, { generate, model, usage: firstUsage, signal })
+          labelBatch(batch, {
+            generate,
+            model,
+            usage: firstUsage,
+            signal,
+            subject,
+          })
             .then((labels) => ({ batch, labels }))
             // A failed call leaves its rows pending for the next run. It is
             // counted and logged, so it cannot pass for the model skipping
@@ -426,6 +473,7 @@ export async function runTriage(
             perCall: size,
             fail,
             signal,
+            subject,
           })
         : new Map();
       escalated += candidates.length;
