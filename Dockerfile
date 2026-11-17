@@ -15,5 +15,8 @@ COPY config/bot.example.json ./config/bot.example.json
 RUN mkdir -p /app/data && chown -R node:node /app/data
 VOLUME /app/data
 
-USER node
+# Starts as root only to hand a host's root-owned disk to the node user, then
+# runs everything as node (docker-entrypoint.sh).
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "--disable-warning=ExperimentalWarning", "src/main.js"]
