@@ -429,11 +429,23 @@ function runSnapshot({ force = false } = {}) {
         snapshotBusy = false;
         throw err;
       }
+      // Every member left failed a moment ago: come back once the first of
+      // them may be asked again, rather than at the next hourly check.
+      if (res.state === 'waiting') {
+        logger.info('Snapshot waiting to ask again', {
+          remaining: res.remaining,
+          retryInMs: res.retryInMs,
+        });
+        if (!shuttingDown) setTimeout(step, res.retryInMs + 1000);
+        return;
+      }
       if (res.state === 'collecting' || res.state === 'finalising') {
         logger.info('Snapshot step', {
           state: res.state,
           remaining: res.remaining,
           indexed: res.indexed,
+          unreadable: res.unreadable,
+          partial: res.partial?.length,
         });
         if (!shuttingDown) {
           // A DM poll goes in ahead of the next step, so a message sent during

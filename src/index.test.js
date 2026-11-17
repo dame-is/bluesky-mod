@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
   answerText: '',
   answerError: null,
   posted: [],
+  stepScript: [],
 }));
 
 vi.mock('./bot/dmLoop.js', async (importOriginal) => ({
@@ -64,6 +65,7 @@ vi.mock('./snapshot.js', () => ({
     // A step spends its whole budget, as a real one does on a large graph.
     await new Promise((r) => setTimeout(r, 25_000));
     h.steps += 1;
+    if (h.stepScript.length) return h.stepScript.shift();
     return h.steps < h.stepsToFinish
       ? { state: 'collecting', remaining: 100, indexed: h.steps }
       : { state: 'finalised', snapshot: 's', vouches: 1, unreadableMembers: 0 };
@@ -158,6 +160,7 @@ beforeEach(() => {
     answerText: '',
     answerError: null,
     posted: [],
+    stepScript: [],
   });
   vi.resetModules();
   vi.useFakeTimers();
@@ -212,6 +215,17 @@ describe('DMs while the snapshot builds', () => {
     await vi.advanceTimersByTimeAsync(h.stepsToFinish * 26_000);
     expect(h.steps).toBe(h.stepsToFinish);
     expect(pollBetweenSteps(h.events)).toBe(true);
+  });
+
+  it('comes back when a member that failed may be asked again', async () => {
+    // Every member left failed a moment ago. The hourly check would leave
+    // the build waiting far longer than the ten-minute pause.
+    h.snapshotExists = false;
+    h.stepScript = [{ state: 'waiting', remaining: 2, retryInMs: 600_000 }];
+    await boot();
+    // The first step, the pause and a second, each step taking 25s.
+    await vi.advanceTimersByTimeAsync(25_000 + 601_000 + 25_000 + 1_000);
+    expect(h.steps).toBe(2);
   });
 
   it('never polls in a dry run', async () => {
