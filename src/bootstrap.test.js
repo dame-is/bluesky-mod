@@ -35,10 +35,10 @@ describe("the bot's list", () => {
     const { agent, writes } = agentWith();
     expect(await findOrCreateList(agent)).toEqual({
       uri: `at://${BOT}/app.bsky.graph.list/3new`,
-      name: 'Block list',
+      name: 'Block List',
       created: true,
     });
-    expect(writes[0].record).toMatchObject({ purpose: MODLIST, name: 'Block list' });
+    expect(writes[0].record).toMatchObject({ purpose: MODLIST, name: 'Block List' });
   });
 
   it('is the one it has, and only a moderation list counts', async () => {

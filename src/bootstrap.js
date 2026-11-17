@@ -62,7 +62,7 @@ export async function createList(agent, name) {
  *
  * @returns {Promise<{ uri: string, name: string, created: boolean }>}
  */
-export async function findOrCreateList(agent, { name = 'Block list' } = {}) {
+export async function findOrCreateList(agent, { name = 'Block List' } = {}) {
   const lists = await moderationLists(agent);
   if (lists.length === 1) return { ...lists[0], created: false };
   if (lists.length > 1) {

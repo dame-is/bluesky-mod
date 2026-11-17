@@ -23,7 +23,7 @@ import { settleIdentities } from '../src/identity.js';
 
 const args = process.argv.slice(2);
 const nameAt = args.indexOf('--name');
-const listName = nameAt >= 0 && args[nameAt + 1] ? args[nameAt + 1] : 'Block list';
+const listName = nameAt >= 0 && args[nameAt + 1] ? args[nameAt + 1] : 'Block List';
 const makeNew = args.includes('--new');
 
 const say = (line = '') => console.log(line);
