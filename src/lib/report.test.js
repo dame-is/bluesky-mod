@@ -151,7 +151,8 @@ describe('actionsFor', () => {
   });
 
   it('names an account by DID when it has no usable handle', () => {
-    // The command parser takes a bare DID, not one after an @.
+    // A missing or unverified handle cannot be resolved, so the menu writes
+    // the bare DID.
     for (const handle of [null, 'handle.invalid']) {
       const out = actionsFor({ ...account, handle });
       expect(out.map((o) => o.command)).toEqual([

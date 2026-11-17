@@ -167,8 +167,7 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
 
 /**
  * How a menu names an account. A missing handle, or one that does not verify
- * ("handle.invalid"), cannot be resolved, so those use the DID, which the
- * command parser takes bare and not after an @.
+ * ("handle.invalid"), cannot be resolved, so those use the bare DID.
  */
 function actorRef(a) {
   return a.handle && a.handle !== 'handle.invalid' ? `@${a.handle}` : a.did;
