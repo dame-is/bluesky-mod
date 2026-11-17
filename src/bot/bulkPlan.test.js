@@ -866,6 +866,20 @@ describe('approving after an undo', () => {
     expect(repo.size).toBe(0);
   });
 
+  it('clears a scan\'s already-listed flag on a row it writes', async () => {
+    // The scan saw them listed; they came off outside the bot before this.
+    db.decision = [
+      { ...scanned(PLAN_A, 'did:plc:a', 'UNKNOWN'), already_listed: true },
+    ];
+    const out = await applyPlanToActors(bot(), db.plan[0], ['did:plc:a']);
+    expect(out.added).toBe(1);
+    expect(row(PLAN_A, 'did:plc:a')).toMatchObject({
+      action: 'list_add',
+      already_listed: false,
+    });
+    expect((await lastChange()).plan.id).toBe(PLAN_A);
+  });
+
   it('never calls an unblock an undo', async () => {
     db.decision = [
       added(PLAN_A, 'did:plc:a', '2026-10-01T10:00:00Z', { engaged: ['like'] }),

@@ -636,6 +636,8 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
           action: 'list_add',
           approved_via: via,
           acted_seq: seq,
+          // A scan that saw them listed set this; this batch writes them.
+          already_listed: false,
         })),
       );
     } catch (err) {
@@ -740,6 +742,7 @@ async function stampRows(plan, rows, via = null, seq = null) {
     action: 'list_add',
     acted_at: now,
     acted_seq: seq,
+    already_listed: false,
     ...(via ? { approved_via: via } : {}),
   }));
 }
