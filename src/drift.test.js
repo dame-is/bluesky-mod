@@ -210,6 +210,16 @@ describe('the brief', () => {
     expect(body.indexOf('@b.test')).toBeLessThan(body.indexOf('@a.test'));
   });
 
+  it('counts one account re-scored as one account', () => {
+    const body = renderBrief({
+      scored: 1,
+      drifted: [],
+      gone: [{ did: 'did:plc:a' }],
+      added: 0,
+    });
+    expect(body).toContain('Re-scored 1 account on the list.');
+  });
+
   it('says nothing when nothing moved', () => {
     expect(renderBrief({ scored: 10, drifted: [], gone: [], added: 3 })).toBe(
       null,

@@ -234,7 +234,7 @@ export function renderBrief({ scored, drifted, gone, added }) {
   if (!drifted.length && !gone.length) return null;
 
   const lines = [
-    `Re-scored ${scored.toLocaleString()} accounts on the list.`,
+    `Re-scored ${plural(scored, 'account', 'accounts')} on the list.`,
     '',
   ];
   // A member who became PROTECTED is one no path may add, such as someone the
