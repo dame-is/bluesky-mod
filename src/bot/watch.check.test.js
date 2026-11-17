@@ -183,6 +183,24 @@ describe('a watch reads what arrives while it runs', () => {
     ]);
   });
 
+  it("never reads or adds the post's author or the bot", async () => {
+    // The author answering in their own thread, and the bot answering a
+    // mention there, are not a pile-on.
+    vi.stubEnv('MOD_LIST_URI', 'at://did:plc:bot/app.bsky.graph.list/3list');
+    try {
+      harvest.participants = [
+        person('owner', 'thanks all'),
+        person('bot', 'here is what I found'),
+        person('eve', 'go away'),
+      ];
+      const out = await checkWatch(watchRow('auto'), deps());
+      expect(out).toMatchObject({ fresh: 1, hostile: 1, added: 1 });
+      expect(db.decision.map((r) => r.did)).toEqual(['did:plc:eve']);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('does not read anything when nobody new has arrived', async () => {
     db.decision = [baselineRow('ann')];
     harvest.participants = [person('ann', 'go away')];

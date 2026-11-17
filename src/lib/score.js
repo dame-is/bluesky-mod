@@ -338,6 +338,34 @@ export function createScorer(
  * above. If it is routinely longer than a screen the thresholds are wrong,
  * because a review nobody reads is not a review.
  */
+/**
+ * A harvest without these accounts, its totals counted again without them.
+ *
+ * The owner, the bot and the post's author can all show up among a post's
+ * participants: the author by gating replies or answering in their own
+ * thread, the bot by answering a mention there. None of them is one of the
+ * people who engaged with the post.
+ */
+export function withoutSelves(harvest, dids) {
+  const skip = new Set(dids.filter(Boolean));
+  const participants = harvest.participants.filter((p) => !skip.has(p.did));
+  const engagements = {};
+  for (const p of participants) {
+    for (const [k, n] of Object.entries(p.engagements || {})) {
+      engagements[k] = (engagements[k] || 0) + n;
+    }
+  }
+  return {
+    ...harvest,
+    participants,
+    totals: {
+      ...harvest.totals,
+      participants: participants.length,
+      engagements,
+    },
+  };
+}
+
 export function summarise(harvest, scores, { excludeSelf = null } = {}) {
   const rows = harvest.participants
     .filter((p) => p.did !== excludeSelf)

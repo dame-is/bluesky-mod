@@ -15,12 +15,13 @@ import { harvestPost } from '../lib/harvest.js';
 import {
   createScorer,
   summarise,
+  withoutSelves,
   DEFAULT_THRESHOLDS,
 } from '../lib/score.js';
 import { referenceFrom } from '../lib/precompute.js';
 import { pulse } from '../lib/pulse.js';
 import { select, selectAll } from './db.js';
-import { listUri } from './listWrite.js';
+import { listUri, ownerOf } from './listWrite.js';
 import { graphFacts, listedView, blockersView } from './graphFacts.js';
 
 /**
@@ -96,9 +97,15 @@ export function makeIo({ ref, takenAt, pulseBudgetMs = 25_000 }) {
   return {
     async preflight(link) {
       const target = await resolveTarget(link);
-      const harvest = await harvestPost(target.uri);
+      // Without the owner, the bot and the post's author, as a plan leaves
+      // them out, so a preflight counts what a scan of the post would hold.
+      const harvest = withoutSelves(await harvestPost(target.uri), [
+        OWNER_DID,
+        ownerOf(listUri()),
+        target.did,
+      ]);
       const scores = await scorer.score(harvest.participants.map((p) => p.did));
-      const summary = summarise(harvest, scores, { excludeSelf: OWNER_DID });
+      const summary = summarise(harvest, scores);
       return {
         target,
         totals: summary.totals,

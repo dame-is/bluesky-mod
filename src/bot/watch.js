@@ -28,6 +28,7 @@ import { harvestPost } from '../lib/harvest.js';
 import { summarise } from '../lib/score.js';
 import { postWebUrl } from '../lib/links.js';
 import { select, selectAll, upsert, update } from './db.js';
+import { listUri, ownerOf } from './listWrite.js';
 import {
   proposePlan,
   applyPlanToTriage,
@@ -180,8 +181,11 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
       })
     ).map((r) => r.did),
   );
+  // Never the owner, the bot or the watched post's author, whose replies in
+  // their own thread are not a pile-on, as a scan leaves them out.
+  const skip = new Set([OWNER_DID, ownerOf(watch.uri), ownerOf(listUri())]);
   const newcomers = harvest.participants.filter(
-    (p) => !known.has(p.did) && p.did !== OWNER_DID,
+    (p) => !known.has(p.did) && !skip.has(p.did),
   );
 
   if (newcomers.length) {

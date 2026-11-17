@@ -29,7 +29,12 @@ import { APPVIEW, OWNER_DID } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
 import { resolveActor, resolveTarget, TargetError } from '../lib/target.js';
 import { harvestPost } from '../lib/harvest.js';
-import { createScorer, summarise, BANDS } from '../lib/score.js';
+import {
+  createScorer,
+  summarise,
+  withoutSelves,
+  BANDS,
+} from '../lib/score.js';
 import { KINDS } from '../lib/command.js';
 import { select, selectAll, upsert, update, count } from './db.js';
 import { loadReference } from './reference.js';
@@ -123,35 +128,6 @@ async function splitListed(uri, rows) {
 }
 
 /**
- * A harvest without these accounts, its totals counted again without them.
- *
- * The owner, the bot and the post's author can all show up among a post's
- * participants: the author by gating replies or answering in their own
- * thread, the bot by answering a mention there. None of them is one of the
- * people who engaged with the post. The author has a choice of their own on
- * the card, so a band approval never takes them along.
- */
-function withoutSelves(harvest, dids) {
-  const skip = new Set(dids.filter(Boolean));
-  const participants = harvest.participants.filter((p) => !skip.has(p.did));
-  const engagements = {};
-  for (const p of participants) {
-    for (const [k, n] of Object.entries(p.engagements || {})) {
-      engagements[k] = (engagements[k] || 0) + n;
-    }
-  }
-  return {
-    ...harvest,
-    participants,
-    totals: {
-      ...harvest.totals,
-      participants: participants.length,
-      engagements,
-    },
-  };
-}
-
-/**
  * Harvest a post, score everyone on it, and store an unapproved plan.
  *
  * `signal` stops the harvest, and a plan cut short by it is not stored.
@@ -165,6 +141,8 @@ export async function proposePlan({ link, kind, signal }) {
   if (target.collection !== 'app.bsky.feed.post') {
     throw new TargetError('I scan posts, and that is not a post.');
   }
+  // The author has a choice of their own on the card, so a band approval
+  // never takes them along.
   const harvest = withoutSelves(await harvestPost(target.uri, { signal }), [
     OWNER_DID,
     ownerOf(listUri()),
