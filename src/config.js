@@ -202,11 +202,12 @@ export const config = {
 // bot/operator.js and lib/agent.js read their deadlines themselves (they
 // cannot import this module, which imports them through dmLoop.js), so they
 // are checked here too. A whole-turn deadline of 0 would end every agent turn
-// at once, while 0 turns a per-call watchdog off. The two that reach
-// AbortSignal.timeout must be whole numbers, since it throws on a fraction.
+// at once, while 0 turns a per-call watchdog off. All four must be whole
+// numbers: AbortSignal.timeout throws on a fraction, and operator.js reads
+// its deadlines as whole numbers and uses its default for anything else.
 delay('MOD_OPERATOR_TIMEOUT_MS', null, { positive: true, whole: true });
-delay('MOD_OPERATOR_CALL_TIMEOUT_MS', null);
-delay('MOD_ESCALATION_CALL_TIMEOUT_MS', null);
+delay('MOD_OPERATOR_CALL_TIMEOUT_MS', null, { whole: true });
+delay('MOD_ESCALATION_CALL_TIMEOUT_MS', null, { whole: true });
 delay('MOD_MODEL_TIMEOUT_MS', null, { positive: true, whole: true });
 
 const DID = /^did:(plc|web):[a-zA-Z0-9._:%-]+$/;
