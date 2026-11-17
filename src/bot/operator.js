@@ -122,8 +122,9 @@ const OPERATOR_STEPS = Math.max(
  * is a wave of model calls of its own. A socket that never returns must still
  * not wedge the process's one job queue. It ends a model call in flight, the
  * calls left in a step do not start after it, and scan_post, triage_plan and
- * watch_post hand it on to the harvest and the triage they start, which stop
- * on it. A scan stopped that way stores no plan; labels a triage wrote stay.
+ * watch_post hand it on to the harvest, the scoring and the triage they
+ * start, which stop on it. A scan stopped that way stores no plan; labels a
+ * triage wrote stay.
  */
 const OPERATOR_TIMEOUT_MS = deadline(
   process.env.MOD_OPERATOR_TIMEOUT_MS,
