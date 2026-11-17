@@ -217,6 +217,26 @@ describe('createScorer against the AppView', () => {
   const scorerWith = (fetchImpl) =>
     createScorer({}, { fetchImpl, retryDelaysMs: [0, 0] });
 
+  it("scores the owner's own account and the bot's as PROTECTED", async () => {
+    const owner = process.env.MOD_OWNER_DID;
+    const bot = 'did:plc:bot';
+    vi.stubEnv('MOD_LIST_URI', `at://${bot}/app.bsky.graph.list/3list`);
+    try {
+      const scores = await scorerWith(appview()).score([owner, bot, BIG]);
+      expect(scores.get(owner)).toMatchObject({
+        band: 'PROTECTED',
+        protectedReason: 'your own account',
+      });
+      expect(scores.get(bot)).toMatchObject({
+        band: 'PROTECTED',
+        protectedReason: 'this bot',
+      });
+      expect(scores.get(BIG).band).toBe('NOTABLE');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('scores live accounts from a healthy answer', async () => {
     const scores = await scorerWith(appview()).score([FRIEND, BIG, GONE]);
     expect(scores.get(FRIEND)).toMatchObject({

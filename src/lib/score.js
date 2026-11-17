@@ -178,6 +178,10 @@ async function getList(url, field, { fetchImpl, signal, delays, what }) {
  * @param {Set<string>} [ref.blockers]            accounts that block you
  * @param {object} [ref.thresholds]
  */
+/** The bot's own DID: the repo that holds MOD_LIST_URI. */
+const botDid = (env = process.env) =>
+  /^at:\/\/(did:[^/]+)\//.exec(String(env.MOD_LIST_URI ?? ''))?.[1] ?? null;
+
 export function createScorer(
   ref,
   {
@@ -257,6 +261,7 @@ export function createScorer(
      */
     async score(dids, { signal } = {}) {
       const unique = [...new Set(dids)];
+      const bot = botDid();
       const [profs, rels] = await Promise.all([
         profiles(unique, signal),
         relationships(unique, signal),
@@ -275,11 +280,15 @@ export function createScorer(
         const mutual = rel.youFollow && rel.followsYou;
 
         // A follow the snapshot has not caught up with still protects, so the
-        // live relationship counts as well as the injected set.
+        // live relationship counts as well as the injected set. The owner's
+        // own account and the bot's are never added either, so nothing
+        // offers to add them.
         const protectedReason =
           protectedSet.get(did) ||
           (rel.youFollow ? 'you follow them' : null) ||
-          (circle.has(did) ? 'in your circle snapshot' : null);
+          (circle.has(did) ? 'in your circle snapshot' : null) ||
+          (did === OWNER_DID ? 'your own account' : null) ||
+          (did === bot ? 'this bot' : null);
 
         const features = {
           vouches: v,
