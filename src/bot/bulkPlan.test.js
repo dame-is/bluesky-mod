@@ -32,8 +32,11 @@ function matches(row, { eq = {}, where = {} } = {}) {
       if (v === 'is.null' && val != null) return false;
       if (v === 'is.true' && val !== true) return false;
       if (v === 'is.false' && val !== false) return false;
-      if (v.startsWith('gte.') && !(String(val) >= v.slice(4))) return false;
-      if (v.startsWith('lte.') && !(String(val) <= v.slice(4))) return false;
+      // A comparison with a missing value is false, as in SQL.
+      if (v.startsWith('gte.') && !(val != null && String(val) >= v.slice(4)))
+        return false;
+      if (v.startsWith('lte.') && !(val != null && String(val) <= v.slice(4)))
+        return false;
       if (v.startsWith('in.(')) {
         const set = v
           .slice(4, -1)
@@ -144,6 +147,7 @@ const {
   lastChange,
   findPlan,
   historyFor,
+  activitySince,
   stopWrites,
 } = await import('./bulkPlan.js');
 
@@ -1231,6 +1235,45 @@ describe('history', () => {
       plan: { note: 'block @b.test' },
     });
     expect(db.reads.filter((r) => r.table === 'plan')).toHaveLength(1);
+  });
+
+  describe('a typed block of someone already listed', () => {
+    const now = Date.parse('2026-10-01T12:00:00Z');
+    beforeEach(() => {
+      db.decision = [
+        added(PLAN_A, 'did:plc:x', '2026-10-01T10:00:00Z', {
+          approved_via: 'band',
+        }),
+        // "block @x", answered "was already on the list".
+        added(PLAN_B, 'did:plc:x', '2026-10-01T11:00:00Z', {
+          approved_via: 'command',
+          already_listed: true,
+        }),
+      ];
+    });
+
+    it('is shown in history as asked again, not as a second add', async () => {
+      const h = await historyFor('did:plc:x');
+      expect(h.rows.map((r) => [r.code, r.already_listed])).toEqual([
+        ['9e8d7c6b', true],
+        ['1c2d3e4f', false],
+      ]);
+      // The fake returns every column, so the read is checked for it.
+      const read = db.reads.find((r) => r.table === 'decision');
+      expect(read.opts.select.split(',')).toContain('already_listed');
+    });
+
+    it('is not counted in recent activity as an add', async () => {
+      const out = await activitySince(24, { now });
+      expect(out.totals).toEqual({ added: 1, removed: 0, undone: 0 });
+      expect(out.plans.map((p) => p.code)).toEqual(['1c2d3e4f']);
+    });
+
+    it('is not counted as undone when the account comes off', async () => {
+      for (const r of db.decision) r.undone_at = '2026-10-01T11:30:00Z';
+      const out = await activitySince(24, { now });
+      expect(out.totals.undone).toBe(1);
+    });
   });
 });
 

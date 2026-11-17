@@ -1466,13 +1466,16 @@ export async function undoPlan(
 
 /**
  * What has been done lately, or to one account: the newest `limit` acted rows,
- * their plans in one read, and the total as a count.
+ * their plans in one read, and the total as a count. A row with
+ * `already_listed` is a typed block of someone already on the list, which
+ * wrote nothing: they were asked for again, not added.
  */
 export async function historyFor(did = null, { limit = 8 } = {}) {
   const eq = did ? { did } : {};
   const [rows, total] = await Promise.all([
     select('decision', {
-      select: 'plan_id,did,band,action,acted_at,approved_via,undone_at',
+      select:
+        'plan_id,did,band,action,acted_at,approved_via,undone_at,already_listed',
       eq,
       where: { acted_at: 'not.is.null' },
       order: 'acted_at.desc',
@@ -1493,6 +1496,7 @@ export async function historyFor(did = null, { limit = 8 } = {}) {
     total: total ?? acted.length,
     rows: acted.map((row) => ({
       ...row,
+      already_listed: Boolean(row.already_listed),
       plan: byId.get(row.plan_id) ?? null,
       code: shortCode(row.plan_id),
     })),
@@ -1504,22 +1508,27 @@ export async function historyFor(did = null, { limit = 8 } = {}) {
  * grouped by plan, newest first. For "what did you do today?".
  *
  * Read from the decision log, so it covers every path that writes (typed
- * commands, the agent, approvals, watches) and says which one it was.
+ * commands, the agent, approvals, watches) and says which one it was. A
+ * typed block of someone already on the list wrote nothing, so it is left
+ * out, and so is its row being closed when they come off.
  */
 export async function activitySince(hours = 24, { now = Date.now() } = {}) {
   const since = new Date(now - hours * 3_600_000).toISOString();
-  const [acted, undone] = await Promise.all([
-    selectAll('decision', {
-      select: 'plan_id,did,action,acted_at,approved_via',
-      where: { acted_at: `gte.${since}` },
-      order: 'acted_at.desc',
-    }),
-    selectAll('decision', {
-      select: 'plan_id,did,undone_at',
-      where: { undone_at: `gte.${since}` },
-      order: 'undone_at.desc',
-    }),
-  ]);
+  const wrote = (r) => !r.already_listed;
+  const [acted, undone] = (
+    await Promise.all([
+      selectAll('decision', {
+        select: 'plan_id,did,action,acted_at,approved_via,already_listed',
+        where: { acted_at: `gte.${since}` },
+        order: 'acted_at.desc',
+      }),
+      selectAll('decision', {
+        select: 'plan_id,did,undone_at,already_listed',
+        where: { undone_at: `gte.${since}` },
+        order: 'undone_at.desc',
+      }),
+    ])
+  ).map((rows) => rows.filter(wrote));
   const byPlan = new Map();
   const entry = (id) => {
     if (!byPlan.has(id)) {
