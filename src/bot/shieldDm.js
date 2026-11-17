@@ -31,6 +31,9 @@ import {
   disableQuotes,
   reopen,
   keepClosed,
+  guardPost,
+  unguardPost,
+  GUARD_HOURS,
   NO_PASSWORD,
 } from '../shield.js';
 
@@ -191,6 +194,15 @@ async function runShield(cmd, { isOwner, lastPost, convoId }) {
       );
     }
 
+    if (cmd.action === 'guard') return reply(...(await guardReplyAsync(d, uri, cmd)));
+    if (cmd.action === 'unguard') {
+      const was = await unguardPost(uri);
+      return reply(
+        was ? `Stopped guarding ${link(uri)}. Limits already on it stay until you open them.` : `I wasn't guarding ${link(uri)}.`,
+        { outcome: was ? 'done' : null, links: [postWebUrl(uri)] },
+      );
+    }
+
     if (!d.gates) {
       return reply(NO_PASSWORD, {
         options: d.startWatch ? [{ label: 'Watch it for 24 hours', command: shieldCommandText({ action: 'watch', post: uri }) }] : null,
@@ -219,6 +231,46 @@ async function runShield(cmd, { isOwner, lastPost, convoId }) {
     d.log?.('A shield command failed', { action: cmd.action, err: String(err?.message || err) });
     return reply(`That failed: ${String(err?.message || err).slice(0, 200)}`, { outcome: 'failed' });
   }
+}
+
+/**
+ * Guard one post: its per-post triggers run on it for a while, whatever
+ * MOD_SHIELD says. Acting by itself needs the owner's app password; without
+ * it a guard can only tell, and says so rather than promising what it cannot
+ * do. Returns reply()'s arguments, as a promise.
+ */
+async function guardReplyAsync(d, uri, cmd) {
+  const { cfg } = d;
+  if (!cfg.replies && !cfg.quotes) {
+    return [
+      'Both triggers are turned off (MOD_SHIELD_REPLIES and MOD_SHIELD_QUOTES), so a guard would never fire.',
+    ];
+  }
+  if (d.streaming === false) {
+    return ['MOD_STREAM is off, so I can\'t count replies and quotes as they come, and a guard would never fire.'];
+  }
+  const asked = cmd.mode || (d.gates ? 'auto' : 'ask');
+  const mode = asked === 'auto' && !d.gates ? 'ask' : asked;
+  const g = await guardPost(uri, { mode, hours: cmd.hours || GUARD_HOURS });
+  const span = (r) =>
+    r.windowMs % 3_600_000 === 0 ? `${r.windowMs / 3_600_000}h` : `${Math.round(r.windowMs / 60_000)} min`;
+  const what = [
+    cfg.replies && `${cfg.replies.count} accounts outside your circle reply within ${span(cfg.replies)}`,
+    cfg.quotes && `${cfg.quotes.count} quote it within ${span(cfg.quotes)}`,
+  ].filter(Boolean);
+  const act =
+    mode === 'auto'
+      ? `I'll ${[cfg.replies && `close replies to ${cfg.replyRule.join(' and ')}`, cfg.quotes && 'turn quotes off'].filter(Boolean).join(' or ')} by myself and tell you, with the way back`
+      : 'I\'ll tell you and ask first';
+  const fallback = asked === 'auto' && mode === 'ask' ? ` (Closing them by myself needs MOD_OWNER_APP_PASSWORD.)` : '';
+  return [
+    `Guarding ${link(uri)} for ${g.hours}h. If ${what.join(', or ')}, ${act}.${fallback}`,
+    {
+      options: [{ label: 'Stop guarding it', command: shieldCommandText({ action: 'unguard', post: uri }) }],
+      outcome: 'done',
+      links: [postWebUrl(uri)],
+    },
+  ];
 }
 
 /** deps whose startWatch reports to this convo. */

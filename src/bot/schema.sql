@@ -252,3 +252,14 @@ create table if not exists shield_state (
   attack_why text,
   notices JSON not null default '{}'
 );
+
+-- Posts the owner asked the shield to guard: its per-post triggers run on
+-- that post until `until`, whatever MOD_SHIELD says. 'auto' closes replies or
+-- turns quotes off by itself; 'ask' only tells the owner.
+create table if not exists shield_guard (
+  post text primary key,
+  mode text not null check (mode in ('ask', 'auto')),
+  created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  until text not null,
+  stopped_at text
+);

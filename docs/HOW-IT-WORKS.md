@@ -119,6 +119,7 @@ Commands are parsed, not interpreted. They never reach a model.
 
 - **Reactions instead of acks.** 👀 goes on your message when it's picked up. It becomes ✅ when something was done and ❌ when it failed, and goes away after a plain answer.
 - **The quick lane** *(agent mode)*. "block" or "unblock" with exactly one target and only filler words around it never reaches a model. A plain block gets a ✅ and nothing else. After a minute with no more blocks, one message sums up the burst. A block is only said out loud when it matters: a PROTECTED, CONNECTED or NOTABLE account, an unblock of someone not on the list, a block that could not be recorded, or a failure. In classic mode a block gets a text receipt. It ends in a numbered menu when there is something to offer: an undo when the block put them on the list, and a read when a model is set up.
+- **One of your own posts with no words**, in either mode, gets what is going on with it and a menu of what the bot can do: watch it, guard it, close replies or quotes, scan it. See [Sending the bot one of your own posts](#sending-the-bot-one-of-your-own-posts).
 - **A post with no words** *(agent mode)* gets a card: who wrote it, who engaged and how, by band, and how many are already listed or already block you. Answer with `author`, `likers`, `unknowns`, `everyone` or `hostile`. Setting `"barePost": "author"` in the config file makes a bare post mean "block whoever wrote it" instead. In classic mode a bare post gets the full scan report ending in a numbered menu.
 - **Questions a 👍 answers.** When the bot wants your OK, the exact change is stored as commands, with a line written by code: *👍 or "yes" to: add @x to the list*. "yes" or a 👍 runs exactly those commands, with no model. Anything else you say lets the question lapse, and questions expire after 30 minutes. A "yes" with no question open gets a reply saying so and never reaches a model. A change aimed at someone the model found by itself is never offered this way.
 - **The post you last sent is remembered** per conversation, so `add likers` with nothing attached uses it.
@@ -344,8 +345,37 @@ Parsed in code, never sent to a model, in classic and agent mode alike (`!` and 
 | `no quotes` / `disable quotes` [post] | Turn quotes off on that post |
 | `enable quotes` / `quotes on` [post] | Take the bot's quote limits off that post |
 | `keep closed` [post] | Stop a trigger's gate from coming off by itself |
+| `guard` [post] [`for 2d`] [`ask`] / `set up a trigger on this` | Run the per-post triggers on that post alone for 3 days (at most 14), whatever `MOD_SHIELD` says. With your app password it acts by itself; with `ask`, or without the password, it tells you and asks. |
+| `unguard` [post] / `stop guarding` | Stop that. Limits already on the post stay until you open them. |
 
 Every reply ends in a numbered menu (open again, keep closed, watch it, shields up, stand down), so the usual answer is `1`. An ask-mode DM also stores a 👍 question, unless another question is already open in the conversation, which wins. A message that says more than the command ("stop replies from that guy", "shields up and block them all") is not read as one and goes on to the list commands or the model, so replies are never closed on a guess.
+
+### Sending the bot one of your own posts
+
+Share one of your own posts with the bot and no words, and instead of the scan card it answers with what is going on with that post and what it can do about it:
+
+```
+Your post bsky.app/profile/you/post/3k...
+1,204 likes · 40 reposts · 33 replies · 5 quotes
+last hour: 14 replies and quotes, 9 from outside your circle
+
+replies: open to anyone
+quotes: on
+
+reply with a number:
+1. Watch it for 24 hours, and ask before blocking anyone
+2. Watch it and block the hostile ones as they come
+3. Guard it: close replies or quotes by itself if strangers pile on (3 days)
+4. Close replies now, to following and mentioned
+5. Turn quotes off now
+6. Who engaged: scan and score everyone
+```
+
+The card costs one AppView read, the stream's memory and, with your app password, two reads of the post's gates. Reading everyone who engaged is option 6 rather than the default. The menu follows the post's state: "Open replies again" or "Turn quotes back on" once the bot has limited them, "Stop guarding it" while it is guarded, nothing about replies on a reply (a threadgate there does nothing) or on a post you limited yourself, and no gate options without the password. Each option is a command you could type, run through the same owner-only checks, and option 2 asks which list in multi-list mode. Someone else's post, or your post sent by anyone else on the roster, still gets the scan card.
+
+The alert when one of your posts takes off carries the same menu, so its "1" is a watch, as its 👍 is, and "guard" or "close replies" are a number away.
+
+**Guarding a post** is the per-post trigger for one post. If you expect trouble on one post but don't want the shield acting on all of them, `guard` runs the thresholds above (`MOD_SHIELD_REPLIES`, `MOD_SHIELD_QUOTES`) on that post alone, for 3 days unless you say otherwise. It acts by itself with your app password, and the limits it sets come off the way a trigger's do (after `MOD_SHIELD_RESTORE_HOURS`, once quiet). `shield` shows how many posts are guarded.
 
 ### What happens, exactly
 

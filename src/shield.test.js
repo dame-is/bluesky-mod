@@ -22,6 +22,9 @@ import {
   reopen,
   readState,
   liveGates,
+  guardPost,
+  unguardPost,
+  liveGuards,
 } from './shield.js';
 
 const OWNER = 'did:plc:owner0000000000000000000';
@@ -465,5 +468,42 @@ describe('the status line about the stream', () => {
     clock.t = 2 * 3_600_000;
     const on = await statusText({ ...d, activity: down });
     expect(on.text ?? on).toMatch(/Listening for 2h/);
+  });
+});
+
+describe('a guarded post', () => {
+  it('runs the triggers on that post alone, with MOD_SHIELD off', async () => {
+    const guarded = repo.post('3kguarded');
+    const other = repo.post('3kother');
+    await guardPost(guarded, { mode: 'auto', hours: 72, now: t });
+    for (const s of strangers(12)) link('reply', s, guarded);
+    for (const s of strangers(12, 'o')) link('reply', s, other);
+    const d = deps(); // MOD_SHIELD is off by default
+    const { fired } = await shieldTick(d, { now: t });
+    expect(fired).toEqual([`replies:${guarded}`]);
+    expect(repliesLimited(repo.gate('threadgate', '3kguarded'))).toBe(true);
+    expect(repo.gate('threadgate', '3kother')).toBeNull();
+  });
+
+  it('only tells in ask mode, and stops when it runs out or is stopped', async () => {
+    const root = repo.post('3kroot');
+    await guardPost(root, { mode: 'ask', hours: 1, now: t });
+    for (const s of strangers(6)) link('quote', s, root);
+    const d = deps();
+    expect((await shieldTick(d, { now: t })).fired).toEqual([`quotes:${root}`]);
+    expect(repo.writes()).toEqual([]);
+    expect(notes[0].pending).toEqual([`disable quotes ${root}`]);
+
+    expect((await liveGuards({ now: t + 2 * HOUR })).has(root)).toBe(false);
+    await guardPost(root, { hours: 5, now: t });
+    expect(await unguardPost(root, { now: t })).toBe(true);
+    expect(await unguardPost(root, { now: t })).toBe(false);
+    expect((await liveGuards({ now: t })).size).toBe(0);
+  });
+
+  it('is only for the owner\'s own posts, and its length is bounded', async () => {
+    await expect(guardPost('at://did:plc:someone/app.bsky.feed.post/x', { now: t })).rejects.toThrow(/your own/);
+    const g = await guardPost(repo.post('3klong'), { hours: 10_000, now: t });
+    expect(g.hours).toBe(14 * 24);
   });
 });

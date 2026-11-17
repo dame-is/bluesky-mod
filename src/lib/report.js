@@ -174,6 +174,8 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
     '  close replies <post>      only people you follow and mention can reply',
     '  no quotes <post>          turn quote posts off (open / enable undo them)',
     '  shields up / shields down lock every recent post, then put it all back',
+    '  guard <post>              close replies or quotes by itself if strangers pile on',
+    '  (send one of your posts alone for everything I can do with it)',
   ];
   // Multi-list mode only: with one list there is nothing to choose.
   const lists = [

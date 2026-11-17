@@ -162,6 +162,27 @@ describe('shieldTurn', () => {
   });
 });
 
+describe('guard', () => {
+  it('guards a post to act by itself with the password, and says what will happen', async () => {
+    install();
+    const out = await turn(`guard ${ROOT} for 2 days`);
+    expect(out.text).toMatch(/^Guarding .* for 48h\. If 12 accounts outside your circle reply within 15 min, or 6 quote it within 15 min, I'll close replies to following and mentioned or turn quotes off by myself/);
+    expect(out.options.map((o) => o.command)).toEqual([`unguard ${ROOT}`]);
+  });
+
+  it('only tells without the password, and says why when acting was asked for', async () => {
+    install({ gates: false });
+    const out = await turn(`guard ${ROOT} auto`);
+    expect(out.text).toMatch(/I'll tell you and ask first\. \(Closing them by myself needs MOD_OWNER_APP_PASSWORD\.\)/);
+  });
+
+  it('is the owner\'s alone, and only for their own posts', async () => {
+    install();
+    expect((await turn(`guard ${ROOT}`, { isOwner: false })).text).toMatch(/Only the account I work for/);
+    expect((await turn('guard at://did:plc:else/app.bsky.feed.post/1')).text).toMatch(/not one of your posts/);
+  });
+});
+
 describe('sendNotice', () => {
   it('stores its menu and its question, but never over one already open', async () => {
     const sent = [];

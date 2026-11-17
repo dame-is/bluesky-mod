@@ -31,6 +31,7 @@ import {
 } from './continuation.js';
 import { generateText } from 'ai';
 import { shieldTurn, runShieldCommand } from './shieldDm.js';
+import { ownPostIn, ownPostCard } from './ownPost.js';
 import { isShieldCommand } from '../lib/shieldCommand.js';
 import { modelsEnabled } from '../models.js';
 
@@ -3054,6 +3055,34 @@ export async function runDmPass({
         }
         turns.push({ convoId: entry.convoId, shield: true });
         continue;
+      }
+
+      // One of the owner's own posts with no words: what is going on with it
+      // and what the bot can do about it, as a numbered menu (ownPost.js).
+      // Anyone else's post, or one sent by anyone else, goes on to the scan
+      // card as before.
+      if (entry.message?.sender?.did === roster.owner && canWrite) {
+        const own = await ownPostIn(said, { embedUri, links: msgLinks });
+        if (own) {
+          try {
+            const card = await ownPostCard(own);
+            const shown = await send(withMenu(card.text, card.options), {
+              allow: card.links,
+            });
+            if (shown?.length) {
+              await offerChoices(entry.convoId, card.options, own);
+            }
+            log('Sent an own-post card', { uri: own, options: card.options.length });
+            turns.push({ convoId: entry.convoId, ownPost: own });
+          } catch (err) {
+            await send(
+              `I could not read that post: ${String(err?.message || err).slice(0, 200)}`,
+            );
+            outcome = 'failed';
+            turns.push({ convoId: entry.convoId, ownPost: 'failed' });
+          }
+          continue;
+        }
       }
 
       // Agent mode's lanes that need no model: "block" with one target,

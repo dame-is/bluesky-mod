@@ -58,6 +58,7 @@ import { logger } from './logger.js';
 import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { watchedUris } from './bot/watch.js';
+import { postFacts, ownPostOptions } from './bot/ownPost.js';
 import { isAuthError, createReconnector } from './session.js';
 import { acquireLease, acquireDbLease, HEARTBEAT_MS } from './lease.js';
 import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
@@ -505,6 +506,7 @@ function scheduleWatching() {
           convoFor: () => ownerConvo(chat),
           log: (msg, fields) => logger.info(msg, fields),
           activity: config.stream ? activity : null,
+          menuFor: async (uri) => ownPostOptions(await postFacts(uri, { deps: shieldDeps })),
         }),
       );
     }, config.alertEveryMs);

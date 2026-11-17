@@ -108,3 +108,39 @@ describe('shieldCommandText', () => {
     expect(parseCommand('shields down')).toBeNull();
   });
 });
+
+describe('guard and unguard', () => {
+  const U = 'at://did:plc:owner0000000000000000000/app.bsky.feed.post/3abc';
+
+  it('reads a guard with its post, how long, and whether it acts or asks', () => {
+    expect(parseShieldCommand(`guard ${U}`)).toMatchObject({ action: 'guard', post: U, hours: null, mode: null, write: true });
+    expect(parseShieldCommand('guard this for 2 days', { embedUri: U })).toMatchObject({ post: U, hours: 48 });
+    expect(parseShieldCommand('guard it, just tell me', { embedUri: U })).toMatchObject({ mode: 'ask' });
+    expect(parseShieldCommand(`guard ${U} for 12h auto`)).toMatchObject({ hours: 12, mode: 'auto' });
+    expect(parseShieldCommand('set up a trigger on this', { embedUri: U })).toMatchObject({ action: 'guard', post: U });
+    expect(parseShieldCommand('guard')).toMatchObject({ action: 'guard', needsPost: true });
+  });
+
+  it('reads stopping one', () => {
+    expect(parseShieldCommand(`unguard ${U}`)).toMatchObject({ action: 'unguard', post: U });
+    expect(parseShieldCommand('stop guarding this', { embedUri: U })).toMatchObject({ action: 'unguard', post: U });
+  });
+
+  it('is not a guard when it says more than one', () => {
+    expect(parseShieldCommand('guard my friend from trolls')).toBeNull();
+  });
+
+  it('round-trips through its canonical text', () => {
+    for (const c of [
+      { action: 'guard', post: U, hours: 72, mode: 'ask' },
+      { action: 'guard', post: U, hours: 72, mode: null },
+      { action: 'unguard', post: U },
+    ]) {
+      expect(parseShieldCommand(shieldCommandText(c))).toMatchObject({
+        action: c.action,
+        post: U,
+        ...(c.action === 'guard' ? { hours: c.hours, mode: c.mode } : {}),
+      });
+    }
+  });
+});

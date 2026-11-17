@@ -66,9 +66,27 @@ const VERBS = [
     action: 'keep',
     match: /^keep\s+(?:it\s+|them\s+|this\s+|that\s+)?(?:closed|locked|shut|off|limited)\b/i,
   },
+  // Before 'guard', so "stop guarding" is not read as a guard.
+  {
+    action: 'unguard',
+    match:
+      /^(?:unguard|stop\s+guarding|(?:disarm|remove|drop|cancel)\s+(?:the\s+|its\s+)?triggers?(?:\s+on)?)\b/i,
+  },
+  {
+    action: 'guard',
+    match:
+      /^(?:guard|arm\s+(?:the\s+)?triggers?(?:\s+on)?|set\s+up\s+(?:a\s+)?triggers?(?:\s+(?:on|for))?)\b/i,
+  },
   // Canonical only, for menus: start a watch on a post the shield named.
   { action: 'watch', match: /^shield\s+watch\b/i },
 ];
+
+/**
+ * How a guard acts, as typed: "ask" or "just tell me" only tells; "auto" or
+ * "automatically" acts. Neither: the caller decides.
+ */
+const GUARD_ASK = /\b(?:ask|just\s+tell\s+me|tell\s+me|notify\s+me|only\s+tell\s+me)\b/i;
+const GUARD_AUTO = /\b(?:auto|automatically|by\s+itself)\b/i;
 
 /** Words around a command that change nothing about it. */
 const FILLER = new Set([
@@ -78,10 +96,14 @@ const FILLER = new Set([
 ]);
 
 /** The actions that need a post. */
-const NEEDS_POST = new Set(['close', 'open', 'quotesOff', 'quotesOn', 'keep', 'watch']);
+const NEEDS_POST = new Set([
+  'close', 'open', 'quotesOff', 'quotesOn', 'keep', 'watch', 'guard', 'unguard',
+]);
 
 /** The actions that change something, as opposed to reporting. */
-const WRITES = new Set(['up', 'down', 'close', 'open', 'quotesOff', 'quotesOn', 'keep', 'watch']);
+const WRITES = new Set([
+  'up', 'down', 'close', 'open', 'quotesOff', 'quotesOn', 'keep', 'watch', 'guard', 'unguard',
+]);
 
 /**
  * Is this a shield command, and if so what, on which post?
@@ -138,7 +160,7 @@ export function parseShieldCommand(text, { embedUri = null, links = [] } = {}) {
   }
 
   let hours = null;
-  if (verb.action === 'up') {
+  if (verb.action === 'up' || verb.action === 'guard') {
     const d = DURATION.exec(rest);
     if (d) {
       const n = Number(d[1]);
@@ -154,12 +176,23 @@ export function parseShieldCommand(text, { embedUri = null, links = [] } = {}) {
     const left = rest
       .replace(/\S*(?:at:\/\/|https?:\/\/)\S*/g, ' ')
       .replace(verb.action === 'close' ? /\b(?:to|except(?:\s+for)?|only\s+for|but)\s+.+$/i : /$^/, ' ')
-      .replace(verb.action === 'up' ? DURATION : /$^/, ' ')
+      .replace(verb.action === 'up' || verb.action === 'guard' ? DURATION : /$^/, ' ')
+      .replace(verb.action === 'guard' ? GUARD_ASK : /$^/, ' ')
+      .replace(verb.action === 'guard' ? GUARD_AUTO : /$^/, ' ')
       .toLowerCase()
       .split(/[\s,.!?]+/)
       .filter((w) => w && !FILLER.has(w));
     if (left.length) return null;
   }
+
+  const guardMode =
+    verb.action !== 'guard'
+      ? null
+      : GUARD_ASK.test(rest)
+        ? 'ask'
+        : GUARD_AUTO.test(rest)
+          ? 'auto'
+          : null;
 
   return {
     action: verb.action,
@@ -168,6 +201,8 @@ export function parseShieldCommand(text, { embedUri = null, links = [] } = {}) {
     rule,
     ruleError,
     hours,
+    // A guard's mode as typed, or null for the caller's default.
+    mode: guardMode,
     write: WRITES.has(verb.action),
     raw,
   };
@@ -177,7 +212,7 @@ export function parseShieldCommand(text, { embedUri = null, links = [] } = {}) {
  * The canonical text of a command, which parses back to the same thing. What
  * menus and stored 👍 questions carry.
  */
-export function shieldCommandText({ action, post = null, rule = null, hours = null }) {
+export function shieldCommandText({ action, post = null, rule = null, hours = null, mode = null }) {
   switch (action) {
     case 'status':
       return 'shield status';
@@ -197,6 +232,10 @@ export function shieldCommandText({ action, post = null, rule = null, hours = nu
       return `keep closed ${post}`;
     case 'watch':
       return `shield watch ${post}`;
+    case 'guard':
+      return `guard ${post}${hours ? ` for ${hours}h` : ''}${mode ? ` ${mode}` : ''}`;
+    case 'unguard':
+      return `unguard ${post}`;
     default:
       throw new Error(`no shield command ${action}`);
   }

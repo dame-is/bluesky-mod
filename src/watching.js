@@ -40,11 +40,14 @@ import { savePending, confirmLine, readPending } from './bot/chatUx.js';
 export async function say(
   chat,
   convoId,
-  { text, pending, describe, links = [] },
+  { text, pending, describe, links = [], options = null },
 ) {
   if (!convoId || !text) return [];
   const asks = pending?.length > 0 && !(await readPending(convoId));
-  const body = asks ? `${text}\n\n${confirmLine([describe])}` : text;
+  const shown = options?.length
+    ? `${text}\n\nreply with a number:\n${options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')}`
+    : text;
+  const body = asks ? `${shown}\n\n${confirmLine([describe])}` : shown;
   await upsert('dm_choice', [{ convo_id: convoId, options: [] }]).catch(
     () => {},
   );
@@ -56,6 +59,14 @@ export async function say(
       message: facets.length ? { text: chunk, facets } : { text: chunk },
     });
     if (sent?.data?.id) ids.push(sent.data.id);
+  }
+  // The menu is stored once the message has gone, so a number answers what
+  // was shown.
+  if (options?.length && ids.length) {
+    const at = new Date().toISOString();
+    await upsert('dm_choice', [
+      { convo_id: convoId, options: options.map((o) => ({ ...o, offered_at: at })) },
+    ]).catch(() => {});
   }
   if (asks) {
     await savePending(convoId, {
@@ -180,6 +191,7 @@ export async function tickAlerts({
   log = () => {},
   now = Date.now(),
   activity = null,
+  menuFor = null,
 }) {
   const convoId = await convoFor();
   if (!convoId || (await readPending(convoId, { now }))) return 0;
@@ -187,7 +199,10 @@ export async function tickAlerts({
   let sent = 0;
   for (const a of alerts) {
     try {
-      await say(chat, convoId, alertText(a));
+      // What the owner can do about the post, as on its card when they send
+      // it (bot/ownPost.js). Best effort: without it the 👍 still watches.
+      const options = menuFor ? await menuFor(a.uri).catch(() => null) : null;
+      await say(chat, convoId, { ...alertText(a), ...(options?.length ? { options } : {}) });
       await alertSent(a, { now });
       sent += 1;
       log('Offered a watch on a post taking off', {

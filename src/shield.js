@@ -177,6 +177,53 @@ async function writeState(patch) {
   await upsert('shield_state', [{ id: 1, ...patch }]);
 }
 
+// --- guarded posts -------------------------------------------------------------
+
+/** How long a guard lasts when the owner names no time. */
+export const GUARD_HOURS = 72;
+/** The longest a guard may run: the stream's window is six hours, the post's life is days. */
+export const GUARD_MAX_HOURS = 14 * 24;
+
+/**
+ * Posts being guarded at `now`: post -> { mode, until }. A guard runs the
+ * per-post triggers on its post in its own mode, whatever MOD_SHIELD says, so
+ * the owner can arm one post they expect trouble on without arming them all.
+ */
+export async function liveGuards({ now = Date.now() } = {}) {
+  const rows =
+    (await select('shield_guard', {
+      select: 'post,mode,until',
+      is: { stopped_at: 'null' },
+    }).catch(() => [])) || [];
+  return new Map(
+    rows
+      .filter((r) => Date.parse(r.until) > now)
+      .map((r) => [r.post, { mode: r.mode, until: r.until }]),
+  );
+}
+
+/**
+ * Guard one of the owner's posts for `hours`, or extend and re-mode a guard
+ * already on it. `mode` 'auto' acts when a threshold is passed (with the
+ * owner's app password; without it, it can only tell), 'ask' only tells.
+ */
+export async function guardPost(post, { mode = 'auto', hours = GUARD_HOURS, now = Date.now() } = {}) {
+  if (!ownPost(post)) throw new Error('only your own posts can be guarded');
+  const h = Math.min(GUARD_MAX_HOURS, Math.max(1, Math.round(hours || GUARD_HOURS)));
+  const until = iso(now + h * 3_600_000);
+  await upsert('shield_guard', [
+    { post, mode: mode === 'ask' ? 'ask' : 'auto', created_at: iso(now), until, stopped_at: null },
+  ]);
+  return { post, mode: mode === 'ask' ? 'ask' : 'auto', until, hours: h };
+}
+
+/** Stop guarding a post. Whether there was a guard to stop. */
+export async function unguardPost(post, { now = Date.now() } = {}) {
+  const live = (await liveGuards({ now })).has(post);
+  if (live) await update('shield_guard', { eq: { post } }, { stopped_at: iso(now) });
+  return live;
+}
+
 /** Is attack mode on at `now`? */
 export const attackOn = (state, now = Date.now()) =>
   Boolean(state?.attackUntil && Date.parse(state.attackUntil) > now);
@@ -767,14 +814,18 @@ export async function shieldTick(deps, { now = Date.now() } = {}) {
     }
   }
 
-  // Per-post triggers. While attack mode is on it has already done this.
-  if (cfg.mode !== 'off' && !on) {
+  // Per-post triggers. While attack mode is on it has already done this. A
+  // guarded post runs them in its guard's mode even with MOD_SHIELD off.
+  const guards = on ? new Map() : await liveGuards({ now });
+  if ((cfg.mode !== 'off' || guards.size) && !on) {
     let sent = 0;
     for (const t of triggerKinds(cfg)) {
       const byPost = activity.byPost({ sinceMs: t.rate.windowMs, kinds: t.kinds });
       for (const [post, seen] of byPost) {
         if (sent >= NOTICES_PER_TICK) break;
         if (!ownPost(post)) continue;
+        const mode = guards.get(post)?.mode ?? cfg.mode;
+        if (mode === 'off') continue;
         if (seen.actors.size < t.rate.count) continue;
         const key = `${t.name}:${post}`;
         if (noticed(key, NOTICE_AGAIN_MS)) continue;
@@ -787,7 +838,7 @@ export async function shieldTick(deps, { now = Date.now() } = {}) {
           const current = await gates.read(t.kind, post).catch(() => null);
           if (t.name === 'replies' ? repliesLimited(current) : quotesOff(current)) continue;
         }
-        await tell(key, await triggerNotice(deps, { t, post, count: outside.size, now }));
+        await tell(key, await triggerNotice(deps, { t, post, count: outside.size, now, mode }));
         sent += 1;
       }
     }
@@ -817,7 +868,7 @@ function triggerKinds(cfg) {
 }
 
 /** The DM for one post past a threshold, acting first when the mode is auto. */
-async function triggerNotice(deps, { t, post, count, now }) {
+async function triggerNotice(deps, { t, post, count, now, mode = deps.cfg.mode }) {
   const { cfg, gates } = deps;
   const minutes = Math.round(t.rate.windowMs / 60_000);
   const did = t.name === 'replies' ? 'replied to' : 'quoted';
@@ -837,7 +888,7 @@ async function triggerNotice(deps, { t, post, count, now }) {
   if (!gates) {
     return { text: `${head}\n\n${NO_PASSWORD}`, options: [watch], links: [postWebUrl(post)] };
   }
-  if (cfg.mode === 'auto') {
+  if (mode === 'auto') {
     const out =
       t.name === 'replies'
         ? await closeReplies(deps, post, { why: 'trigger', now })
@@ -938,6 +989,8 @@ export async function statusText(deps, { now = Date.now() } = {}) {
       : `Per-post triggers: ${cfg.mode}, replies at ${rateText(cfg.replies)}, quotes at ${rateText(cfg.quotes)}.`,
   );
   lines.push(posts ? `Limits I've set: ${posts} ${posts === 1 ? 'post' : 'posts'}.` : 'Limits I\'ve set: none.');
+  const guarded = (await liveGuards({ now }).catch(() => new Map())).size;
+  if (guarded) lines.push(`Guarding: ${guarded} ${guarded === 1 ? 'post' : 'posts'}.`);
   const hours = Math.floor(activity.coversMs() / 3_600_000);
   const minutes = Math.floor(activity.coversMs() / 60_000);
   lines.push(

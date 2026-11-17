@@ -34,6 +34,7 @@ The shield (optional, needs an app password for your own account):
 - **Close replies and quotes when strangers pile on.** Past a threshold on one of your posts (12 accounts outside your circle replying in 15 minutes, 6 quoting), the bot closes replies to people you follow and mention, or turns quotes off, and asks first unless you set it to act. It puts them back by itself a day later once the post has gone quiet.
 - **Attack mode.** A circuit breaker for harassment: when 40 strangers reply to, quote or mention you within half an hour, or when you DM "shields up", it closes replies and turns quotes off on every recent post, detaches strangers' quotes from the posts under fire, gates new posts as you make them, and starts watches so the usual review decides who is blocked. "shields down", or the end of the day, puts everything back exactly as it was, except anything you changed yourself in the meantime.
 - **Only strangers count.** UNKNOWN and NOTABLE accounts, by the same scoring as everything else. Friends replying in a hurry never trip it.
+- **Send it one of your posts.** Share one of your own posts with no words and the bot answers with how it is doing (counts, strangers in the last hour, whether replies or quotes are limited) and a numbered menu: watch it, guard it (close replies or quotes by itself if strangers pile on, for that post alone), close replies or turn quotes off now, or scan who engaged.
 
 ## How it decides who is close to you
 
