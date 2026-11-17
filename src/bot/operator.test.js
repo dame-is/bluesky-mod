@@ -303,12 +303,30 @@ describe('the write tools', () => {
       code: '3f9a2c1b',
       accounts: ['@a.test'],
     });
-    expect(deps.applyPlan.mock.calls[0][3]).toEqual({ by: 'agent' });
+    // Each keeps the owner's words for the plan's note.
+    const reason = 'block the nasty quoters on this';
+    expect(deps.applyPlan.mock.calls[0][3]).toEqual({ by: 'agent', reason });
     expect(deps.applyPlanToTriage.mock.calls[0][3]).toEqual({
       by: 'agent',
       asOf: expect.any(String),
+      reason,
     });
-    expect(deps.applyPlanToActors.mock.calls[0][3]).toEqual({ by: 'agent' });
+    expect(deps.applyPlanToActors.mock.calls[0][3]).toEqual({
+      by: 'agent',
+      reason,
+    });
+  });
+
+  it("keeps the agent's reason beside the owner's words", async () => {
+    const deps = fakeDeps();
+    await buildActionTools(ctxFor(), deps).approve_plan.execute({
+      code: '3f9a2c1b',
+      bands: ['UNKNOWN'],
+      reason: 'the owner asked for the strangers',
+    });
+    expect(deps.applyPlan.mock.calls[0][3].reason).toBe(
+      'block the nasty quoters on this [agent: the owner asked for the strangers]',
+    );
   });
 
   it('refuses a code that is not one rather than guessing', async () => {

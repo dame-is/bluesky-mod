@@ -209,6 +209,11 @@ describe('a label approval that names bands or a time', () => {
       order: 'did.asc',
     });
     expect(added.map((r) => r.band)).toEqual(['CONNECTED', 'CONNECTED']);
+    // The words that asked for it, kept in the plan's note for history.
+    const [plan] = await db.select('plan', { select: 'note', eq: { id: ID } });
+    expect(plan.note).toBe(
+      'bulk everyone; approved: approve abcd1234 hostile CONNECTED',
+    );
   });
 
   it('adds nothing labelled after the time it carries', async () => {

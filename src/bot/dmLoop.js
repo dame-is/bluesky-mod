@@ -634,8 +634,11 @@ export async function runCommand(
     }
 
     // The personal path: named accounts the sender read and decided on.
+    // Every approval keeps the words that asked for it in the plan's note.
     if (cmd.actors?.length) {
-      const out = await applyPlanToActors(writeAgent, plan, cmd.actors);
+      const out = await applyPlanToActors(writeAgent, plan, cmd.actors, {
+        reason: cmd.raw,
+      });
       return say(out.message);
     }
     // Narrowed to the bands and the label time the command names, when it
@@ -644,6 +647,7 @@ export async function runCommand(
       const out = await applyPlanToTriage(writeAgent, plan, cmd.labels[0], {
         bands: cmd.bands,
         asOf: cmd.asOf,
+        reason: cmd.raw,
       });
       return say(
         out.message,
@@ -670,6 +674,7 @@ export async function runCommand(
     }
     const out = await applyPlan(writeAgent, plan, bands, {
       kinds: cmd.kinds?.length ? cmd.kinds : null,
+      reason: cmd.raw,
     });
     // Offer the way back with the receipt, while the code is still in front of
     // them. An undo you have to go and look up is one you will not use.
@@ -1095,7 +1100,9 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
     out = await runTriage(plan, { generate, model, log });
     if (!out.remaining) break;
   }
-  const added = await applyPlanToTriage(writeAgent, plan, 'hostile');
+  const added = await applyPlanToTriage(writeAgent, plan, 'hostile', {
+    reason: `hostile ${code}`,
+  });
   const c = out?.counts || {};
   const unread = out?.remaining
     ? ` ${out.remaining} not read yet; "triage ${code}" reads them.`

@@ -352,7 +352,11 @@ describe('the post card', () => {
       'NOTABLE',
       'CONNECTED',
     ]);
-    expect(plans.applyPlan.mock.calls[0][3]).toEqual({ kinds: ['likers'] });
+    // The command the card ran is the words kept for the plan's note.
+    expect(plans.applyPlan.mock.calls[0][3]).toEqual({
+      kinds: ['likers'],
+      reason: 'approve 1c2d3e4f likers',
+    });
     expect(sent[0]).toMatch(/Added 12/);
   });
 

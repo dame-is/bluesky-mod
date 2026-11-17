@@ -1137,12 +1137,13 @@ export function buildActionTools(ctx, deps = DEPS) {
 
   tools.approve_plan = tool({
     description:
-      `Add a plan's accounts to the list. Give exactly one of: bands (e.g. ["UNKNOWN"]), label (a triage label, e.g. "hostile"), or accounts (up to ${MAX_NAMED} handles or DIDs that are in the plan). PROTECTED is never added. At most 500 per call; the result says how many are left.`,
+      `Add a plan's accounts to the list. Give exactly one of: bands (e.g. ["UNKNOWN"]), label (a triage label, e.g. "hostile"), or accounts (up to ${MAX_NAMED} handles or DIDs that are in the plan). PROTECTED is never added. At most 500 per call; the result says how many are left. Give the reason in a few words; it is kept in the decision log next to the owner's message.`,
     inputSchema: z.object({
       code: z.string(),
       bands: z.array(z.enum(BANDS)).optional(),
       label: z.enum(LABELS).optional(),
       accounts: z.array(z.string()).max(MAX_NAMED).optional(),
+      reason: z.string().optional(),
       ask_first: z
         .boolean()
         .optional()
@@ -1153,6 +1154,7 @@ export function buildActionTools(ctx, deps = DEPS) {
       bands,
       label,
       accounts,
+      reason,
       ask_first: askFirst = false,
     }) => {
       const given = [bands?.length, label, accounts?.length].filter(Boolean);
@@ -1218,17 +1220,21 @@ export function buildActionTools(ctx, deps = DEPS) {
           { askFirst },
         );
         if (stopped) return stopped;
+        const why = noteFor(ctx.raw, reason);
         const out = named
           ? await deps.applyPlanToActors(ctx.writeAgent, plan, actors, {
               by: 'agent',
+              reason: why,
             })
           : label
             ? await deps.applyPlanToTriage(ctx.writeAgent, plan, label, {
                 by: 'agent',
                 asOf,
+                reason: why,
               })
             : await deps.applyPlan(ctx.writeAgent, plan, bands, {
                 by: 'agent',
+                reason: why,
               });
         if (out.added) {
           record(
