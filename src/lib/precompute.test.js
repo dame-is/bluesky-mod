@@ -82,12 +82,21 @@ describe('permanently unreadable members', () => {
   });
 
   it('does not mark a rate limit as permanent', async () => {
-    // Slower than it looks: a retryable status waits out the backoff between
-    // tries (500 + 1000ms) before giving up, so the caller comes back for it.
-    // A permanent 400 returns on the first response with no backoff at all.
-    const out = await followsOf('did:plc:busy', { fetchImpl: status(429) });
-    expect(out.permanent).toBe(false);
-  }, 10_000);
+    // A retryable status goes through every try, with a backoff between them,
+    // before giving up, so the caller comes back for it. A permanent 400
+    // returns on the first response.
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = status(429);
+      const reading = followsOf('did:plc:busy', { fetchImpl });
+      await vi.runAllTimersAsync();
+      const out = await reading;
+      expect(out.permanent).toBe(false);
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it.each([500, 401, 403, 404, 408])(
     'does not mark a %i as permanent, since it may answer next time',
@@ -105,24 +114,34 @@ describe('permanently unreadable members', () => {
   );
 
   it('reports the failure and its permanence up to the caller', async () => {
-    const out = await indexCircleFollows({
-      pending: ['did:plc:gone', 'did:plc:busy'],
-      fetchImpl: vi.fn(async (url) => ({
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async (url) => ({
         ok: false,
         status: url.includes('gone') ? 400 : 503,
         json: async () => ({}),
-      })),
-      writeEdges: async () => {},
-      markDone: async () => {},
-    });
-    expect(out.indexed).toBe(0);
-    expect(out.unreadable).toHaveLength(2);
-    expect(
-      out.unreadable.find((u) => u.member === 'did:plc:gone').permanent,
-    ).toBe(true);
-    expect(
-      out.unreadable.find((u) => u.member === 'did:plc:busy').permanent,
-    ).toBe(false);
+      }));
+      const running = indexCircleFollows({
+        pending: ['did:plc:gone', 'did:plc:busy'],
+        fetchImpl,
+        writeEdges: async () => {},
+        markDone: async () => {},
+      });
+      await vi.runAllTimersAsync();
+      const out = await running;
+      expect(out.indexed).toBe(0);
+      expect(out.unreadable).toHaveLength(2);
+      expect(
+        out.unreadable.find((u) => u.member === 'did:plc:gone').permanent,
+      ).toBe(true);
+      expect(
+        out.unreadable.find((u) => u.member === 'did:plc:busy').permanent,
+      ).toBe(false);
+      // One try for the 400, every try for the 503.
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
