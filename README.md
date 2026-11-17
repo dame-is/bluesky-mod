@@ -20,6 +20,7 @@ With no AI model at all:
 - **A veto on people you know.** Accounts you follow and members of curation lists you made are PROTECTED. No path in the code can add them, including your own typed command.
 - **A weekly re-score.** The bot re-scores everyone on the list and DMs you only when someone on it is no longer a stranger, has become PROTECTED, or has left Bluesky since the last run.
 - **A decision log.** Every add and removal is recorded with your literal words, so "why is this person on the list" always has an answer, and `history @handle` shows it.
+- **Several lists, if you want them.** With `MOD_MULTI_LIST=true`, every moderation list on the bot account is one you can choose. A block or an approval that names none gets "Which list?" with a numbered menu, and you answer `1`, `2` or `3`; `block @handle to spam` names it up front, `new list <name>` makes another, and `lists` shows them.
 
 With a model:
 

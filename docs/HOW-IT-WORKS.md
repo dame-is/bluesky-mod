@@ -138,6 +138,82 @@ A shared post is treated like a typed handle: you put the record in the message,
 
 Attacker-controlled strings (handles, display names, bios, post text) are fenced in `<untrusted>` tags before any model sees them in a tool result. The bot's own earlier DMs come back to the model as its own words. In them, code fences the quotes a label review prints and the agent's reasons in `history`, and the write check counts a name found only inside those fences as not mentioned. A handle or display name in a lookup report, and anything a model wrote, come back as written. The bot never puts a link or mention facet on text it didn't build. A mention would notify the person being discussed.
 
+## Several lists (multi-list mode)
+
+`MOD_MULTI_LIST=true` lets the bot keep several moderation lists ("Spam", "Trolls", "Block List") and asks which one each change goes to. It is off by default, and with it off everything is as described above: one list, `MOD_LIST_URI`.
+
+The lists are whatever the bot's own repo holds. Every `app.bsky.graph.list` record with purpose `modlist` in the bot account's own repo is a list you can choose; nothing in any other repo ever is, because the bot can only write to its own repo (the ownership check at the write is unchanged). Curation lists are not offered.
+
+Numbering is stable: `MOD_LIST_URI` is always **1** (the "main" list), and the rest follow in the order they were made. The lists are read from the bot's PDS and held for 10 minutes; `lists` and `new list` read them afresh, so a list made from a client signed in as the bot appears within 10 minutes, or at once after `lists`. If the lists cannot be read and nothing was read before, a write is refused ("I could not read your lists, so I changed nothing") rather than sent to list 1 by guess.
+
+### Commands
+
+| Typed | Does |
+| --- | --- |
+| `lists` | The lists, numbered as the menus number them. Read-only senders may see it. |
+| `new list <name>` | Makes a moderation list on the bot account, with the next number, and links it so you can subscribe. Refuses a name already in use (case, spaces and hyphens ignored), a name that is a number or "all", and names over 64 characters. A write: writers only. |
+| `block @x to spam` | Names the list at the end: `to`, `on`, `onto` or `into`, then a name or a number, as the last two words. A unique start of a name works ("block" for "Block List"). |
+| `... list:<rkey>` | The canonical token every menu writes, so an option means the same list whatever the lists are called later. Also typeable. |
+| `unblock @x on all` | Off every list. |
+
+Naming a list works on `block`/`list add`, `unblock`/`list remove`, `approve`, `add likers <post> to spam` (the scan's numbered options then carry the list), a card's words (`likers to trolls`), and `watch this and block the hostile ones to spam`.
+
+### The flows
+
+**A write that names no list is not done.** The bot answers "Which list?" with a numbered menu built by code, each option the same write by DID with `list:<rkey>` on the end, and you answer `1`, `2` or `3`. With one list nothing is asked. A list word that names none of the bot's lists ("to nazis") is said back with the same menu, never guessed at.
+
+```
+you:  block @pest.bsky.social
+bot:  Which list for @pest.bsky.social?
+
+      reply with a number:
+      1. Block List
+      2. Spam
+      3. Trolls
+you:  2
+bot:  Added @pest.bsky.social to Spam.
+      ...
+      1. Undo that          (takes them off Spam)
+```
+
+- **Classic mode**: typed commands, the post-scan menus, lookups.
+- **Agent mode's quick lane** ("block" plus one target, no model): asks the same menu; a block that names its list stays quiet with a ✅, and the burst summary names the list each went on ("@a (Spam)").
+- **A card's words** ("author and likers") and **a 👍 on a stored question**: one "Which list?" for everything they would run; each option runs all of the commands with the list on the ones that need it.
+- **Unblock looks first.** On exactly one list: comes off it. On several (or Constellation cannot say for some): a menu of those lists plus "Every list". On none: "@x is not on any of your lists."
+- **Plans are bound to one list.** The first approval of a plan binds it (`plan.list_uri`). Every later approval, continuation, undo and cancel uses that list, and an approval naming a different list is refused: "Plan 1c2d3e4f adds to Spam, so it cannot add to Trolls as well. Scan the post again and approve that scan to Trolls." A plan approved before the mode existed has no list_uri and counts as bound to list 1.
+- **Watches**: a watch that blocks as it goes asks which list when it starts (or takes `to <list>`), and its plan is bound from the start. A watch that only reports needs no list; its digest's 👍 asks which list when it runs.
+- **History** names the list on each row once there are several.
+- **help** lists the new commands only when the mode is on.
+
+### In agent mode
+
+The write tools (`add_to_list`, `remove_from_list`, `approve_plan`, `watch_post` with `block_hostile`) gain an optional `list` argument, in multi-list mode only (with the mode off the tool schemas and the prompt are unchanged). The rule is the one targets already follow: **the agent may not choose a list by itself.**
+
+- A list is used when the owner's own words name it as a list: its name after "to", "on", "onto", "into" or "in", or before "list" ("on the spam list"), its number after "list", "#" or "to/on/into", or its token, in the owner's message or their earlier messages. A name said as an ordinary word ("block this, it's spam") names no list, and the owner is asked. If the agent passes a list the owner never named, it is ignored and the owner is asked.
+- The write check runs first, unchanged. When the list is known before the check it is in the check's description ("Add 1 account to the moderation list "Spam": ..."); with one list the description is word for word what it was.
+- If the check allows the write and the owner named no list, nothing is written: the tool returns "not done, waitingOnOwner", and after the reply code sends one "Which list?" menu (the last message, so a `1` answers it) whose options run the writes through the classic commands and their vetoes. A write the check refuses goes the existing 👍 route, with the named list on the stored command when there was one; a 👍 on one without a list asks which.
+- Removal follows the unblock rule: each account comes off the one list it is on, and anyone on several is asked about, with "Every list".
+- An approval of a plan bound to one list naming another is refused with an error for the agent to relay.
+
+### Why it is built this way
+
+- **No env list of URIs.** The repo is already the truth about which lists exist; a second list in config would drift from it.
+- **Canonical `list:<rkey>` in every menu option**, not the name or number: an option answered 30 minutes later still means the list it showed, even if a list was renamed or made in between.
+- **Natural phrasing only as the last two words, only in multi-list mode, and only on verbs that write to a list** (and a scan). "pulse about going to work" is untouched, and a handle, DID or link is never read as a list.
+- **One list per plan.** The decision table's key is (plan, account), so a plan could not record one account on two lists anyway; binding keeps undo, cancel and continuations unambiguous.
+- **Cross-list safety.** Three places reasoned across all plans as if there were one list. Each is now scoped by the plan's list (`src/bot/planList.js`). With the mode off every plan is on list 1, nothing is scoped, and the reads are the ones made before.
+  - `closeAdds` (unblock, undo): taking someone off Spam closes only Spam's adds and clears only Spam plans' `already_listed` marks.
+  - `addsElsewhere` / `heldByName` (undo): an add on another list no longer keeps someone on this one, nor is it closed by this undo.
+  - `graphFacts` held copy and this process's recent writes are now per list. Before, an add to list X made `rkeysForWrite(Y, did)` return X's listitem rkey for up to 10 minutes, so an unblock from Y could have deleted the X entry. The held copy is one per list, so reading several lists for "on one of your lists" does not thrash.
+- **"Already on the list" in multi-list mode** means on any of the bot's lists (scans, cards, lookups say "on your lists"). Because a scan does not yet know which list it is for, scan and watch rows no longer pre-mark `already_listed` in multi-list mode; the write checks membership on the chosen list (`splitListed`), which then marks them for that plan. The card no longer greys out "author" just because the author is on some list.
+- **Weekly re-score: list 1 only.** Kept on the primary list on purpose: a re-score is hundreds of AppView requests per few thousand accounts, and one brief per list would multiply both. Accounts on other lists are not re-scored. Worth revisiting if people keep large secondary lists.
+- **The `plan.list_uri` column** is added at start to a database made by an earlier version (`ADDED_COLUMNS` in `src/bot/db.js`). It is written only in multi-list mode (or for a plan bound to a non-primary list), so single-mode rows are unchanged.
+
+### Limits
+
+- Turning the mode off after using it: plans keep their list (undo and continuations still go to the list a plan was bound to), but a single-mode unblock is not scoped and closes adds on every list, as it always did.
+- A list deleted from a client renumbers the ones after it; menus already sent still carry rkeys, and an rkey that no longer exists is refused.
+
 ## Agent mode
 
 `MOD_DM_MODE=agent` swaps the DM surface for one model that holds the write tools and is talked to in sentences:
@@ -364,4 +440,3 @@ Collecting who engaged with a post reads [Constellation](https://constellation.m
 - **Your personalised For You feed.** It personalises off the identity of whoever asks, and the bot is not you. The bot says so rather than substituting something else.
 - **Read everything on a viral post.** Collection stops at 60 pages (6,000 records) per source. On a big post that usually cuts the tail of the likes and leaves replies and quotes whole, and the result says when it cut. A scan reads at most 10 sources outside Bluesky's own likes, reposts, replies, quotes and reply settings, and says when it skipped any.
 - **Auto-block.** Nothing is added without you: a typed command, an approval, a 👍, a watch you told to block the hostile ones, or agent mode acting on your message under the write check. The shield's attack mode closes replies and quotes by itself when you set `MOD_ATTACK=auto`, but it adds nobody to a list; the watches it starts ask.
-- **More than one list.** Commands act on `MOD_LIST_URI` only.
