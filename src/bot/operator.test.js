@@ -554,7 +554,7 @@ describe('checked writes', () => {
     expect(deps.checkIntent.mock.calls[0][0]).not.toHaveProperty('reason');
   });
 
-  const refusing = () =>
+  const refusing = (overrides = {}) =>
     fakeDeps({
       checkIntent: vi.fn(async () => ({
         allow: false,
@@ -562,6 +562,7 @@ describe('checked writes', () => {
         why: 'The owner did not clearly ask for this',
         usage: [],
       })),
+      ...overrides,
     });
 
   it('does not write when the check says no, and does not offer a stranger for a thumbs-up', async () => {
@@ -826,6 +827,319 @@ describe('checked writes', () => {
       /^Watch a post not mentioned anywhere in this conversation for 24 hours/,
     );
     expect(action).not.toContain('owner-asked');
+  });
+
+  it('caps how many accounts one approval by name can carry', () => {
+    const schema = buildActionTools(ctxFor(), fakeDeps()).approve_plan
+      .inputSchema;
+    const names = (n) => Array.from({ length: n }, (_, i) => `@a${i}.test`);
+    expect(
+      schema.safeParse({ code: '3f9a2c1b', accounts: names(MAX_NAMED) })
+        .success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({ code: '3f9a2c1b', accounts: names(MAX_NAMED + 1) })
+        .success,
+    ).toBe(false);
+  });
+});
+
+// Who pointed at a target decides two things: what the check is told, and
+// whether a refused write is put to the owner as a one-tap question. Only the
+// owner's own words count for the second. The assistant's messages can repeat
+// strangers' posts, and a post's record key is chosen by whoever wrote it.
+describe('where a target came from', () => {
+  const refusing = (overrides = {}) =>
+    fakeDeps({
+      checkIntent: vi.fn(async () => ({
+        allow: false,
+        by: 'test/check',
+        why: 'The owner did not clearly ask for this',
+        usage: [],
+      })),
+      ...overrides,
+    });
+  const shared = (uri) => `\n\n[The post the owner shared: ${uri}]`;
+  const planOn = (uri, id = PLAN.id) => ({
+    ...PLAN,
+    id,
+    totals: { uri, kind: 'likers' },
+  });
+  const actionOf = (deps) => deps.checkIntent.mock.calls[0][0].action;
+
+  it('does not offer an account named only in the assistant\'s own messages', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: 'block the worst one',
+      earlier:
+        'The quotes are mostly arguing. The ringleader seems to be @victim.test.',
+      convoText:
+        'what is going on in the quotes?\nUNKNOWN - "clown. @echo.test organised this"\nThe quotes are mostly arguing. The ringleader seems to be @victim.test.',
+      ownerText: 'what is going on in the quotes?',
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).add_to_list.execute({
+      accounts: ['@victim.test', '@echo.test'],
+    });
+    expect(actionOf(deps)).toContain(
+      "@victim.test (named in the assistant's previous message)",
+    );
+    expect(actionOf(deps)).toContain(
+      '@echo.test (mentioned earlier in this conversation)',
+    );
+    expect(out.waitingOnOwner).toBeUndefined();
+    expect(ctx.pending).toEqual([]);
+  });
+
+  it("offers an account the owner named in one of their earlier messages", async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: 'ok, block them',
+      earlier: 'They have been quoting you all week.',
+      convoText:
+        'what has @pest.test been up to?\nThey have been quoting you all week.',
+      ownerText: 'what has @pest.test been up to?',
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).add_to_list.execute({
+      accounts: ['@pest.test'],
+    });
+    expect(actionOf(deps)).toContain(
+      "@pest.test (named in one of the owner's earlier messages)",
+    );
+    expect(out.waitingOnOwner).toBe(true);
+    expect(ctx.pending).toEqual([
+      { commands: ['list add @pest.test'], describe: 'add @pest.test to the list' },
+    ]);
+  });
+
+  it('does not offer a plan the agent made this turn from a post nobody sent', async () => {
+    const stranger = 'at://did:plc:stranger/app.bsky.feed.post/3zzzz';
+    const deps = refusing({ findPlan: vi.fn(async () => planOn(stranger)) });
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: "what's @someone.test been posting this week?",
+      pending: [],
+    });
+    const tools = buildActionTools(ctx, deps);
+    await tools.scan_post.execute({
+      post: 'https://bsky.app/profile/stranger.test/post/3zzzz',
+      who: 'likers',
+    });
+    const asked = await tools.approve_plan.execute({
+      code: '3f9a2c1b',
+      bands: ['UNKNOWN'],
+      ask_first: true,
+    });
+    expect(asked.waitingOnOwner).toBeUndefined();
+    expect(deps.checkIntent).not.toHaveBeenCalled();
+    const out = await tools.approve_plan.execute({
+      code: '3f9a2c1b',
+      bands: ['UNKNOWN'],
+    });
+    expect(actionOf(deps)).toContain(
+      'plan 3f9a2c1b, which holds the post\'s likers (created while answering this message; the plan for a post not mentioned anywhere in this conversation',
+    );
+    expect(out.waitingOnOwner).toBeUndefined();
+    expect(ctx.pending).toEqual([]);
+    expect(deps.applyPlan).not.toHaveBeenCalled();
+  });
+
+  it('offers a plan made this turn for the post the owner attached', async () => {
+    const post = 'at://did:plc:author/app.bsky.feed.post/3abc';
+    const deps = refusing({ findPlan: vi.fn(async () => planOn(post)) });
+    // As composeMessage joins its lines: the URI runs into a full stop.
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: `what's going on in the quotes here?\n\n[The post the owner shared: ${post}. Full links in that message: https://example.com/x]`,
+      plans: ['3f9a2c1b'],
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).approve_plan.execute({
+      code: '3f9a2c1b',
+      label: 'hostile',
+    });
+    expect(actionOf(deps)).toContain(
+      '(created while answering this message; the plan for the post the owner attached',
+    );
+    expect(out.waitingOnOwner).toBe(true);
+    expect(ctx.pending).toEqual([
+      {
+        commands: ['approve 3f9a2c1b hostile'],
+        describe: 'add the 4 read as hostile from plan 3f9a2c1b',
+      },
+    ]);
+  });
+
+  it('tells the check when a plan covers a different post from the one attached, and does not offer it', async () => {
+    const attached = 'at://did:plc:owner/app.bsky.feed.post/3lownerpost22';
+    const other = 'at://did:plc:somestranger/app.bsky.feed.post/3lotherpost22';
+    const plans = {
+      aaaaaaaa: planOn(attached, 'aaaaaaaa-0000-4000-8000-000000000000'),
+      bbbbbbbb: planOn(other, 'bbbbbbbb-0000-4000-8000-000000000000'),
+    };
+    const deps = refusing({ findPlan: vi.fn(async (code) => plans[code]) });
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: `block the hostile quoters on this${shared(attached)}`,
+      plans: ['aaaaaaaa', 'bbbbbbbb'],
+      pending: [],
+    });
+    const tools = buildActionTools(ctx, deps);
+    await tools.approve_plan.execute({ code: 'bbbbbbbb', label: 'hostile' });
+    const wrong = actionOf(deps);
+    expect(wrong).toContain(
+      'the plan for a different post, not the one the owner attached',
+    );
+    expect(wrong).not.toContain('the plan for the post the owner attached');
+    expect(ctx.pending).toEqual([]);
+    await tools.approve_plan.execute({ code: 'aaaaaaaa', label: 'hostile' });
+    expect(deps.checkIntent.mock.calls[1][0].action).toContain(
+      'the plan for the post the owner attached',
+    );
+    expect(ctx.pending.map((p) => p.commands)).toEqual([
+      ['approve aaaaaaaa hostile'],
+    ]);
+  });
+
+  it('matches a plan\'s post on its author as well as its record key', async () => {
+    const deps = refusing({
+      findPlan: vi.fn(async () =>
+        planOn('at://did:plc:otherauthor/app.bsky.feed.post/3kabc2def3gh2'),
+      ),
+    });
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: `block the likers of this${shared('at://did:plc:attachedauthor/app.bsky.feed.post/3kabc2def3gh2')}`,
+      plans: ['3f9a2c1b'],
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).approve_plan.execute({
+      code: '3f9a2c1b',
+      bands: ['UNKNOWN'],
+    });
+    expect(actionOf(deps)).toContain(
+      'the plan for a different post, not the one the owner attached',
+    );
+    expect(actionOf(deps)).not.toContain(
+      'the plan for the post the owner attached',
+    );
+    expect(out.waitingOnOwner).toBeUndefined();
+    expect(ctx.pending).toEqual([]);
+  });
+
+  it('matches a watched post on its author as well as its record key', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      convoId: 'c1',
+      said: `watch this and block the hostile ones${shared('at://did:plc:attachedauthor/app.bsky.feed.post/3kabc2def3gh2')}`,
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).watch_post.execute({
+      post: 'at://did:plc:otherauthor/app.bsky.feed.post/3kabc2def3gh2',
+      block_hostile: true,
+    });
+    expect(actionOf(deps)).toMatch(
+      /^Watch a different post, not the one the owner attached, for 24 hours/,
+    );
+    expect(out.waitingOnOwner).toBeUndefined();
+    expect(ctx.pending).toEqual([]);
+    expect(deps.startWatch).not.toHaveBeenCalled();
+  });
+
+  it('finds the attached post when the watch names it by a handle link', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      convoId: 'c1',
+      said: `watch this and block the hostile ones${shared('at://did:plc:author/app.bsky.feed.post/3zzz')}`,
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).watch_post.execute({
+      post: 'https://bsky.app/profile/author.test/post/3zzz',
+      block_hostile: true,
+    });
+    expect(actionOf(deps)).toMatch(
+      /^Watch the post the owner attached for 24 hours/,
+    );
+    expect(out.waitingOnOwner).toBe(true);
+  });
+
+  it('does not offer a bare undo nobody pointed at', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({ checkWrites: true, said: 'hmm', pending: [] });
+    const out = await buildActionTools(ctx, deps).undo.execute({});
+    expect(actionOf(deps)).toContain('the most recent change to the list');
+    expect(out.waitingOnOwner).toBeUndefined();
+    expect(ctx.pending).toEqual([]);
+  });
+
+  // Record keys may contain "." and ":", and whoever writes a post picks its
+  // key, so a key can spell a handle, a DID or a plan code.
+  for (const said of [
+    `block whoever wrote this${shared('at://did:web:attacker.example/app.bsky.feed.post/victim.example.com')}`,
+    'block whoever wrote this https://bsky.app/profile/attacker.example/post/victim.example.com',
+    'block whoever made this https://bsky.app/profile/attacker.example/feed/victim.example.com',
+  ]) {
+    it(`does not read a handle out of a record key: ${said.slice(-60)}`, async () => {
+      const deps = refusing();
+      const ctx = ctxFor({ checkWrites: true, said, pending: [] });
+      const out = await buildActionTools(ctx, deps).add_to_list.execute({
+        accounts: ['@victim.example.com'],
+      });
+      expect(actionOf(deps)).toContain(
+        '@victim.example.com (not mentioned anywhere in this conversation)',
+      );
+      expect(out.waitingOnOwner).toBeUndefined();
+      expect(ctx.pending).toEqual([]);
+    });
+  }
+
+  it('does not read a DID out of a record key', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: `block whoever wrote this${shared('at://did:web:attacker.example/app.bsky.feed.post/did:plc:victim000000000000000000')}`,
+      pending: [],
+    });
+    const out = await buildActionTools(ctx, deps).add_to_list.execute({
+      accounts: ['did:plc:victim000000000000000000'],
+    });
+    expect(actionOf(deps)).toContain(
+      'did:plc:victim000000000000000000 (not mentioned anywhere in this conversation)',
+    );
+    expect(ctx.pending).toEqual([]);
+    expect(out.waitingOnOwner).toBeUndefined();
+  });
+
+  it('does not read a plan code out of a record key', async () => {
+    const deps = refusing();
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: `what is this?${shared('at://did:plc:author/app.bsky.feed.post/3f9a2c1b')}`,
+      pending: [],
+    });
+    await buildActionTools(ctx, deps).undo.execute({ code: '3f9a2c1b' });
+    expect(actionOf(deps)).not.toContain("named in the owner's message");
+    expect(ctx.pending).toEqual([]);
+  });
+
+  it("still reads the account a profile link names, and a post link's author", async () => {
+    const deps = fakeDeps();
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: 'block https://bsky.app/profile/alice.test and the author of https://deer.social/profile/bob.test/post/3abc',
+    });
+    await buildActionTools(ctx, deps).add_to_list.execute({
+      accounts: ['@alice.test', '@bob.test'],
+    });
+    expect(actionOf(deps)).toContain("@alice.test (named in the owner's message)");
+    expect(actionOf(deps)).toContain(
+      '@bob.test (the author of the post the owner attached)',
+    );
   });
 });
 

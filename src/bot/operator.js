@@ -15,9 +15,10 @@
 //    reads strangers' posts mid-turn, so a post saying "add @your-friend" can
 //    capture a turn. The veto means a captured turn cannot add anyone the
 //    owner follows.
-//  - Per-call caps: ten accounts per add_to_list, 500 adds per approval, 240
-//    reads per triage, 1,000 removals per undo. The model can call again; it
-//    cannot write thousands in one step.
+//  - Per-call caps: ten accounts per add_to_list, remove_from_list or
+//    approval by name, 500 adds per approval by band or label, 240 reads per
+//    triage, 1,000 removals per undo. The model can call again; it cannot
+//    write thousands in one step.
 //  - The write check (tiers.js). Every write is first put to a separate call
 //    as one question, "did the owner ask for exactly this?", over a
 //    description code wrote, including where each target came from. A no
@@ -144,7 +145,7 @@ const OPERATOR_REASONING = (() => {
   return ['minimal', 'low', 'medium', 'high'].includes(v) ? v : null;
 })();
 
-/** Accounts one add_to_list or remove_from_list call may touch. */
+/** Accounts one add_to_list, remove_from_list or approval by name may touch. */
 export const MAX_NAMED = 10;
 
 /** Interim DMs one turn may send through send_progress. */
@@ -334,13 +335,26 @@ function noteFor(raw, reason) {
 }
 
 /**
+ * The text with everything after the account in a link or at:// URI removed.
+ * Whoever writes a record picks its key, and a key may contain "." and ":",
+ * so a post's key can spell a handle, a DID or a plan code. The account part
+ * stays, so `at://<account>` and `/profile/<account>` still name who a link
+ * points at.
+ */
+function withoutRecordKeys(text) {
+  return String(text ?? '')
+    .replace(/(at:\/\/[^\s/]+)\/\S*/gi, '$1')
+    .replace(/(\/profile\/[^\s/?#]+)[/?#]\S*/gi, '$1');
+}
+
+/**
  * Does any of these handles, DIDs or codes appear in this text, as a whole
  * token? Case-insensitive. A bare substring match would read "@fan.test" as
  * naming "n.test" and tell the write check the owner named someone they did
- * not.
+ * not. Record keys are not searched (see withoutRecordKeys).
  */
 function mentioned(text, needles) {
-  const hay = String(text ?? '').toLowerCase();
+  const hay = withoutRecordKeys(text).toLowerCase();
   return needles.some((n) => {
     const needle = String(n ?? '').toLowerCase();
     if (!needle) return false;
@@ -362,27 +376,35 @@ function mentioned(text, needles) {
   });
 }
 
-/** Posts referred to in a message: at:// URIs and bsky.app post links. */
+/** A record key, without the full stop or colon of the sentence around it. */
+const keyOf = (raw) => raw.replace(/[.:]+$/, '');
+
+/**
+ * Posts referred to in a message: at:// post URIs, and post links from any
+ * client, which all serve the same /profile/<actor>/post/<rkey> path. The
+ * author is a DID or a handle, as written.
+ */
 function postRefs(text) {
   const s = String(text ?? '');
   const out = [];
   for (const m of s.matchAll(
-    /at:\/\/(did:[a-z]+:[a-zA-Z0-9._%-]+)\/app\.bsky\.feed\.post\/([a-zA-Z0-9]+)/g,
+    /at:\/\/([^\s/]+)\/app\.bsky\.feed\.post\/([A-Za-z0-9._:~-]+)/g,
   )) {
-    out.push({ author: m[1], rkey: m[2] });
+    out.push({ author: m[1], rkey: keyOf(m[2]) });
   }
   for (const m of s.matchAll(
-    /bsky\.app\/profile\/([^/\s]+)\/post\/([a-zA-Z0-9]+)/g,
+    /\/profile\/([^\s/?#]+)\/post\/([A-Za-z0-9._:~-]+)/g,
   )) {
-    out.push({ author: m[1], rkey: m[2] });
+    out.push({ author: m[1], rkey: keyOf(m[2]) });
   }
-  return out;
+  return out.filter((r) => r.rkey);
 }
 
 const ACCOUNT_SOURCE = {
   attached: 'the author of the post the owner attached',
   said: "named in the owner's message",
   earlier: "named in the assistant's previous message",
+  ownerEarlier: "named in one of the owner's earlier messages",
   conversation: 'mentioned earlier in this conversation',
   none: 'not mentioned anywhere in this conversation',
 };
@@ -399,8 +421,9 @@ const ACCOUNT_SOURCE = {
 export function accountPhrase({ label, source, inPlan = null }) {
   const where = ACCOUNT_SOURCE[source] ?? ACCOUNT_SOURCE.none;
   if (!inPlan) return `${label} (${where})`;
-  const fromTalk =
-    source === 'said' || source === 'earlier' || source === 'attached';
+  const fromTalk = ['said', 'earlier', 'ownerEarlier', 'attached'].includes(
+    source,
+  );
   return `${label} (${inPlan}${fromTalk ? `; ${where}` : ''})`;
 }
 
@@ -413,14 +436,32 @@ function planFact(row) {
   return `in this plan, band ${row.band}, no triage label`;
 }
 
+// The post clauses (attached to unnamedPost) say where the plan's post sits
+// in the conversation. A plan has at most one, and only when it has a post.
 const PLAN_SOURCE = {
   latest: 'the most recent change to the list',
   thisTurn: 'created while answering this message',
   attached: 'the plan for the post the owner attached',
+  ownerPost: 'the plan for a post the owner sent earlier in this conversation',
+  otherPost: 'the plan for a different post, not the one the owner attached',
+  earlierPost: "the plan for a post named in the assistant's previous message",
+  convoPost: 'the plan for a post mentioned earlier in this conversation',
+  unnamedPost: 'the plan for a post not mentioned anywhere in this conversation',
   said: "named in the owner's message",
   earlier: "named in the assistant's previous message",
+  ownerEarlier: "named in one of the owner's earlier messages",
   conversation: 'mentioned earlier in this conversation',
   none: 'not mentioned anywhere in this conversation',
+};
+
+/** A watched post, named the same way. */
+const WATCHED = {
+  attached: 'the post the owner attached',
+  ownerPost: 'a post the owner sent earlier in this conversation',
+  otherPost: 'a different post, not the one the owner attached,',
+  earlierPost: "a post named in the assistant's previous message",
+  convoPost: 'a post mentioned earlier in this conversation',
+  unnamedPost: 'a post not mentioned anywhere in this conversation',
 };
 
 function stamp(iso) {
@@ -557,6 +598,7 @@ export function actionText(
  * @param {string}  [ctx.said]          the owner's message as the agent saw it
  * @param {string}  [ctx.earlier]       the bot's previous message
  * @param {string}  [ctx.convoText]     the whole conversation so far, as text
+ * @param {string}  [ctx.ownerText]     the asker's own earlier messages, as text
  * @param {boolean} [ctx.checkWrites]   put every write to the intent check
  * @param {'only'|'first'|'second'} [ctx.stage]
  */
@@ -570,31 +612,74 @@ export function buildActionTools(ctx, deps = DEPS) {
     return plan;
   };
 
-  // The authors of the posts the owner put in this message, resolved once.
-  // The promise is what is kept, so accounts checked in parallel all wait for
-  // the whole set rather than reading it half filled.
+  // A post author as a DID, resolved once per turn. The promise is what is
+  // kept, so lookups made in parallel share one resolution. An author that
+  // cannot be resolved is null and matches nothing.
+  const dids = new Map();
+  const didOf = (author) => {
+    if (!dids.has(author)) {
+      dids.set(
+        author,
+        (async () => {
+          try {
+            const actor = decodeURIComponent(author);
+            return actor.startsWith('did:')
+              ? actor
+              : await deps.resolveActor(actor);
+          } catch {
+            return null;
+          }
+        })(),
+      );
+    }
+    return dids.get(author);
+  };
+
+  // The authors of the posts the owner put in this message. Accounts checked
+  // in parallel all wait for the whole set rather than reading it half filled.
   let authors = null;
   const attachedAuthors = () =>
-    (authors ??= (async () => {
-      const found = new Set();
-      for (const ref of postRefs(ctx.said)) {
-        try {
-          found.add(
-            ref.author.startsWith('did:')
-              ? ref.author
-              : await deps.resolveActor(ref.author),
-          );
-        } catch {
-          /* an unresolvable author is simply not matched */
-        }
-      }
-      return found;
-    })());
+    (authors ??= Promise.all(postRefs(ctx.said).map((r) => didOf(r.author))).then(
+      (found) => new Set(found.filter(Boolean)),
+    ));
+
+  /** Does this part of the conversation refer to this post, by author and key? */
+  const refersTo = async (text, post) => {
+    for (const ref of postRefs(text)) {
+      if (ref.rkey === post.rkey && (await didOf(ref.author)) === post.did)
+        return true;
+    }
+    return false;
+  };
+
+  /**
+   * Where a post sits in the conversation: one of the post clauses in
+   * PLAN_SOURCE, or null for something that is not a post. Matched on author
+   * DID and record key together, because anyone can give a post of their own
+   * the same key as someone else's.
+   */
+  const postPlace = async (link) => {
+    const [ref] = postRefs(link);
+    const did = ref ? await didOf(ref.author) : null;
+    if (!did) return null;
+    const post = { did, rkey: ref.rkey };
+    if (await refersTo(ctx.said, post)) return 'attached';
+    if (await refersTo(ctx.ownerText, post)) return 'ownerPost';
+    if (postRefs(ctx.said).length) return 'otherPost';
+    if (await refersTo(ctx.earlier, post)) return 'earlierPost';
+    if (await refersTo(ctx.convoText, post)) return 'convoPost';
+    return 'unnamedPost';
+  };
 
   /**
    * Where a target came from, worked out by code from the conversation, and
    * the label a question to the owner shows. Takes an actor as
    * asCommandActor returns it.
+   *
+   * `fromOwner` is true when the asker pointed at the account in their own
+   * words: the author of a post they attached, or a name in this message or
+   * an earlier one of theirs. A name that appears only in the assistant's
+   * messages does not count, because those can repeat what strangers wrote.
    */
   const accountInfo = async (actor, plan = null) => {
     const given = actor.replace(/^@/, '');
@@ -614,10 +699,13 @@ export function buildActionTools(ctx, deps = DEPS) {
     }
     const needles = [given, did, handle].filter(Boolean);
     const label = handle ? `@${handle}` : did || given;
+    const attached = Boolean(did) && (await attachedAuthors()).has(did);
+    const inOwnerText = mentioned(ctx.ownerText, needles);
     let source = 'none';
-    if (did && (await attachedAuthors()).has(did)) source = 'attached';
+    if (attached) source = 'attached';
     else if (mentioned(ctx.said, needles)) source = 'said';
     else if (mentioned(ctx.earlier, needles)) source = 'earlier';
+    else if (inOwnerText) source = 'ownerEarlier';
     else if (mentioned(ctx.convoText, needles)) source = 'conversation';
     let inPlan = null;
     if (plan) {
@@ -630,25 +718,34 @@ export function buildActionTools(ctx, deps = DEPS) {
     return {
       phrase: accountPhrase({ label, source, inPlan }),
       source,
+      fromOwner: source === 'attached' || source === 'said' || inOwnerText,
       label,
       inPlan,
     };
   };
 
-  /** Where a plan came from and when, and whether anyone pointed at it. */
-  const planInfo = (plan, extra = []) => {
+  /**
+   * Where a plan came from and when, and whether the owner pointed at it.
+   *
+   * Pointed at means the plan's post is one the owner sent, or the owner gave
+   * its code. A plan made this turn, or the latest change for a bare undo, is
+   * said to the check but is not pointed at on its own: the agent chose it.
+   */
+  const planInfo = async (plan, extra = []) => {
     const code = shortCode(plan.id);
     const sources = [...extra];
     if (ctx.plans?.includes(code)) sources.push('thisTurn');
-    const rkey = String(plan.totals?.uri || '')
-      .split('/')
-      .pop();
-    if (rkey && postRefs(ctx.said).some((r) => r.rkey === rkey)) {
-      sources.push('attached');
-    }
+    const post = await postPlace(plan.totals?.uri);
+    if (post) sources.push(post);
     if (mentioned(ctx.said, [code])) sources.push('said');
     else if (mentioned(ctx.earlier, [code])) sources.push('earlier');
+    else if (mentioned(ctx.ownerText, [code])) sources.push('ownerEarlier');
     else if (mentioned(ctx.convoText, [code])) sources.push('conversation');
+    const pointedAt =
+      post === 'attached' ||
+      post === 'ownerPost' ||
+      sources.includes('said') ||
+      mentioned(ctx.ownerText, [code]);
     return {
       phrase: planPhrase({
         code,
@@ -658,7 +755,7 @@ export function buildActionTools(ctx, deps = DEPS) {
         approvedAt: plan.approved_at,
       }),
       sources,
-      pointedAt: sources.length > 0,
+      pointedAt,
     };
   };
 
@@ -667,11 +764,13 @@ export function buildActionTools(ctx, deps = DEPS) {
    * "not done" result to hand back to the agent.
    */
   const gate = async (action, offer = null, { askFirst = false } = {}) => {
-    // A change the owner or this conversation pointed at is put to the owner as
-    // a question a thumbs-up can answer. It is stored as the classic commands
-    // it stands for, which run without a model. One aimed at someone the agent
-    // found by itself is refused and NOT offered: a stranger's post that
-    // talked the model into "block @x" must not get as far as a one-tap yes.
+    // A change aimed at something the owner pointed at in their own words is
+    // put to the owner as a question a thumbs-up can answer. It is stored as
+    // the classic commands it stands for, which run without a model. One aimed
+    // at someone the agent found by itself (named only in its own messages, or
+    // on a plan it made from a post the owner never sent) is refused and NOT
+    // offered: a stranger's post that talked the model into "block @x" must
+    // not get as far as a one-tap yes.
     const ask = (why) => {
       if (!offer?.pointedAt || !ctx.pending) {
         return {
@@ -974,7 +1073,7 @@ export function buildActionTools(ctx, deps = DEPS) {
             accounts: infos.map((i) => i.phrase),
           }),
           {
-            pointedAt: infos.every((i) => i.source !== 'none'),
+            pointedAt: infos.every((i) => i.fromOwner),
             commands: actors.map(
               (a) => `list ${adding ? 'add' : 'remove'} ${a}`,
             ),
@@ -1008,12 +1107,12 @@ export function buildActionTools(ctx, deps = DEPS) {
 
   tools.approve_plan = tool({
     description:
-      'Add a plan\'s accounts to the list. Give exactly one of: bands (e.g. ["UNKNOWN"]), label (a triage label, e.g. "hostile"), or accounts (handles or DIDs that are in the plan). PROTECTED is never added. At most 500 per call; the result says how many are left.',
+      `Add a plan's accounts to the list. Give exactly one of: bands (e.g. ["UNKNOWN"]), label (a triage label, e.g. "hostile"), or accounts (up to ${MAX_NAMED} handles or DIDs that are in the plan). PROTECTED is never added. At most 500 per call; the result says how many are left.`,
     inputSchema: z.object({
       code: z.string(),
       bands: z.array(z.enum(BANDS)).optional(),
       label: z.enum(LABELS).optional(),
-      accounts: z.array(z.string()).optional(),
+      accounts: z.array(z.string()).max(MAX_NAMED).optional(),
       ask_first: z
         .boolean()
         .optional()
@@ -1034,7 +1133,7 @@ export function buildActionTools(ctx, deps = DEPS) {
       if (error) return { error };
       try {
         const plan = await findOrFail(code);
-        const where = planInfo(plan);
+        const where = await planInfo(plan);
         const named = actors.length
           ? await Promise.all(actors.map((a) => accountInfo(a, plan)))
           : null;
@@ -1143,7 +1242,7 @@ export function buildActionTools(ctx, deps = DEPS) {
             result: 'Nothing from that plan is still on the list.',
           };
         }
-        const where = planInfo(plan, code ? [] : ['latest']);
+        const where = await planInfo(plan, code ? [] : ['latest']);
         const stopped = await gate(
           actionText('undo', {
             // With no code the plan IS the latest change, and saying so is
@@ -1191,20 +1290,12 @@ export function buildActionTools(ctx, deps = DEPS) {
         return { error: 'a watch needs a conversation to report to' };
       }
       try {
-        const rkey = String(post).split('/').pop();
-        const fromOwner = postRefs(ctx.said).some((r) => r.rkey === rkey);
-        const pointedAt =
-          fromOwner ||
-          mentioned(ctx.earlier, [rkey]) ||
-          mentioned(ctx.convoText, [rkey]);
-        // Named by where it came from, never by the model's argument, so the
-        // check reads only words code wrote.
-        const which = fromOwner
-          ? 'the post the owner attached'
-          : pointedAt
-            ? 'a post mentioned earlier in this conversation'
-            : 'a post not mentioned anywhere in this conversation';
         if (auto) {
+          // Named by where it came from, never by the model's argument, so the
+          // check reads only words code wrote.
+          const place = (await postPlace(post)) ?? 'unnamedPost';
+          const pointedAt = place === 'attached' || place === 'ownerPost';
+          const which = WATCHED[place];
           const stopped = await gate(
             `Watch ${which} for ${hours} hours, and add the accounts triage reads as hostile in its new quotes and replies as they arrive (CONNECTED and NOTABLE held for the owner).`,
             {
@@ -1383,6 +1474,11 @@ async function runTurn({
     earlier:
       [...history].reverse().find((h) => h.role === 'assistant')?.content ?? '',
     convoText: history.map((h) => h.content).join('\n'),
+    // Only the asker's own turns: a name here is one they wrote themselves.
+    ownerText: history
+      .filter((h) => h.role === 'user')
+      .map((h) => h.content)
+      .join('\n'),
     checkWrites,
     checks: [],
     usages: [],
