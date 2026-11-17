@@ -64,6 +64,8 @@ By default, one account: yours. Two settings widen that, because "can talk to th
 
 Both settings take DIDs only. A handle can change hands, so an allowlist written in handles can change without anyone editing it.
 
+It answers in one-to-one chats only. In a group chat it says nothing, because every member would read the reply, and the menu, the stored question and the remembered post belong to the chat rather than to one person.
+
 Read-only accounts can still see bands, vouch counts and follower numbers for third parties. That is your private reading of your own social graph, and adding someone to the roster shares it with them.
 
 `src/lib/senders.js` is the only place that decides who is answered, for DMs and public mentions alike.
@@ -84,25 +86,25 @@ Commands are parsed, not interpreted. They never reach a model.
 | `approve <code> UNKNOWN,NOTABLE` | Adds those bands only |
 | `approve <code> @handle @handle` | Adds those accounts, recorded as a personal decision rather than a band |
 | `cancel <code>` | Records the decision not to act |
-| `undo` / `undo <code>` | Takes a plan's additions back off the list |
+| `undo` / `undo <code>` | Takes a plan's additions back off the list, except accounts you also added by name (a typed block or an approval by name) |
 | `read @handle` *(model)* | Reads their recent posts and says how they behave, including what it did not find |
 | `triage <code>` *(model)* | Reads what each account in a plan wrote and labels it. Adds nobody. |
 | `review <code> hostile` | Those accounts, with their own words |
 | `approve <code> hostile` | Adds only that label. Recorded as `triage:hostile`, never as a band. |
 | `pulse` *(model)* | What your follows are talking about. `pulse 3d`, `pulse amplified`, `pulse about <word>`, `pulse <feed or list link>` |
 | `thread <post>` *(model)* | What a thread is arguing about, without grading anyone in it |
-| `watch this` *(model)* | Re-reads a post's new quotes and replies for 24 hours. `for 12h`, `and block the hostile ones`, `stop watching`, `what are you watching` |
-| `remember: <note>` | Keeps your words as a standing note the model reads. `what do you remember`, `forget 2` |
+| `watch this` *(model)* | Re-reads a post's new quotes and replies for 24 hours. `for 12h`, `and block the hostile ones` (agent mode only), `stop watching`, `what are you watching` |
+| `remember: <note>` *(agent mode)* | Keeps your words as a standing note the model reads. `what do you remember`, `forget 2`. Classic mode answers it with a note saying so. |
 
-**You rarely type a code.** Bare `undo` means the last thing that touched the list, and every reply that names a plan ends in a numbered menu, so the usual path is answering `1`. A code that doesn't parse is refused rather than guessed, because undoing the most recent plan over a typo would act on a batch you didn't name.
+**You rarely type a code.** Bare `undo` means the newest change to the list when that change was an add, one block or a whole batch. After an unblock it undoes nothing and says so. Every reply that names a plan ends in a numbered menu, so the usual path is answering `1`. A number answers only the menu on the bot's last message. A code that doesn't parse is refused rather than guessed, because undoing the most recent plan over a typo would act on a batch you didn't name.
 
 `undo` is the only verb that may default to a target you didn't name. Every other one adds someone to a block list, and guessing is the failure that matters there.
 
 ### Day to day in a DM
 
 - **Reactions instead of acks.** 👀 goes on your message when it's picked up. It becomes ✅ when something changed and ❌ when it failed.
-- **The quick lane.** "block" or "unblock" with exactly one target and only filler words around it never reaches a model. A plain block gets a ✅ and nothing else. After a minute with no more blocks, one message sums up the burst. A block is only said out loud when it matters: a PROTECTED, CONNECTED or NOTABLE account, an unblock of someone not on the list, or a failure.
-- **A post with no words** gets a card: who wrote it, who engaged and how, by band, and how many are already listed or already block you. Answer with `author`, `likers`, `unknowns`, `everyone` or `hostile`. Setting `"barePost": "author"` in the config file makes a bare post mean "block whoever wrote it" instead.
+- **The quick lane** *(agent mode)*. "block" or "unblock" with exactly one target and only filler words around it never reaches a model. A plain block gets a ✅ and nothing else. After a minute with no more blocks, one message sums up the burst. A block is only said out loud when it matters: a PROTECTED, CONNECTED or NOTABLE account, an unblock of someone not on the list, a block that could not be recorded, or a failure. In classic mode a block gets a text receipt ending in a numbered menu.
+- **A post with no words** *(agent mode)* gets a card: who wrote it, who engaged and how, by band, and how many are already listed or already block you. Answer with `author`, `likers`, `unknowns`, `everyone` or `hostile`. Setting `"barePost": "author"` in the config file makes a bare post mean "block whoever wrote it" instead. In classic mode a bare post gets the full scan report ending in a numbered menu.
 - **Questions a 👍 answers.** When the bot wants your OK, the exact change is stored as commands, with a line written by code: *👍 or "yes" to: add @x to the list*. "yes" or a 👍 runs exactly those commands, with no model. Anything else you say lets the question lapse, and questions expire after 30 minutes. A change aimed at someone the model found by itself is never offered this way.
 - **The post you last sent is remembered** per conversation, so `add likers` with nothing attached uses it.
 
@@ -201,7 +203,7 @@ An optional `config/bot.json` (see `config/bot.example.json`):
 | `report`, `postReport` | The account report and post scan templates |
 | `model` | Overrides `MOD_AGENT_MODEL` |
 | `limits` | `maxTurns`, `maxSteps`, `historyHours`, `reviewRows`, each clamped to a range |
-| `barePost` | `card` or `author` |
+| `barePost` | `card` or `author`, agent mode only |
 
 Nothing in the file can change what the bands mean, how untrusted text is handled, or the message length budgets. Those stay in code, because they are what keep the decision log replayable and the replies valid.
 

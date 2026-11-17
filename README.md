@@ -15,7 +15,7 @@ You send it a handle, a link or a shared post and say "block". It adds that acco
 With no AI model at all:
 
 - **Block and unblock by DM.** "block" with a shared post, a pasted link or a typed `@handle`. One account, no model involved, about a second.
-- **Scan a post.** `add likers <post>` (or `reposters`, `repliers`, `quoters`, `everyone`) collects who engaged, scores them, and proposes a batch. Nothing is added until you `approve <code> UNKNOWN` (or another band, or named accounts). `undo` takes a batch back off.
+- **Scan a post.** `add likers <post>` (or `reposters`, `repliers`, `quoters`, `everyone`) collects who engaged, scores them, and proposes a batch. Nothing is added until you `approve <code> UNKNOWN` (or another band, or named accounts). `undo` takes back the last change when it was an add, one account or a batch.
 - **A veto on people you know.** Accounts you follow, and members of curation lists you made as of the last snapshot, are PROTECTED. No path in the code can add them, including your own typed command.
 - **A weekly re-score.** The bot re-scores everyone on the list and DMs you only when someone on it is no longer a stranger, or has left Bluesky.
 - **A decision log.** Every add and removal is recorded with your literal words, so "why is this person on the list" always has an answer, and `history @handle` shows it.
