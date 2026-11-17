@@ -31,7 +31,7 @@ import { loadReference, makeIo } from './bot/reference.js';
 import { loadAgentConfig } from './bot/agentConfig.js';
 import { runDmPass } from './bot/dmLoop.js';
 import { stopWrites } from './bot/bulkPlan.js';
-import { CHECK_MODEL, ESCALATION_MODEL } from './bot/tiers.js';
+import { checkModelFor, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
 import { upsert, openDb, closeDb } from './bot/db.js';
 import { snapshotStep, hasSnapshot } from './snapshot.js';
@@ -636,6 +636,9 @@ async function start() {
   // so a misconfigured URL shows up now rather than mid-answer.
   await atmosphereTools();
 
+  // The config file's model, when it names one, takes the place of the
+  // environment's for DMs, mentions and the write check.
+  const fileModel = (await loadAgentConfig())?.model;
   logger.info('Bot started', {
     owner: config.ownerDid,
     answering: config.roster.all.length,
@@ -646,9 +649,9 @@ async function start() {
     driftEveryHours: config.driftEveryHours,
     dryRun: config.dryRun,
     provider: config.provider,
-    model: modelsEnabled() ? model : '(none: commands only)',
+    model: modelsEnabled() ? fileModel || model : '(none: commands only)',
     dmMode: config.dmMode,
-    check: CHECK_MODEL,
+    check: checkModelFor(fileModel || model),
     escalation: ESCALATION_MODEL,
     watchEveryMs: config.watchEveryMs,
     alertEveryMs: config.alertEveryMs,

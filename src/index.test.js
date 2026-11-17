@@ -366,6 +366,26 @@ describe('a public mention', () => {
   });
 });
 
+describe('the startup log', () => {
+  it("names the config file's model, and the check model it implies", async () => {
+    const file = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-config-')),
+      'bot.json',
+    );
+    fs.writeFileSync(file, JSON.stringify({ model: 'from/config-file' }));
+    const lines = [];
+    vi.spyOn(console, 'log').mockImplementation((line) => lines.push(line));
+    await boot({ MOD_CONFIG_FILE: file, LOG_LEVEL: 'info', LOG_JSON: 'true' });
+    const started = lines
+      .map((line) => JSON.parse(line))
+      .find((entry) => entry.msg === 'Bot started');
+    expect(started).toMatchObject({
+      model: 'from/config-file',
+      check: 'from/config-file',
+    });
+  });
+});
+
 describe('a watch', () => {
   it("is read on the config file's model when it names one", async () => {
     const file = path.join(

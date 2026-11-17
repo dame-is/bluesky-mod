@@ -13,8 +13,9 @@
 //   npm run eval:intent
 //   npm run eval:intent -- --models model-a,model-b
 //
-// With no --models, it tests MOD_CHECK_MODEL (which defaults to the agent
-// model). Run it again after changing the check prompt or the model.
+// With no --models, it tests the model agent mode's write check runs on:
+// MOD_CHECK_MODEL, otherwise the config file's `model`, otherwise
+// MOD_AGENT_MODEL. Run it again after changing the check prompt or the model.
 
 import {
   PROVIDER,
@@ -23,14 +24,20 @@ import {
   modelProblems,
 } from '../src/models.js';
 import { CASES } from './evals/intent-cases.js';
-import { checkIntent } from '../src/bot/tiers.js';
+import { checkIntent, checkModelFor } from '../src/bot/tiers.js';
+import { loadAgentConfig } from '../src/bot/agentConfig.js';
 import { actionText, accountPhrase, planPhrase } from '../src/bot/operator.js';
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`);
   return i > -1 ? process.argv[i + 1] : def;
 };
-const CANDIDATES = String(arg('models', MODELS.check || ''))
+const CANDIDATES = String(
+  arg(
+    'models',
+    checkModelFor((await loadAgentConfig())?.model || MODELS.agent) || '',
+  ),
+)
   .split(',')
   .map((m) => m.trim())
   .filter(Boolean);
