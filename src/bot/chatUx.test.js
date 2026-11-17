@@ -92,7 +92,8 @@ describe('the post card', () => {
     expect(unread).toContain('Could not read 900 likes. Send it again to retry.');
     expect(unread).not.toContain('Nobody has engaged');
     const cut = renderCard({ ...empty, truncated: true, unread: [] });
-    expect(cut).toContain('Not every engagement was read. Send it again to retry.');
+    expect(cut).toContain('Nobody found so far, and not every engagement was read.');
+    expect(cut).not.toContain('retry');
     expect(cut).not.toContain('Nobody has engaged');
     expect(renderCard(empty)).toContain('Nobody has engaged with it yet.');
   });

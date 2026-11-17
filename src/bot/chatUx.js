@@ -267,7 +267,8 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
   } else if (missing) {
     lines.push(`Could not read ${missing}. Send it again to retry.`);
   } else if (plan.truncated) {
-    lines.push('Not every engagement was read. Send it again to retry.');
+    // Nothing failed, so the cut is a cap a retry meets again.
+    lines.push('Nobody found so far, and not every engagement was read.');
   } else {
     lines.push('Nobody has engaged with it yet.');
   }
