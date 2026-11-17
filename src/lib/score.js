@@ -335,7 +335,7 @@ export function createScorer(
  *
  * The owner, the bot and the post's author can all show up among a post's
  * participants: the author by gating replies or answering in their own
- * thread, the bot by answering a mention there. None of them is one of the
+ * thread, the owner or the bot by replying there. None of them is one of the
  * people who engaged with the post.
  */
 export function withoutSelves(harvest, dids) {

@@ -49,7 +49,7 @@ function agentFetch(input, init) {
 /**
  * The chat-service view of an agent that is already logged in.
  *
- * The plain agent posts public replies and this view reads and sends DMs.
+ * The plain agent writes to the list and this view reads and sends DMs.
  * `withProxy` wraps the same session, so one createSession covers both.
  */
 export function chatView(agent) {

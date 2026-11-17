@@ -68,13 +68,10 @@ export const config = {
    * MOD_ALLOWED_DIDS is read-only: the analyst, lookups, post scans, `review`
    * and `history`. MOD_WRITER_DIDS is empty by default, because talking to the
    * bot and adding someone to a live block list are different powers.
-   *
-   * DMs and public mentions both read this one object, so a change to who is
-   * answered moves both boundaries together.
    */
   roster: rosterFromEnv(process.env, OWNER_DID),
 
-  /** Jetstream, for public mentions (see jetstream.js). */
+  /** Jetstream (see jetstream.js). */
   jetstreamHost:
     process.env.JETSTREAM_HOST || 'jetstream2.us-west.bsky.network',
   reconnectBaseMs: delay('RECONNECT_BASE_MS', 1000, {
@@ -115,14 +112,12 @@ export const config = {
   /** Where the Jetstream cursor and the answered set live. */
   dataDir: process.env.DATA_DIR || 'data',
   cursorFile: process.env.CURSOR_FILE || 'jetstream-cursor.txt',
-  answeredFile: process.env.ANSWERED_FILE || 'answered.json',
-  answeredKeep: num('ANSWERED_KEEP', 500, { positive: true }),
 
   /**
    * Who answers a DM by default: "classic" (typed commands, numbered menus,
    * a read-only analyst for everything else) or "agent" (one model with the
    * write tools, talked to in sentences). In agent mode a message starting
-   * with "!" still takes the classic path. Public replies are unaffected.
+   * with "!" still takes the classic path.
    */
   dmMode: normaliseMode(process.env.MOD_DM_MODE),
 
@@ -134,12 +129,6 @@ export const config = {
    * jobs that write or send stay off (index.js).
    */
   dryRun: flag(process.env.DRY_RUN, false),
-
-  /**
-   * Answer public mentions at all. Off leaves the DM loop running alone. Also
-   * off when there is no model, since the public path is the analyst.
-   */
-  publicReplies: flag(process.env.PUBLIC_REPLIES, true) && modelsEnabled(),
 
   /**
    * The Atmosphere MCP server, which gives the analyst the rest of the

@@ -1,6 +1,6 @@
 // The scoring reference, shared by everything that scores.
 //
-// DMs, public replies, plans and the drift audit all score against the newest
+// DMs, plans and the drift audit all score against the newest
 // finalised snapshot and the same thresholds, loaded here and nowhere else,
 // so the analyst and a preflight never report different bands for the same
 // account on the same day. Bands the analyst cannot change are only worth

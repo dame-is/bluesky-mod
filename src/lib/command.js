@@ -13,9 +13,8 @@
 // analyst as a question. A prompt-injected turn cannot reach a write, because
 // the write is not reachable from the tool loop.
 
-import { extractTargets } from './target.js';
+import { authorOf, extractTargets } from './target.js';
 import { handleInPostUrl } from './links.js';
-import { authorOf } from './trigger.js';
 import { BANDS } from './score.js';
 import { MAX_WINDOW_HOURS } from './pulse.js';
 

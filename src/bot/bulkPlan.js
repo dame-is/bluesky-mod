@@ -1033,8 +1033,7 @@ export async function handlesFor(dids) {
  * in the owner's world read first, so if attention runs out it runs out in the
  * right place.
  *
- * DM ONLY. This prints handles and follower counts; the public reply path must
- * never reach it.
+ * This prints handles and follower counts, so it only ever goes to a DM.
  */
 export async function reviewPlan(plan, { bands = null, limit = 15 } = {}) {
   const rows = await selectAll('decision', {

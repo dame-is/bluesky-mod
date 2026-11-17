@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import { generateText } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
-import { answer, systemPromptFor } from './agent.js';
+import { answer } from './agent.js';
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } };
 const stop = { unified: 'stop', raw: undefined };
@@ -60,18 +60,6 @@ describe('the real SDK accepts how we call it', () => {
     expect(system.providerOptions).toEqual({
       anthropic: { cacheControl: { type: 'ephemeral' } },
     });
-  });
-
-  it('takes the public surface too', async () => {
-    const out = await answer({
-      generate: generateText,
-      model,
-      message: 'x',
-      io,
-      surface: 'post',
-    });
-    expect(out.text).toBe('ok');
-    expect(systemPromptFor('post')).toContain('THIS REPLY IS PUBLIC');
   });
 
   it('reads the digest a real tool loop ran', async () => {

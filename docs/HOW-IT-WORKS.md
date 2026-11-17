@@ -68,7 +68,7 @@ It answers in one-to-one chats only. In a group chat it says nothing, because ev
 
 Read-only accounts can still see bands, vouch counts and follower numbers for third parties. They can also see what was added and when, by band and plan code, but not the words that asked for it. That is your private reading of your own social graph, and adding someone to the roster shares it with them.
 
-`src/lib/senders.js` decides which accounts are answered, for DMs and public mentions alike, and `directConvos` in `src/bot/dmLoop.js` keeps DMs to one-to-one chats.
+`src/lib/senders.js` decides which accounts are answered, and `directConvos` in `src/bot/dmLoop.js` keeps DMs to one-to-one chats. The bot never posts in public: everything it says goes to a DM.
 
 ### Commands
 
@@ -182,12 +182,6 @@ This is still a bulk sweep, with a model's reading in place of the follow graph.
 A card's `hostile` and an auto watch add without anyone reading the quotes first, so there each post gets a model call of its own and can sway no label but its own. A card's `hostile` reads up to 36 posts and says how many it left for `triage <code>`.
 
 **A label is not a band, anywhere.** Bands come from the follow graph by a fixed rule. A model's verdict is reproducible by nobody, so it lives in its own column and is approved by its own command.
-
-## Public mentions
-
-Mention the bot in a post, or reply to or quote one of its posts, and it answers **in public, in that thread**. That reply is readable by the accounts being described and by everyone else there. The prompt asks for counts by band rather than lists of handles, which is a prompt and not a guarantee. Replies carry no mention facets, so nobody named is notified. `PUBLIC_REPLIES=false` turns this path off and leaves DMs alone.
-
-The Jetstream subscription is filtered to the roster's own posts, so the bot never reads the whole firehose. An answered post is recorded before the model is called, so a reconnect that replays the stream can't produce a second public reply. If that record can't be saved, the mention goes unanswered.
 
 ## The weekly re-score
 

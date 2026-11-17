@@ -64,7 +64,7 @@ const FALLBACK_AGENT_MODEL = 'deepseek/deepseek-v4.1-flash';
 /**
  * The model ids in use, from the environment over the defaults.
  *
- *   agent       answers DMs and mentions, and labels posts in triage.
+ *   agent       answers DMs, and labels posts in triage.
  *               Defaults to DeepSeek V4.1 Flash on the gateway and OpenRouter;
  *               every other provider names models its own way, so it must be
  *               set there.

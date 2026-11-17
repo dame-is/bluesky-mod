@@ -971,7 +971,7 @@ describe('the time budget', () => {
 
   it('gives up on a stalled page when the budget runs out, with the default fetch', async () => {
     // One page that never answers must not hold the job queue that DMs,
-    // public replies and the drift run all wait in.
+    // watches and the drift run all wait in.
     const hang = stalled();
     vi.stubGlobal('fetch', hang);
     const started = Date.now();

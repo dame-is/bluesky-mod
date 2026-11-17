@@ -30,6 +30,7 @@ import { OWNER_DID } from '../constants.js';
 import { rosterFromEnv } from '../lib/senders.js';
 import { ownLinkFacets, postWebUrl } from '../lib/links.js';
 import {
+  authorOf,
   resolveActor,
   extractTargets,
 } from '../lib/target.js';
@@ -100,7 +101,6 @@ import {
 import { loadAgentConfig, clampLimits } from './agentConfig.js';
 import { operate, fallbackText } from './operator.js';
 import { shortModel, escalationEnabled } from './tiers.js';
-import { authorOf } from '../lib/trigger.js';
 import {
   REACTION,
   YES_REACTIONS,
@@ -1933,8 +1933,7 @@ async function writeCursor(cursor) {
  * answering nothing.
  *
  * Without this the first run could answer messages sent weeks ago as though
- * they had just arrived. The Jetstream subscription starts from the live tail
- * for the same reason. A walk that stops at COLD_START_MAX_PAGES has not
+ * they had just arrived. A walk that stops at COLD_START_MAX_PAGES has not
  * reached the end, so it says so, and anything sent before it began is
  * skipped as history when a later pass reads it.
  */
@@ -2586,7 +2585,6 @@ export async function runDmPass({
           io,
           history,
           model: activeModel,
-          surface: 'dm',
           extraTools,
           voice: config?.style,
           guidance: config?.guidance,

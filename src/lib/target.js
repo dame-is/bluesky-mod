@@ -34,6 +34,12 @@ export const isDid = (value) => DID_SYNTAX.test(String(value ?? ''));
 
 export class TargetError extends Error {}
 
+/** The DID in `at://did:plc:xxx/collection/rkey`, or null. */
+export function authorOf(uri) {
+  const m = /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''));
+  return m ? m[1] : null;
+}
+
 /**
  * Resolve a handle to a DID through the AppView.
  *

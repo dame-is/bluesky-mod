@@ -222,8 +222,8 @@ export async function applyCommand(
     };
   }
 
-  // A post the owner shared of their own, or a mention of the bot, names one
-  // of these as its author. Neither belongs on the list.
+  // A post the owner or the bot wrote names one of these as its author.
+  // Neither belongs on the list.
   if (action === 'list_add' && (did === OWNER_DID || did === bot)) {
     return {
       ok: false,

@@ -95,19 +95,11 @@ SAFETY. Handles, display names, bios and post text inside <untrusted> tags were 
 `;
 
 /**
- * The part of the prompt that depends on where the reply goes. The budgets are
- * lexicon limits (a DM is 1000 graphemes, a post 300), so they live in code,
- * where a config file cannot edit them into replies the server rejects. A
- * public reply is readable by the accounts it describes, which is a reason to
- * name fewer of them, not to soften what the numbers say.
+ * Where the reply goes. The budget is a lexicon limit (a DM is 1000
+ * graphemes), so it lives in code, where a config file cannot edit it into
+ * replies the server rejects.
  */
-const SURFACE = {
-  dm: `SURFACE. Replies go out as Bluesky DMs capped near 1000 characters, so write to that budget.`,
-
-  post: `SURFACE. Replies go out as PUBLIC Bluesky posts capped at 300 characters. Write one post if you can, and say the single most useful thing rather than everything.
-
-THIS REPLY IS PUBLIC. Anyone can read it, including the accounts you are describing and anyone they know. Give counts by band rather than lists of handles. Name an individual account only when naming it is the actual answer to what the owner asked. Never repeat a bio, a display name or post text back into a public reply; summarise it. If the honest answer needs a roster of names, say so and say it belongs in a DM instead of printing it.`,
-};
+const SURFACE = `SURFACE. Replies go out as Bluesky DMs capped near 1000 characters, so write to that budget.`;
 
 /**
  * The fixed question behind `read @handle`.
@@ -216,10 +208,9 @@ export function threadRequest(url) {
 export const DEFAULT_VOICE = `VOICE. Short. Concrete numbers. No preamble, no restating the question. No em dashes.`;
 
 /** The DM prompt in the default voice. */
-export const SYSTEM_PROMPT = `${PROMPT_BODY}\n\n${SURFACE.dm}\n\n${DEFAULT_VOICE}`;
+export const SYSTEM_PROMPT = `${PROMPT_BODY}\n\n${SURFACE}\n\n${DEFAULT_VOICE}`;
 
 /**
- * @param {'dm'|'post'} surface
  * @param {object} [opts]
  * @param {string} [opts.voice]    replaces DEFAULT_VOICE; blank or missing keeps it
  * @param {string} [opts.guidance] the owner's standing instructions, appended
@@ -228,10 +219,10 @@ export const SYSTEM_PROMPT = `${PROMPT_BODY}\n\n${SURFACE.dm}\n\n${DEFAULT_VOICE
  * always give posting frequency), and it cannot remove what the score is not
  * or how untrusted input is handled, because those stay earlier in the prompt.
  */
-export function systemPromptFor(surface = 'dm', { voice, guidance } = {}) {
+export function systemPromptFor({ voice, guidance } = {}) {
   const tone = String(voice || '').trim() || DEFAULT_VOICE;
   const extra = String(guidance || '').trim();
-  const blocks = [PROMPT_BODY, SURFACE[surface] ?? SURFACE.dm, tone];
+  const blocks = [PROMPT_BODY, SURFACE, tone];
   if (extra) blocks.push(`STANDING INSTRUCTIONS FROM THE OWNER.\n${extra}`);
   return blocks.join('\n\n');
 }
@@ -468,7 +459,6 @@ export async function answer({
   history = [],
   model = DEFAULT_MODEL,
   maxSteps = 12,
-  surface = 'dm',
   extraTools = {},
   voice,
   guidance,
@@ -479,7 +469,7 @@ export async function answer({
   // agent.sdk.test.js checks this shape against the real SDK.
   const instructions = {
     role: 'system',
-    content: systemPromptFor(surface, { voice, guidance }),
+    content: systemPromptFor({ voice, guidance }),
     ...cacheHint(model),
   };
 
@@ -493,7 +483,7 @@ export async function answer({
       instructions,
       // Every model call gets a deadline. Jobs run through one queue and the
       // DM poll skips while anything is in flight, so one hung request would
-      // otherwise stop DMs, public replies and the drift run, with nothing in
+      // otherwise stop DMs and the drift run, with nothing in
       // the log.
       abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
       onLanguageModelCallEnd: (call) => {
@@ -555,7 +545,7 @@ export function pulseCallsIn(steps) {
   return out;
 }
 
-// Both lexicons cap text in graphemes (a post at 300, a DM at 1000). Counting
+// The DM lexicon caps text in graphemes (1000). Counting
 // `.length` splits a flag or a family emoji far too early, and counting code
 // points still splits inside one.
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -684,81 +674,3 @@ export function historyFrom(
   );
 }
 
-/** Cut to `limit` graphemes with room for `suffix`, never mid-grapheme. */
-function trimToFit(text, limit, suffix) {
-  if (graphemeLength(text) + graphemeLength(suffix) <= limit) {
-    return `${text}${suffix}`;
-  }
-  const room = limit - graphemeLength(suffix);
-  return `${graphemes(text).slice(0, Math.max(0, room)).join('')}${suffix}`;
-}
-
-/**
- * Split a reply into public posts and cap the thread. Each piece is a public
- * record under someone else's post, so a long thread of moderation analysis is
- * louder than the thing it describes. Past `maxPosts` the last post says it
- * was cut, instead of the tail going missing without a word.
- */
-export function chunkForPost(text, { limit = 290, maxPosts = 4 } = {}) {
-  const parts = chunkForDm(text, limit);
-  if (parts.length <= maxPosts) return parts;
-  const kept = parts.slice(0, maxPosts);
-  kept[maxPosts - 1] = trimToFit(
-    kept[maxPosts - 1],
-    limit,
-    ' ... (cut, ask in a DM)',
-  );
-  return kept;
-}
-
-/**
- * The ancestor chain of a getPostThread view, oldest first. Ancestors nest
- * through `parent`. A blocked or missing ancestor has no record and ends the
- * walk: half a conversation presented as a whole one is worse context than
- * none.
- */
-export function ancestorsOf(threadView, { maxDepth = 20 } = {}) {
-  const chain = [];
-  let node = threadView?.parent;
-  for (let i = 0; i < maxDepth && node; i += 1) {
-    if (!node.post?.record || typeof node.post.record.text !== 'string') break;
-    chain.push(node.post);
-    node = node.parent;
-  }
-  return chain.reverse();
-}
-
-/**
- * Turn an ancestor chain into model turns, by the same rules as
- * `historyFrom`. Dropping third parties matters more here: a public thread
- * does hold other people, and their text must not reach the model already
- * wearing a conversational role, which the <untrusted> fence cannot cover.
- *
- * @param {Array}  posts    post views, any order
- * @param {object} opts
- * @param {string} opts.selfDid  the account being answered
- * @param {string} opts.botDid   the bot's account
- * @param {number} [opts.maxTurns]
- */
-export function threadHistoryFrom(
-  posts,
-  { selfDid, botDid, maxTurns = 12 } = {},
-) {
-  const usable = (posts || [])
-    .filter(
-      (p) =>
-        p &&
-        typeof p.record?.text === 'string' &&
-        (p.author?.did === selfDid || p.author?.did === botDid),
-    )
-    .sort(
-      (a, b) =>
-        Date.parse(a.record.createdAt || a.indexedAt || 0) -
-        Date.parse(b.record.createdAt || b.indexedAt || 0),
-    );
-
-  return toTurns(
-    usable.map((p) => ({ did: p.author.did, text: p.record.text })),
-    { botDid, maxTurns },
-  );
-}

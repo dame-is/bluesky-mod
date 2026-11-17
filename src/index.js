@@ -1,28 +1,19 @@
 // The bot: one long-running process.
 //
-// Three inputs feeding one work queue:
+// Two inputs feeding one work queue:
 //
 //   1. chat.bsky.convo.getLog on a 2s poll, the only way to read DMs. Chat
 //      lives in the chat service (did:web:api.bsky.chat), not in any repo,
 //      so it never reaches the firehose or Jetstream and there is no push.
-//   2. Jetstream, for public mentions: posts by accounts on the roster,
-//      filtered at the transport to their DIDs. Answered in the thread.
-//   3. Timers: the follow-graph snapshot, the weekly re-score of the list,
+//   2. Timers: the follow-graph snapshot, the weekly re-score of the list,
 //      watched posts, and alerts when one of the owner's posts takes off.
+//
+// The bot never posts in public. Everything it says goes to a DM.
 //
 // ONE JOB AT A TIME. An answer is a 5-20s model call holding the snapshot in
 // memory, and this is meant to run on a small machine. Serialising also means
-// a burst of mentions cannot open many harvests against the AppView at once.
+// a burst of DMs cannot open many harvests against the AppView at once.
 
-import { generateText } from 'ai';
-
-import { classify } from './lib/trigger.js';
-import {
-  answer,
-  chunkForPost,
-  ancestorsOf,
-  threadHistoryFrom,
-} from './lib/agent.js';
 import {
   createAtmosphereClient,
   loadAtmosphereTools,
@@ -33,16 +24,13 @@ import { runDmPass } from './bot/dmLoop.js';
 import { stopWrites } from './bot/bulkPlan.js';
 import { checkModelFor, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
-import { upsert, openDb, closeDb } from './bot/db.js';
+import { openDb, closeDb } from './bot/db.js';
 import { snapshotStep, hasSnapshot } from './snapshot.js';
 import { installProvider, MODELS, modelsEnabled } from './models.js';
 
 import { config, assertConfig } from './config.js';
 import { setOwnerHandle } from './constants.js';
 import { logger } from './logger.js';
-import { loadState, setCursor, hasAnswered, markAnswered } from './state.js';
-import { connectJetstream } from './jetstream.js';
-import { replyInThread } from './publicReply.js';
 import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
 import { isAuthError, createReconnector } from './session.js';
@@ -55,9 +43,6 @@ let botDid = null;
 
 // --- counters ----------------------------------------------------------------
 const stats = {
-  events: 0,
-  triggers: 0,
-  publicAnswers: 0,
   dmAnswers: 0,
   errors: 0,
 };
@@ -211,166 +196,6 @@ function enqueue(label, job) {
   return chain;
 }
 
-// --- the public path ---------------------------------------------------------
-
-/**
- * What the model is asked: the asker's own text, plus the subject when it came
- * from the thread rather than a pasted link, or "check this" names nothing the
- * analyst can look up. The added line is built from the record by code, not
- * copied from anyone's writing, so it is not untrusted input.
- *
- * "they", not "the owner": the asker is whoever on the roster mentioned the
- * bot, and the model trusts this line about whose post it is.
- */
-function composeMessage(t) {
-  if (!t.target || t.targetSource === 'link') return t.text;
-  const verb = t.targetSource === 'quote' ? 'quoting' : 'replying to';
-  return `${t.text}\n\n[The post they are ${verb}: ${t.target}]`;
-}
-
-async function readThreadHistory(t) {
-  if (!t.isFollowUp) return [];
-  try {
-    const res = await agent.app.bsky.feed.getPostThread({
-      uri: t.uri,
-      depth: 0,
-      parentHeight: 20,
-    });
-    return threadHistoryFrom(ancestorsOf(res.data.thread), {
-      // The ASKER, not the owner. With a roster these differ, and labelling a
-      // guest's posts as someone else's makes their follow-up read like a
-      // conversation the model was watching rather than having.
-      selfDid: t.author ?? config.ownerDid,
-      botDid,
-    });
-  } catch (err) {
-    // A thread we cannot read is still a question we can answer, just without
-    // context.
-    logger.warn('Could not read the thread for history', { err: err.message });
-    return [];
-  }
-}
-
-async function answerPublicly(t) {
-  const { io } = await reference();
-  const [history, extraTools, botConfig] = await Promise.all([
-    readThreadHistory(t),
-    atmosphereTools(),
-    loadAgentConfig(),
-  ]);
-
-  const activeModel = botConfig?.model || model;
-  const limits = botConfig?.limits || {};
-  // Recorded first: the tokens are spent whether or not anything is posted,
-  // and a turn that fails carries what its finished calls spent.
-  const recordUsage = (usage) =>
-    upsert('llm_usage', [
-      {
-        kind: 'post',
-        model: activeModel,
-        input_tokens: usage?.inputTokens ?? null,
-        output_tokens: usage?.outputTokens ?? null,
-      },
-    ]).catch((err) => logger.warn('Could not record llm usage', { err }));
-  let reply;
-  try {
-    reply = await answer({
-      generate: generateText,
-      message: composeMessage(t),
-      io,
-      history,
-      model: activeModel,
-      surface: 'post',
-      extraTools,
-      voice: botConfig?.style,
-      guidance: botConfig?.guidance,
-      maxSteps: limits.maxSteps,
-      reviewRows: limits.reviewRows,
-    });
-  } catch (err) {
-    if (err?.usage) await recordUsage(err.usage);
-    throw err;
-  }
-  await recordUsage(reply.usage);
-
-  // A turn the step cap cut short may be missing what its last tool calls
-  // found, so its narration is not posted: a reply under someone else's post
-  // is public and stays there. The mention stays marked answered, so it is
-  // not tried again in a loop.
-  if (reply.cutOff) {
-    logger.warn('The analyst ran out of steps; posting nothing', {
-      trigger: t.uri,
-      steps: reply.steps,
-      usage: reply.usage,
-    });
-    return;
-  }
-
-  // A turn with no text (the provider sent nothing back) posts nothing. A
-  // placeholder under someone else's post is public and stays there.
-  if (!reply.text) {
-    logger.warn('The analyst produced no answer; posting nothing', {
-      trigger: t.uri,
-      steps: reply.steps,
-    });
-    return;
-  }
-
-  const chunks = chunkForPost(reply.text);
-  const posted = await replyInThread(agent, t.reply, chunks);
-
-  stats.publicAnswers += 1;
-  logger.info('Answered publicly', {
-    trigger: t.uri,
-    target: t.target ?? '(follow-up)',
-    posts: posted.length || chunks.length,
-    steps: reply.steps,
-  });
-}
-
-function onEvent(event) {
-  stats.events += 1;
-  if (event.time_us) setCursor(event.time_us);
-
-  const t = classify(event, {
-    ownerDid: config.ownerDid,
-    botDid,
-    answers: config.roster.answers,
-  });
-  if (!t.trigger) {
-    logger.trace('Not a trigger', { reason: t.reason });
-    return;
-  }
-  if (!config.publicReplies) {
-    logger.info('Public replies are off; ignoring a mention', { uri: t.uri });
-    return;
-  }
-  // Marked BEFORE the answer, not after (state.js): a missed answer can be
-  // asked again, a duplicate public reply cannot be taken back.
-  if (hasAnswered(t.uri)) {
-    logger.debug('Already answered', { uri: t.uri });
-    return;
-  }
-  // A dry run posts nothing, so it marks nothing as answered. A mark that
-  // could not be stored would let a restart replay the mention, so it is left
-  // unanswered.
-  if (!config.dryRun && !markAnswered(t.uri)) {
-    logger.error('Not answering a mention: could not record it as answered', {
-      uri: t.uri,
-    });
-    return;
-  }
-
-  stats.triggers += 1;
-  logger.info('Trigger', {
-    uri: t.uri,
-    target: t.target ?? '(none)',
-    source: t.targetSource ?? '-',
-    followUp: t.isFollowUp,
-  });
-  enqueue('public', () => answerPublicly(t));
-}
-
 // --- the DM path -------------------------------------------------------------
 let dmTimer = null;
 /** When a DM last arrived. The slow loops wait for a quiet minute. */
@@ -386,8 +211,6 @@ async function pollDms() {
     extraTools: await atmosphereTools(),
     model,
     botDid,
-    // PASSED, not left to the default, so DMs and public mentions answer to
-    // one roster object and cannot drift apart.
     roster: config.roster,
     mode: config.dmMode,
     log: (msg, fields) => logger.info(msg, fields),
@@ -518,8 +341,8 @@ function scheduleWatching() {
   if (config.watchEveryMs > 0) {
     watchTimer = setInterval(() => {
       if (!quiet()) return;
-      // On the config file's model when it names one, as the DMs and public
-      // answers are, since a watch's triage can add people.
+      // On the config file's model when it names one, as the DMs are, since a
+      // watch's triage can add people.
       enqueue('watch', async () =>
         tickWatches({
           chat,
@@ -560,7 +383,6 @@ function logStats() {
 }
 
 // --- start -------------------------------------------------------------------
-let stream = null;
 let statsTimer = null;
 let shuttingDown = false;
 
@@ -570,7 +392,6 @@ async function start() {
   assertConfig();
   installProvider();
   openDb();
-  loadState();
 
   const session = await connectAtBoot();
   try {
@@ -625,7 +446,6 @@ async function start() {
   }
 
   scheduleSnapshot();
-  stream = connectJetstream({ onEvent });
 
   if (config.statsIntervalMs > 0) {
     statsTimer = setInterval(logStats, config.statsIntervalMs);
@@ -637,7 +457,7 @@ async function start() {
   await atmosphereTools();
 
   // The config file's model, when it names one, takes the place of the
-  // environment's for DMs, mentions and the write check.
+  // environment's for DMs and the write check.
   const fileModel = (await loadAgentConfig())?.model;
   logger.info('Bot started', {
     owner: config.ownerDid,
@@ -645,7 +465,6 @@ async function start() {
     writers: config.roster.allWriters.length,
     atmosphere: config.atmosphere ? Object.keys(atmoTools).length : 'off',
     dmPollMs: config.dmPollMs,
-    publicReplies: config.publicReplies,
     driftEveryHours: config.driftEveryHours,
     dryRun: config.dryRun,
     provider: config.provider,
@@ -672,7 +491,6 @@ async function shutdown(signal) {
   if (watchTimer) clearInterval(watchTimer);
   if (alertTimer) clearInterval(alertTimer);
   if (statsTimer) clearInterval(statsTimer);
-  stream?.close();
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),
   // systemd 90s.

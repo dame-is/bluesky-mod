@@ -1,7 +1,6 @@
 // Who is this message from, and what are they allowed to ask for?
 //
-// One module, because it is one question for DMs and public mentions alike. A
-// security boundary kept in two places drifts apart.
+// One module, so the boundary lives in one place.
 //
 //   owner    everything, including writes to the list
 //   writer   answered, and may write. Empty by default
@@ -15,9 +14,8 @@
 // A read-only guest can still see a lot: the analyst reads author feeds and
 // the follow graph, and reports print bands, vouch counts and follower numbers
 // for third parties. That is the owner's private reading of their own social
-// graph. Adding someone hands them that, and on the public path it reaches
-// everyone in the thread. The tier limits what they can change, not what they
-// can see.
+// graph, and adding someone hands them that. The tier limits what they can
+// change, not what they can see.
 
 /** DIDs out of a comma or whitespace separated env value. */
 export function parseDids(value) {
@@ -55,7 +53,7 @@ export function makeRoster({ owner, writers = [], allowed = [] } = {}) {
     answers: (did) => Boolean(did) && answered.has(did),
     /** May this DID run a command that changes the list? */
     writes: (did) => Boolean(did) && canWrite.has(did),
-    /** Everyone answered: this is what the Jetstream subscription asks for. */
+    /** Everyone answered. */
     all: [...answered],
     /** Everyone who may write, owner included. */
     allWriters: [...canWrite],

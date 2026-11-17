@@ -16,12 +16,6 @@ const h = vi.hoisted(() => ({
   snapshotExists: true,
   steps: 0,
   stepsToFinish: 5,
-  onEvent: null,
-  trigger: null,
-  answerText: '',
-  answerCutOff: false,
-  answerError: null,
-  posted: [],
   stepScript: [],
 }));
 
@@ -74,20 +68,6 @@ vi.mock('./snapshot.js', () => ({
   },
 }));
 
-vi.mock('./jetstream.js', () => ({
-  connectJetstream: ({ onEvent }) => {
-    h.events.push('jetstream');
-    h.onEvent = onEvent;
-    return { close() {} };
-  },
-}));
-
-// The public path, from a mention to the posts under it.
-vi.mock('./lib/trigger.js', async (importOriginal) => ({
-  ...(await importOriginal()),
-  classify: () => h.trigger ?? { trigger: false, reason: 'test' },
-}));
-
 vi.mock('./bot/reference.js', async (importOriginal) => ({
   ...(await importOriginal()),
   loadReference: async () => ({
@@ -97,33 +77,11 @@ vi.mock('./bot/reference.js', async (importOriginal) => ({
   makeIo: () => ({}),
 }));
 
-vi.mock('./lib/agent.js', async (importOriginal) => ({
-  ...(await importOriginal()),
-  answer: async () => {
-    h.events.push('answer');
-    if (h.answerError) throw h.answerError;
-    return {
-      text: h.answerText,
-      steps: 12,
-      usage: null,
-      cutOff: h.answerCutOff,
-      pulses: [],
-    };
-  },
-}));
-
 vi.mock('./watching.js', () => ({
   tickWatches: async ({ model }) => {
     h.events.push(`watch:${model}`);
   },
   tickAlerts: async () => {},
-}));
-
-vi.mock('./publicReply.js', () => ({
-  replyInThread: async (agent, refs, chunks) => {
-    h.posted.push(...chunks);
-    return chunks.map((_, i) => `at://${BOT}/app.bsky.feed.post/r${i}`);
-  },
 }));
 
 const ENV = {
@@ -190,12 +148,6 @@ beforeEach(() => {
     snapshotExists: true,
     steps: 0,
     stepsToFinish: 5,
-    onEvent: null,
-    trigger: null,
-    answerText: '',
-    answerCutOff: false,
-    answerError: null,
-    posted: [],
     stepScript: [],
   });
   vi.resetModules();
@@ -237,7 +189,7 @@ describe('the first login', () => {
 
     // Nothing else starts until a login works.
     expect(h.events.slice(0, 3)).toEqual(['login', 'login', 'login']);
-    expect(h.events).toContain('jetstream');
+    expect(h.events).toContain('dm');
     expect(process.exit).not.toHaveBeenCalled();
   });
 });
@@ -276,93 +228,6 @@ describe('DMs while the snapshot builds', () => {
     await vi.advanceTimersByTimeAsync(h.stepsToFinish * 26_000);
     expect(h.steps).toBe(h.stepsToFinish);
     expect(h.events).not.toContain('dm');
-  });
-});
-
-describe('a public mention', () => {
-  const POST = 'at://did:plc:owner0000000000000000000/app.bsky.feed.post/3abc';
-  const mention = () => ({
-    trigger: true,
-    uri: POST,
-    author: 'did:plc:owner0000000000000000000',
-    text: '@bot.test who is this?',
-    target: 'at://did:plc:someone000000000000000000/app.bsky.feed.post/3xyz',
-    targetSource: 'link',
-    isFollowUp: false,
-    reply: {
-      root: { uri: POST, cid: 'bafyroot' },
-      parent: { uri: POST, cid: 'bafyroot' },
-    },
-  });
-
-  it('is answered in the thread', async () => {
-    await boot();
-    h.trigger = mention();
-    h.answerText = 'A stranger: nobody you follow follows them.';
-    h.onEvent({ time_us: 1 });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(h.events).toContain('answer');
-    expect(h.posted).toEqual(['A stranger: nobody you follow follows them.']);
-  });
-
-  it('records what a failed answer spent before it failed', async () => {
-    await boot();
-    h.trigger = mention();
-    h.answerError = Object.assign(new Error('provider went away'), {
-      usage: { inputTokens: 120, outputTokens: 3 },
-    });
-    h.onEvent({ time_us: 1 });
-    await vi.advanceTimersByTimeAsync(10);
-    const { select } = await import('./bot/db.js');
-    const rows = await select('llm_usage', {
-      select: 'kind,input_tokens,output_tokens',
-    });
-    expect(rows).toEqual([
-      { kind: 'post', input_tokens: 120, output_tokens: 3 },
-    ]);
-    expect(h.posted).toEqual([]);
-  });
-
-  it('is not answered when it cannot be recorded as answered', async () => {
-    // A restart would replay a mention it has no record of, and answer it a
-    // second time, in public.
-    await boot();
-    const { config } = await import('./config.js');
-    fs.mkdirSync(path.join(dataDir, `${config.answeredFile}.tmp`));
-    h.trigger = mention();
-    h.answerText = 'A stranger: nobody you follow follows them.';
-    h.onEvent({ time_us: 1 });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(h.events).not.toContain('answer');
-    expect(h.posted).toEqual([]);
-  });
-
-  it('posts nothing when the analyst produced no text', async () => {
-    // A turn that ended on a tool call at the step cap, or a provider that
-    // sent back nothing. A placeholder under someone's post cannot be taken
-    // back.
-    await boot();
-    h.trigger = mention();
-    h.answerText = '';
-    h.onEvent({ time_us: 1 });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(h.events).toContain('answer');
-    expect(h.posted).toEqual([]);
-  });
-
-  it('posts nothing when the step cap cut the answer short', async () => {
-    // The last step still called tools, so the narration may be missing what
-    // they found. The mention stays answered, so it is not tried again.
-    await boot();
-    h.trigger = mention();
-    h.answerText = 'Let me check who follows them.';
-    h.answerCutOff = true;
-    h.onEvent({ time_us: 1 });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(h.events).toContain('answer');
-    expect(h.posted).toEqual([]);
-    const { hasAnswered } = await import('./state.js');
-    expect(hasAnswered(POST)).toBe(true);
   });
 });
 

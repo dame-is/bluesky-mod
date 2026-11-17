@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  authorOf,
   resolveTarget,
   looksLikeTarget,
   extractTargets,
@@ -146,5 +147,15 @@ describe('extractTargets', () => {
 
   it('returns an empty list for a message with no links', () => {
     expect(extractTargets('mute that person please')).toEqual([]);
+  });
+});
+
+describe('authorOf', () => {
+  it('reads the author out of an at:// URI', () => {
+    expect(authorOf('at://did:plc:abc/app.bsky.feed.post/1')).toBe(
+      'did:plc:abc',
+    );
+    expect(authorOf('https://bsky.app/x')).toBe(null);
+    expect(authorOf(null)).toBe(null);
   });
 });
