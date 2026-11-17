@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   onEvent: null,
   trigger: null,
   answerText: '',
+  answerCutOff: false,
   answerError: null,
   posted: [],
   stepScript: [],
@@ -100,7 +101,13 @@ vi.mock('./lib/agent.js', async (importOriginal) => ({
   answer: async () => {
     h.events.push('answer');
     if (h.answerError) throw h.answerError;
-    return { text: h.answerText, steps: 12, usage: null, pulses: [] };
+    return {
+      text: h.answerText,
+      steps: 12,
+      usage: null,
+      cutOff: h.answerCutOff,
+      pulses: [],
+    };
   },
 }));
 
@@ -173,6 +180,7 @@ beforeEach(() => {
     onEvent: null,
     trigger: null,
     answerText: '',
+    answerCutOff: false,
     answerError: null,
     posted: [],
     stepScript: [],
@@ -321,6 +329,21 @@ describe('a public mention', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(h.events).toContain('answer');
     expect(h.posted).toEqual([]);
+  });
+
+  it('posts nothing when the step cap cut the answer short', async () => {
+    // The last step still called tools, so the narration may be missing what
+    // they found. The mention stays answered, so it is not tried again.
+    await boot();
+    h.trigger = mention();
+    h.answerText = 'Let me check who follows them.';
+    h.answerCutOff = true;
+    h.onEvent({ time_us: 1 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.events).toContain('answer');
+    expect(h.posted).toEqual([]);
+    const { hasAnswered } = await import('./state.js');
+    expect(hasAnswered(POST)).toBe(true);
   });
 });
 
