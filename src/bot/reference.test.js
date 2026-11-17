@@ -8,8 +8,9 @@ const AUTHOR = 'did:plc:author';
 const POST = `at://${AUTHOR}/app.bsky.feed.post/3post`;
 
 const engaged = (did, engagements) => ({ did, engagements, records: [] });
+const harvested = vi.hoisted(() => []);
 vi.mock('../lib/harvest.js', () => ({
-  harvestPost: async (uri) => ({
+  harvestPost: async (uri, opts) => (harvested.push(opts), {
     uri,
     participants: [
       engaged(AUTHOR, { gate: 1, reply: 1 }),
@@ -31,6 +32,7 @@ const { makeIo } = await import('./reference.js');
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  harvested.length = 0;
 });
 
 describe('a preflight', () => {
@@ -54,5 +56,23 @@ describe('a preflight', () => {
       byBand: { UNKNOWN: 2 },
     });
     expect(out.autoEligible).toBe(2);
+  });
+
+  it('stops when the turn gives up, and scores nothing it half read', async () => {
+    // An aborted harvest hands back what it had rather than throwing, so the
+    // preflight has to check the signal before it scores that.
+    vi.stubEnv('MOD_LIST_URI', 'at://did:plc:bot/app.bsky.graph.list/3list');
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const controller = new AbortController();
+    controller.abort();
+    const io = makeIo({ ref: {}, takenAt: '2026-10-01T00:00:00Z' });
+    await expect(
+      io.preflight(POST, { signal: controller.signal }),
+    ).rejects.toThrow();
+    expect(harvested).toEqual([
+      expect.objectContaining({ signal: controller.signal }),
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

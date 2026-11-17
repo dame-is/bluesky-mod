@@ -95,16 +95,23 @@ export async function loadReference() {
 export function makeIo({ ref, takenAt, pulseBudgetMs = 25_000 }) {
   const scorer = createScorer(ref);
   return {
-    async preflight(link) {
-      const target = await resolveTarget(link);
+    async preflight(link, { signal } = {}) {
+      const target = await resolveTarget(link, { signal });
       // Without the owner, the bot and the post's author, as a plan leaves
       // them out, so a preflight counts what a scan of the post would hold.
-      const harvest = withoutSelves(await harvestPost(target.uri), [
+      const harvest = withoutSelves(await harvestPost(target.uri, { signal }), [
         OWNER_DID,
         ownerOf(listUri()),
         target.did,
       ]);
-      const scores = await scorer.score(harvest.participants.map((p) => p.did));
+      // An aborted harvest returns what it had, marked truncated, rather than
+      // throwing, and nobody is waiting for a score of that.
+      signal?.throwIfAborted();
+      const scores = await scorer.score(
+        harvest.participants.map((p) => p.did),
+        { signal },
+      );
+      signal?.throwIfAborted();
       const summary = summarise(harvest, scores);
       return {
         target,

@@ -284,6 +284,26 @@ describe('the digest tool', () => {
   });
 });
 
+describe('the preflight tool', () => {
+  it('stops reading when the tool loop gives up', async () => {
+    // A preflight of a big post reads many Constellation pages, and the
+    // turn's deadline reaches it only through this signal.
+    const preflight = vi.fn().mockResolvedValue({});
+    const tools = buildTools({
+      preflight,
+      lookUp: vi.fn(),
+      referenceStatus: vi.fn(),
+    });
+    const abortSignal = new AbortController().signal;
+    const link = 'at://did:plc:x/app.bsky.feed.post/3x';
+    await tools.preflight_post.execute({ link }, { abortSignal });
+    expect(preflight).toHaveBeenCalledWith(
+      link,
+      expect.objectContaining({ signal: abortSignal }),
+    );
+  });
+});
+
 describe('the system prompt states what the score is not', () => {
   it('tells the model proximity is not desert', () => {
     // Bands measure proximity, and a zero vouch count is the normal state of

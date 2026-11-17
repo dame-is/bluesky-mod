@@ -250,8 +250,10 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
       inputSchema: z.object({
         link: z.string().describe('post URL or at:// URI'),
       }),
-      execute: async ({ link }) => {
-        const r = await io.preflight(link);
+      // The tool loop's deadline reaches a running tool only through
+      // `abortSignal`, and a big post's harvest outlives the turn without it.
+      execute: async ({ link }, { abortSignal } = {}) => {
+        const r = await io.preflight(link, { signal: abortSignal });
         return {
           uri: r.target?.uri,
           totals: r.totals,
