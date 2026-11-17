@@ -17,7 +17,11 @@ const PLAN = { id: '1c2d3e4f-0000-4000-8000-000000000000', totals: {} };
 const plans = {
   findPlan: vi.fn(async (code) => (code === '1c2d3e4f' ? PLAN : null)),
   lastChange: vi.fn(async () => ({ plan: PLAN, removed: null })),
-  undoPlan: vi.fn(async () => ({ ok: true, message: 'Took 12 back off.' })),
+  undoPlan: vi.fn(async () => ({
+    ok: true,
+    removed: 12,
+    message: 'Took 12 back off.',
+  })),
 };
 vi.mock('./bulkPlan.js', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -39,7 +43,7 @@ vi.mock('./agentConfig.js', async (importOriginal) => ({
 
 const db = await import('./db.js');
 const { runDmPass, resetConvoKinds } = await import('./dmLoop.js');
-const { resetQuiet } = await import('./chatUx.js');
+const { resetQuiet, savePending } = await import('./chatUx.js');
 
 const OWNER = 'did:plc:ownertestownertestowners';
 const BOT = 'did:plc:bot';
@@ -196,6 +200,90 @@ describe('a change whose reply cannot be sent', () => {
       eq: { convo_id: 'c1' },
     });
     expect(rows?.[0]?.pending ?? null).toBe(null);
+  });
+});
+
+describe('the reaction says what a command did, not what its reply says', () => {
+  const tickOf = (reactions, id = 'm1') =>
+    reactions.filter((r) => /^\+(✅|❌)@/.test(r) && r.endsWith(`@${id}`));
+
+  for (const text of [
+    'approve 1c2d3e4f hostile except @friend.test',
+    'approve 1c2d3e4f UNKNOWN thanks',
+    'undo zz',
+    'approve 1c2d3e4f',
+    'block',
+  ]) {
+    it(`"${text}": a refusal or a nudge gets no ✅`, async () => {
+      const { chat, reactions } = chatOver([msg('m1', text)]);
+      await pass(chat);
+      expect(listWrite.applyCommand).not.toHaveBeenCalled();
+      expect(plans.undoPlan).not.toHaveBeenCalled();
+      expect(tickOf(reactions)).toEqual([]);
+    });
+  }
+
+  it('a bare undo after an unblock gets no ✅, the reply sent or not', async () => {
+    plans.lastChange.mockResolvedValueOnce({
+      plan: null,
+      removed: { did: 'did:plc:s', planId: 'p', at: new Date().toISOString() },
+    });
+    let { chat, reactions, sent, state } = chatOver([msg('m1', 'undo')]);
+    await pass(chat);
+    expect(sent.at(-1).text).toMatch(/so nothing was undone/);
+    expect(plans.undoPlan).not.toHaveBeenCalled();
+    expect(tickOf(reactions)).toEqual([]);
+
+    plans.lastChange.mockResolvedValueOnce({
+      plan: null,
+      removed: { did: 'did:plc:s', planId: 'p', at: new Date().toISOString() },
+    });
+    ({ chat, reactions, state } = chatOver([msg('m2', 'undo')]));
+    state.failSend = 'Rate Limit Exceeded';
+    await pass(chat);
+    expect(tickOf(reactions, 'm2')).not.toContain('+✅@m2');
+  });
+
+  it('a block that went on the list but missed the log gets its ✅', async () => {
+    listWrite.applyCommand.mockResolvedValue({
+      ok: true,
+      changed: true,
+      logged: false,
+      did: 'did:plc:pest',
+      message:
+        'Added @pest.test to the list, but I could not record it, so undo and history will not find it. "unblock @pest.test" takes it back.',
+    });
+    let { chat, reactions, state } = chatOver([msg('m1', 'block @pest.test')]);
+    await pass(chat);
+    expect(tickOf(reactions)).toEqual(['+✅@m1']);
+
+    // And keeps it when the reply cannot be sent: the block went through.
+    ({ chat, reactions, state } = chatOver([msg('m2', 'block @pest.test')]));
+    state.failSend = 'Rate Limit Exceeded';
+    await pass(chat);
+    expect(tickOf(reactions, 'm2')).toEqual(['+✅@m2']);
+  });
+
+  it('a block that was refused gets no ✅', async () => {
+    listWrite.applyCommand.mockResolvedValue({
+      ok: false,
+      did: BOT,
+      message: "@bot.test is this bot's own account, so I have not added it.",
+    });
+    const { chat, reactions } = chatOver([msg('m1', 'block @bot.test')]);
+    await pass(chat);
+    expect(tickOf(reactions)).toEqual([]);
+  });
+
+  it('a "yes" to a stored approval the parser refuses gets no ✅', async () => {
+    await savePending('c1', {
+      commands: ['approve 1c2d3e4f hostile except @friend.test'],
+      describe: 'add the hostile ones but not @friend.test',
+      messageIds: ['b-asked'],
+    });
+    const { chat, reactions } = chatOver([msg('m1', 'yes')]);
+    await pass(chat);
+    expect(tickOf(reactions)).toEqual(['+❌@m1']);
   });
 });
 

@@ -511,6 +511,14 @@ export function fenceStrangers(text) {
 }
 
 /**
+ * What a plan write did: 'done' when it put anyone on the list or took anyone
+ * off, 'failed' when it could not run or every write failed, and null when
+ * there was nothing to do.
+ */
+const planOutcome = (out, moved) =>
+  moved > 0 ? 'done' : out?.ok === false || out?.failed > 0 ? 'failed' : null;
+
+/**
  * Run one typed command and return what to say back.
  *
  * No branch asks a model what to do. The inputs are the sender's literal text
@@ -520,6 +528,12 @@ export function fenceStrangers(text) {
  * The text carries no menu. The caller that stores `options` renders them
  * (withMenu), after leaving out what the sender may not run, so the numbers
  * on screen and the commands they run are the same list.
+ *
+ * `outcome` is what the command did, read from what the write returned and
+ * never from the reply's words: 'done' when the list changed (a block of
+ * someone already on it counts, as in the quick lane, and so does a cancel),
+ * 'failed' when it could not be done, and null for an answer, a question, a
+ * refusal or nothing to do.
  */
 export async function runCommand(
   cmd,
@@ -534,7 +548,11 @@ export async function runCommand(
     log = () => {},
   } = {},
 ) {
-  const say = (text, options = null) => ({ text, options });
+  const say = (text, options = null, outcome = null) => ({
+    text,
+    options,
+    outcome,
+  });
 
   // The gate, before any branch that could reach a repo. Checked here and not
   // only where menus are built, because a command can arrive as typed text.
@@ -581,7 +599,13 @@ export async function runCommand(
     );
   }
 
-  if (!writeAgent) return say('Commands are not wired up on this path.');
+  if (!writeAgent) {
+    return say(
+      'Commands are not wired up on this path.',
+      null,
+      isWrite(cmd) ? 'failed' : null,
+    );
+  }
 
   if (cmd.action === 'plan') {
     const plan = await proposePlan({ link: cmd.target, kind: cmd.kind });
@@ -645,16 +669,18 @@ export async function runCommand(
     }
     const plan = cmd.last ? last.plan : await findPlan(cmd.code);
     if (!plan) {
-      return say(
-        cmd.last ? 'Nothing to undo.' : `No plan with code ${cmd.code}.`,
-      );
+      return cmd.last
+        ? say('Nothing to undo.')
+        : say(`No plan with code ${cmd.code}.`, null, 'failed');
     }
     const out = await undoPlan(writeAgent, plan, {
       reason: cmd.raw,
     });
-    return say(out.message, [
-      { label: 'Show me what changed', command: `history` },
-    ]);
+    return say(
+      out.message,
+      [{ label: 'Show me what changed', command: `history` }],
+      planOutcome(out, out.removed),
+    );
   }
 
   if (['approve', 'cancel', 'review', 'triage'].includes(cmd.action)) {
@@ -662,7 +688,7 @@ export async function runCommand(
       return say(NO_MODEL_TO_SORT);
     }
     const plan = await findPlan(cmd.code);
-    if (!plan) return say(`No plan with code ${cmd.code}.`);
+    if (!plan) return say(`No plan with code ${cmd.code}.`, null, 'failed');
 
     // Read what they wrote and bucket it. Labels only: nobody is added here,
     // and approving a bucket is a separate command on purpose.
@@ -749,6 +775,7 @@ export async function runCommand(
               },
             ]
           : null,
+        'done',
       );
     }
 
@@ -819,7 +846,7 @@ export async function runCommand(
       const out = await applyPlanToActors(writeAgent, plan, cmd.actors, {
         reason: cmd.raw,
       });
-      return say(out.message);
+      return say(out.message, null, planOutcome(out, out.added));
     }
     // Narrowed to the bands and the label time the command names, when it
     // names them: a watch digest's 👍 adds what the digest counted.
@@ -840,6 +867,7 @@ export async function runCommand(
               { label: 'Show me the record', command: 'history' },
             ]
           : null,
+        planOutcome(out, out.added),
       );
     }
 
@@ -872,6 +900,7 @@ export async function runCommand(
             { label: 'Show me the record', command: 'history' },
           ]
         : null,
+      planOutcome(out, out.added),
     );
   }
 
@@ -889,10 +918,16 @@ export async function runCommand(
     } catch (err) {
       return say(
         `That lookup failed: ${String(err?.message || err).slice(0, 200)}`,
+        null,
+        'failed',
       );
     }
     if (!found) {
-      return say('I could not resolve the author of that post.');
+      return say(
+        'I could not resolve the author of that post.',
+        null,
+        'failed',
+      );
     }
     const did = found.did || cmd.actor;
     const handle = nameOf(found, did);
@@ -968,7 +1003,21 @@ export async function runCommand(
             : []),
         ]
       : null;
-  return say(preface + message, after);
+  // A refusal by design (PROTECTED, or the owner's or the bot's own account)
+  // changed nothing and did not fail. A block that went on the list counts as
+  // done even when the log missed it.
+  const refused =
+    Boolean(out.vetoed) ||
+    (cmd.action === 'list_add' &&
+      [OWNER_DID, writeAgent.session?.did].includes(out.did));
+  const outcome = out.ok
+    ? out.changed || (out.already && cmd.action === 'list_add')
+      ? 'done'
+      : null
+    : refused
+      ? null
+      : 'failed';
+  return say(preface + message, after, outcome);
 }
 
 /**
@@ -1316,10 +1365,10 @@ const HOSTILE_PER_ROUND = 12;
  */
 async function runHostile(code, { writeAgent, generate, model, log }) {
   if (!(modelsEnabled() && model)) {
-    return { text: NO_MODEL_TO_SORT, failed: true };
+    return { text: NO_MODEL_TO_SORT, outcome: 'failed' };
   }
   const plan = await findPlan(code);
-  if (!plan) return { text: `No plan with code ${code}.`, failed: true };
+  if (!plan) return { text: `No plan with code ${code}.`, outcome: 'failed' };
   let out = null;
   let failedReads = 0;
   // A round that labels nothing is failing, and another would fail the same.
@@ -1347,6 +1396,9 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   return {
     text:
       `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${failedLine}${unread} ${added.message}`,
+    // Reads that failed with nobody added is a failure, not nothing to do.
+    outcome:
+      planOutcome(added, added.added) ?? (failedReads ? 'failed' : null),
   };
 }
 
@@ -1356,6 +1408,10 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
  * Classic commands through runCommand, so the vetoes and the log are the ones
  * a typed command gets; "watch <post> [<n>h] [auto]" and "hostile <code>" are
  * the two that are not commands anyone types.
+ *
+ * `failed` when any command failed or could not be read (a stored approval
+ * the parser refuses is one), and `changed` when any changed something, each
+ * from what the command returned rather than its words.
  */
 async function runPending(
   pending,
@@ -1363,6 +1419,7 @@ async function runPending(
 ) {
   const lines = [];
   let failed = false;
+  let changed = false;
   for (const command of pending.commands || []) {
     try {
       const watch = /^watch\s+(\S+)(?:\s+(\d+)h)?(\s+auto)?\s*$/i.exec(command);
@@ -1378,6 +1435,7 @@ async function runPending(
         lines.push(
           `${out.extended ? 'Still watching' : 'Watching'} it for ${hours}h${auto ? ', blocking the hostile ones as they come' : ''}. I'll send an update each hour there's something new.`,
         );
+        changed = true;
         continue;
       }
       const hostile = /^hostile\s+([0-9a-f]{8})$/i.exec(command);
@@ -1389,7 +1447,8 @@ async function runPending(
           log,
         });
         lines.push(out.text);
-        failed ||= Boolean(out.failed);
+        failed ||= out.outcome === 'failed';
+        changed ||= out.outcome === 'done';
         continue;
       }
       const cmd = parseCommand(command);
@@ -1406,14 +1465,19 @@ async function runPending(
         log,
       });
       lines.push(reply.text);
-      if (/^(That failed|I could not|No plan)/.test(reply.text)) failed = true;
+      failed ||= Boolean(cmd.needsTarget) || reply.outcome === 'failed';
+      changed ||= reply.outcome === 'done';
     } catch (err) {
       lines.push(`That failed: ${String(err?.message || err).slice(0, 200)}`);
       failed = true;
     }
   }
-  return { text: lines.join('\n\n'), failed };
+  return { text: lines.join('\n\n'), failed, changed };
 }
+
+/** The reaction a run of stored commands earns: a failure outranks a change. */
+const pendingOutcome = (out) =>
+  out.failed ? 'failed' : out.changed ? 'done' : null;
 
 /** What classic mode says to a memory command. */
 const NOTES_NEED_AGENT_MODE =
@@ -1577,14 +1641,11 @@ async function withoutModel({
           { commands: picked.map((o) => o.command) },
           ctx,
         );
-        if (out.failed) await send(out.text);
-        else await sendReceipt(send, out.text, { log });
+        const outcome = pendingOutcome(out);
+        if (outcome === 'done') await sendReceipt(send, out.text, { log });
+        else await send(out.text);
         log('Answered a card', { keys: keys.join(','), ok: !out.failed });
-        return {
-          convoId,
-          card: keys.join(','),
-          outcome: out.failed ? 'failed' : 'done',
-        };
+        return { convoId, card: keys.join(','), outcome };
       }
     }
   }
@@ -2105,9 +2166,9 @@ export async function runDmPass({
             model: activeModel,
             log,
           });
-          outcome = out.failed ? 'failed' : 'done';
-          if (out.failed) await send(out.text);
-          else await sendReceipt(send, out.text, { log });
+          outcome = pendingOutcome(out);
+          if (outcome === 'done') await sendReceipt(send, out.text, { log });
+          else await send(out.text);
           log('Ran a confirmed change', {
             via: 'reply',
             commands: pending.commands.join(' | '),
@@ -2331,8 +2392,9 @@ export async function runDmPass({
       // Without a 👀, say something before slow work: a harvest or a model
       // call is seconds of silence that reads as broken. Only for work that
       // takes time, since an instant reply plus an ack is two messages for
-      // one answer. A failed ack is swallowed so it cannot cost the answer.
-      if (!acked && worthAcking(cmd)) {
+      // one answer, and a refusal or a nudge is instant. A failed ack is
+      // swallowed so it cannot cost the answer.
+      if (!acked && worthAcking(cmd) && !cmd?.needsTarget) {
         await send(ackFor(cmd, { openers })).catch(() => {});
       }
 
@@ -2364,17 +2426,14 @@ export async function runDmPass({
           reply = {
             text: `That failed: ${String(err?.message || err).slice(0, 300)}`,
             options: null,
+            outcome: 'failed',
           };
         }
         const options = offerable(reply.options);
-        if (
-          isWrite(cmd) &&
-          !/failed|could not|PROTECTED|not on the list|No plan/i.test(
-            reply.text,
-          )
-        ) {
-          outcome = 'done';
-        }
+        // What the command did, as runCommand read it from the write, so a
+        // refusal or a nudge gets no ✅ whatever its words, and a change goes
+        // through sendReceipt whatever its words.
+        outcome = reply.outcome ?? null;
         const text = withMenu(reply.text, options);
         const shown =
           outcome === 'done'

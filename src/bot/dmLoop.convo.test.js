@@ -44,7 +44,11 @@ const plans = {
     watching: 0,
     message: 'Cancelled 1c2d3e4f. Nothing was added.',
   })),
-  undoPlan: vi.fn(async () => ({ ok: true, message: 'Took 12 back off.' })),
+  undoPlan: vi.fn(async () => ({
+    ok: true,
+    removed: 12,
+    message: 'Took 12 back off.',
+  })),
 };
 vi.mock('./bulkPlan.js', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -308,6 +312,36 @@ describe('the menu a number answers is the one on screen', () => {
     await pass(chat);
     expect(listWrite.applyCommand).not.toHaveBeenCalled();
     expect(plans.applyPlan).not.toHaveBeenCalled();
+  });
+});
+
+describe('the reaction on an approval', () => {
+  it('is ✅ when it added anyone, whatever the receipt says', async () => {
+    plans.applyPlan.mockResolvedValueOnce({
+      ok: true,
+      added: 2,
+      live: 2,
+      message: 'Added 2 to the list. 1 refused: PROTECTED.',
+    });
+    const { chat, reactions } = chatWith([
+      msg('m1', 'approve 1c2d3e4f UNKNOWN'),
+    ]);
+    await pass(chat);
+    expect(reactions).toContain('+✅@m1');
+  });
+
+  it('is nothing when it added nobody', async () => {
+    plans.applyPlan.mockResolvedValueOnce({
+      ok: true,
+      added: 0,
+      remaining: 0,
+      message: 'Nothing left to add for those bands.',
+    });
+    const { chat, reactions } = chatWith([
+      msg('m1', 'approve 1c2d3e4f UNKNOWN'),
+    ]);
+    await pass(chat);
+    expect(reactions.filter((r) => /^\+(✅|❌)/.test(r))).toEqual([]);
   });
 });
 
