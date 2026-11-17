@@ -15,6 +15,10 @@ const h = vi.hoisted(() => ({
   snapshotExists: true,
   steps: 0,
   stepsToFinish: 5,
+  onEvent: null,
+  trigger: null,
+  answerText: '',
+  posted: [],
 }));
 
 vi.mock('./bot/dmLoop.js', async (importOriginal) => ({
@@ -66,9 +70,40 @@ vi.mock('./snapshot.js', () => ({
 }));
 
 vi.mock('./jetstream.js', () => ({
-  connectJetstream: () => {
+  connectJetstream: ({ onEvent }) => {
     h.events.push('jetstream');
+    h.onEvent = onEvent;
     return { close() {} };
+  },
+}));
+
+// The public path, from a mention to the posts under it.
+vi.mock('./lib/trigger.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  classify: () => h.trigger ?? { trigger: false, reason: 'test' },
+}));
+
+vi.mock('./bot/reference.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadReference: async () => ({
+    ref: { vouches: new Map(), circle: new Set() },
+    takenAt: '2026-01-01T00:00:00.000Z',
+  }),
+  makeIo: () => ({}),
+}));
+
+vi.mock('./lib/agent.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  answer: async () => {
+    h.events.push('answer');
+    return { text: h.answerText, steps: 12, usage: null, pulses: [] };
+  },
+}));
+
+vi.mock('./publicReply.js', () => ({
+  replyInThread: async (agent, refs, chunks) => {
+    h.posted.push(...chunks);
+    return chunks.map((_, i) => `at://${BOT}/app.bsky.feed.post/r${i}`);
   },
 }));
 
@@ -90,6 +125,7 @@ async function boot(extraEnv = {}) {
   savedEnv = { ...process.env };
   Object.assign(process.env, ENV, extraEnv, {
     DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'bluesky-mod-index-')),
+    MOD_CONFIG_FILE: path.join(os.tmpdir(), 'bluesky-mod-no-such-config.json'),
   });
   await import('./index.js');
   // Let start() run up to its timers.
@@ -112,6 +148,10 @@ beforeEach(() => {
     snapshotExists: true,
     steps: 0,
     stepsToFinish: 5,
+    onEvent: null,
+    trigger: null,
+    answerText: '',
+    posted: [],
   });
   vi.resetModules();
   vi.useFakeTimers();
@@ -174,5 +214,45 @@ describe('DMs while the snapshot builds', () => {
     await vi.advanceTimersByTimeAsync(h.stepsToFinish * 26_000);
     expect(h.steps).toBe(h.stepsToFinish);
     expect(h.events).not.toContain('dm');
+  });
+});
+
+describe('a public mention', () => {
+  const POST = 'at://did:plc:owner0000000000000000000/app.bsky.feed.post/3abc';
+  const mention = () => ({
+    trigger: true,
+    uri: POST,
+    author: 'did:plc:owner0000000000000000000',
+    text: '@bot.test who is this?',
+    target: 'at://did:plc:someone000000000000000000/app.bsky.feed.post/3xyz',
+    targetSource: 'link',
+    isFollowUp: false,
+    reply: {
+      root: { uri: POST, cid: 'bafyroot' },
+      parent: { uri: POST, cid: 'bafyroot' },
+    },
+  });
+
+  it('is answered in the thread', async () => {
+    await boot();
+    h.trigger = mention();
+    h.answerText = 'A stranger: nobody you follow follows them.';
+    h.onEvent({ time_us: 1 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.events).toContain('answer');
+    expect(h.posted).toEqual(['A stranger: nobody you follow follows them.']);
+  });
+
+  it('posts nothing when the analyst produced no text', async () => {
+    // A turn that ended on a tool call at the step cap, or a provider that
+    // sent back nothing. A placeholder under someone's post cannot be taken
+    // back.
+    await boot();
+    h.trigger = mention();
+    h.answerText = '';
+    h.onEvent({ time_us: 1 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.events).toContain('answer');
+    expect(h.posted).toEqual([]);
   });
 });

@@ -274,10 +274,7 @@ async function answerPublicly(t) {
     reviewRows: limits.reviewRows,
   });
 
-  const text = reply.text || 'No answer produced.';
-  const chunks = chunkForPost(text);
-  const posted = await replyInThread(agent, t.reply, chunks);
-
+  // Recorded first: the tokens are spent whether or not anything is posted.
   await upsert('llm_usage', [
     {
       kind: 'post',
@@ -286,6 +283,20 @@ async function answerPublicly(t) {
       output_tokens: reply.usage?.outputTokens ?? null,
     },
   ]).catch((err) => logger.warn('Could not record llm usage', { err }));
+
+  // A turn with no text (it ended on a tool call at the step cap, or the
+  // provider sent nothing back) posts nothing. A placeholder under someone
+  // else's post is public and stays there.
+  if (!reply.text) {
+    logger.warn('The analyst produced no answer; posting nothing', {
+      trigger: t.uri,
+      steps: reply.steps,
+    });
+    return;
+  }
+
+  const chunks = chunkForPost(reply.text);
+  const posted = await replyInThread(agent, t.reply, chunks);
 
   stats.publicAnswers += 1;
   logger.info('Answered publicly', {

@@ -12,22 +12,43 @@ import { modelProblems, modelsEnabled, PROVIDER } from './models.js';
 /** Number settings that did not parse, reported by assertConfig. */
 const badNumbers = [];
 
+/** The longest delay a Node timer takes. A longer one fires after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /**
  * A number setting, or its default when unset. A typo must not reach a timer:
- * setInterval given NaN or 0 fires at once, over and over.
+ * setInterval given NaN or 0 fires at once, over and over. `min` and `max`
+ * bound a value above 0; 0 itself is allowed unless `positive`.
  */
-function num(name, fallback, { positive = false } = {}) {
+function num(name, fallback, { positive = false, min = 0, max = Infinity } = {}) {
   const raw = process.env[name];
   if (raw == null || String(raw).trim() === '') return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0 || (positive && n === 0)) {
-    badNumbers.push(
-      `${name} must be ${positive ? 'a number above 0' : 'a number, 0 or more'}`,
-    );
+  const inRange = n === 0 ? !positive : n >= min && n <= max;
+  if (!Number.isFinite(n) || !inRange) {
+    badNumbers.push(`${name} must be ${wanted({ positive, min, max })}`);
     return fallback;
   }
   return n;
 }
+
+/** What num() takes, in words. */
+function wanted({ positive, min, max }) {
+  const low = min > 0 ? String(min) : positive ? null : '0';
+  const range =
+    max === Infinity
+      ? low ? `, ${low} or more` : ' above 0'
+      : low ? ` from ${low} to ${max}` : ` above 0 and at most ${max}`;
+  return `${!positive && min > 0 ? '0 (off) or ' : ''}a number${range}`;
+}
+
+/**
+ * A delay setting that goes to setTimeout or setInterval. `min` is set where
+ * a slip of units (seconds for milliseconds) would turn a slow loop into one
+ * that runs back to back against the network.
+ */
+const delay = (name, fallback, opts = {}) =>
+  num(name, fallback, { ...opts, max: MAX_TIMER_MS });
 
 const flag = (v, d) =>
   v == null || v === '' ? d : String(v).trim().toLowerCase() === 'true';
@@ -51,15 +72,15 @@ export const config = {
   /** Jetstream, for public mentions (see jetstream.js). */
   jetstreamHost:
     process.env.JETSTREAM_HOST || 'jetstream2.us-west.bsky.network',
-  reconnectBaseMs: num('RECONNECT_BASE_MS', 1000, { positive: true }),
-  reconnectMaxMs: num('RECONNECT_MAX_MS', 30_000, { positive: true }),
+  reconnectBaseMs: delay('RECONNECT_BASE_MS', 1000, { positive: true }),
+  reconnectMaxMs: delay('RECONNECT_MAX_MS', 30_000, { positive: true }),
 
   /**
    * Force a reconnect on this interval. The subscription is silent for hours
    * at a time, so "no traffic" cannot be told apart from "the connection died
    * quietly". Reconnecting resumes from the stored cursor and misses nothing.
    */
-  reconnectEveryMs: num('RECONNECT_EVERY_MS', 15 * 60_000, {
+  reconnectEveryMs: delay('RECONNECT_EVERY_MS', 15 * 60_000, {
     positive: true,
   }),
 
@@ -68,14 +89,14 @@ export const config = {
    * ceiling, and getLog with a stored cursor returns almost nothing when idle.
    * Going lower buys little, since a model call takes 5-20s.
    */
-  dmPollMs: num('DM_POLL_MS', 2000, { positive: true }),
+  dmPollMs: delay('DM_POLL_MS', 2000, { positive: true, min: 1000 }),
 
   /**
    * How long a loaded snapshot is reused, and how long after the last question
    * it is dropped (index.js).
    */
   referenceTtlMs: num('REFERENCE_TTL_MS', 15 * 60_000),
-  referenceIdleMs: num('REFERENCE_IDLE_MS', 10 * 60_000),
+  referenceIdleMs: delay('REFERENCE_IDLE_MS', 10 * 60_000),
 
   /** Where the Jetstream cursor and the answered set live. */
   dataDir: process.env.DATA_DIR || 'data',
@@ -120,7 +141,10 @@ export const config = {
   }),
 
   /** How often to ask whether the follow-graph snapshot needs rebuilding. */
-  snapshotCheckMs: num('SNAPSHOT_CHECK_MS', 60 * 60_000, { positive: true }),
+  snapshotCheckMs: delay('SNAPSHOT_CHECK_MS', 60 * 60_000, {
+    positive: true,
+    min: 60_000,
+  }),
   /** Rebuild the snapshot when the newest complete one is older than this. */
   snapshotMaxAgeDays: num('SNAPSHOT_MAX_AGE_DAYS', 7, { positive: true }),
 
@@ -131,10 +155,15 @@ export const config = {
    */
   driftEveryHours: num('DRIFT_EVERY_HOURS', 168),
   /** How often to ask whether a re-score is due. */
-  driftCheckMs: num('DRIFT_CHECK_MS', 60 * 60_000, { positive: true }),
+  driftCheckMs: delay('DRIFT_CHECK_MS', 60 * 60_000, {
+    positive: true,
+    min: 60_000,
+  }),
 
   /** How often watched posts are read again ("watch this"). 0 turns it off. */
-  watchEveryMs: modelsEnabled() ? num('MOD_WATCH_EVERY_MS', 5 * 60_000) : 0,
+  watchEveryMs: modelsEnabled()
+    ? delay('MOD_WATCH_EVERY_MS', 5 * 60_000, { min: 60_000 })
+    : 0,
   /**
    * How often the owner's own recent posts are checked for a sudden run of
    * quotes and replies, which gets a DM offering to watch it. MOD_ALERTS=off
@@ -144,7 +173,7 @@ export const config = {
     String(process.env.MOD_ALERTS || 'on').toLowerCase() === 'off' ||
     !modelsEnabled()
       ? 0
-      : num('MOD_ALERT_EVERY_MS', 10 * 60_000),
+      : delay('MOD_ALERT_EVERY_MS', 10 * 60_000, { min: 60_000 }),
 
   /**
    * How long a network digest may spend reading author feeds. When it runs
@@ -153,8 +182,16 @@ export const config = {
    */
   pulseBudgetMs: num('PULSE_BUDGET_MS', 45_000, { positive: true }),
 
-  statsIntervalMs: num('STATS_INTERVAL_MS', 30 * 60_000),
+  statsIntervalMs: delay('STATS_INTERVAL_MS', 30 * 60_000),
 };
+
+// bot/operator.js reads its deadlines itself (it cannot import this module,
+// which imports it through dmLoop.js), so they are checked here too. A
+// whole-turn deadline of 0 would end every agent turn at once, while 0 turns a
+// per-call watchdog off.
+delay('MOD_OPERATOR_TIMEOUT_MS', null, { positive: true });
+delay('MOD_OPERATOR_CALL_TIMEOUT_MS', null);
+delay('MOD_ESCALATION_CALL_TIMEOUT_MS', null);
 
 const DID = /^did:(plc|web):[a-zA-Z0-9._:%-]+$/;
 const LIST = /^at:\/\/(did:[^/]+)\/app\.bsky\.graph\.list\/[^/]+$/;
