@@ -698,9 +698,15 @@ export async function runCommand(
             : [record],
         );
       }
+      // A stranger's words, on one line and with their double quotes made
+      // single, so a quote cannot close its row and write one that looks
+      // like the bot's, here or in the history a model reads.
       const lines = out.rows.map(
         (r) =>
-          `${r.band} - "${String(r.triage_quote).replace(/\s+/g, ' ').slice(0, 160)}"`,
+          `${r.band} - "${String(r.triage_quote)
+            .replace(/\s+/g, ' ')
+            .replace(/["“”]/g, "'")
+            .slice(0, 160)}"`,
       );
       // Hundreds of quotes do not get read in a DM. This is a spot check on
       // the labelling before a bulk action, and the header says so.
