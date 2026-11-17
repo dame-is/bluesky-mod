@@ -271,6 +271,24 @@ describe('an auto watch reads each post alone', () => {
     }
   });
 
+  it('reads one wave a check, the ones waiting longest first', async () => {
+    // Twelve calls make a wave. Thirteen waited from earlier checks, and a
+    // newcomer whose DID sorts first arrives now.
+    const waiting = Array.from({ length: 13 }, (_, i) => `w${10 + i}`);
+    for (const n of waiting) person(n, 'go away');
+    db.decision = waiting.map((n) => baselineRow(n));
+    harvest.participants = [
+      ...waiting.map((n) => person(n, 'go away')),
+      person('aaa', 'go away'),
+    ];
+    const w = watchRow('auto', {
+      unread: waiting.map((n) => `did:plc:${n}`),
+    });
+    await checkWatch(w, { ...deps(), generate: allHostile });
+    expect(firstReads()).toHaveLength(12);
+    expect(w.stats.unread).toEqual(['did:plc:w22', 'did:plc:aaa']);
+  });
+
   it('batches them on a watch that only asks', async () => {
     harvest.participants = [person('eve', 'one'), person('fay', 'two')];
     await checkWatch(watchRow('ask'), deps());

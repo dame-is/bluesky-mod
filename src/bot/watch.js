@@ -213,12 +213,13 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     );
   }
 
-  // Triage reads the newcomers, and newcomers from earlier checks that no
-  // model has labelled yet. It never reads the baseline, so the watch never
-  // adds anyone who was already there when it started, including accounts the
-  // owner had just taken off the list.
+  // Triage reads newcomers from earlier checks that no model has labelled
+  // yet, oldest first, then this check's. One check reads one wave of model
+  // calls, and the rest wait in `unread` for the next. It never reads the
+  // baseline, so the watch never adds anyone who was already there when it
+  // started, including accounts the owner had just taken off the list.
   const toRead = [
-    ...new Set([...newcomers.map((p) => p.did), ...(stats.unread || [])]),
+    ...new Set([...(stats.unread || []), ...newcomers.map((p) => p.did)]),
   ];
   const hostileBefore = await countDecisions(plan, { label: 'hostile' });
   if (toRead.length) {
@@ -297,17 +298,20 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
   return { fresh: newcomers.length, hostile, added, held };
 }
 
-/** Which of these accounts have words that no model has labelled yet. */
+/**
+ * Which of these accounts have words that no model has labelled yet, in the
+ * order given.
+ */
 async function stillUnread(plan, dids) {
-  const wanted = new Set(dids);
   const rows = await selectAll('decision', {
     select: 'did,evidence_uri,triage',
     eq: { plan_id: plan.id },
     order: 'did.asc',
   });
-  return rows
-    .filter((r) => wanted.has(r.did) && r.evidence_uri && !r.triage)
-    .map((r) => r.did);
+  const open = new Set(
+    rows.filter((r) => r.evidence_uri && !r.triage).map((r) => r.did),
+  );
+  return dids.filter((d) => open.has(d));
 }
 
 /** When the newest `label` on the plan was given, or null. */

@@ -43,13 +43,6 @@ const PER_CALL = 20;
  */
 const CONCURRENCY = 12;
 
-/**
- * Texts per invocation: one wave. Jobs share one queue in the process, so a
- * long triage is a long silence on every other DM. Sending the command again
- * continues, like an approval.
- */
-const PER_RUN = PER_CALL * CONCURRENCY;
-
 const KINDS = new Set(['quote', 'reply', 'threadReply']);
 
 /**
@@ -203,13 +196,22 @@ async function secondWave(
     batches.push(items.slice(i, i + perCall));
   }
   for (let w = 0; w < batches.length; w += SECOND_CONCURRENCY) {
-    await Promise.all(
+    const done = await Promise.all(
       batches.slice(w, w + SECOND_CONCURRENCY).map((batch) =>
         labelBatch(batch, { generate, model, usage, signal })
-          .then((out) => batch.forEach((row, n) => labels.set(row, out[n])))
-          .catch((err) => fail('Second-wave triage batch failed', err)),
+          .then((out) => {
+            batch.forEach((row, n) => labels.set(row, out[n]));
+            return true;
+          })
+          .catch((err) => {
+            fail('Second-wave triage batch failed', err);
+            return false;
+          }),
       ),
     );
+    // A round in which every call failed is an outage, and the next round
+    // would wait on it the same way. The rest stay pending.
+    if (!done.some(Boolean)) break;
   }
   return labels;
 }
@@ -244,7 +246,14 @@ async function recordUsage(rows) {
  * `perCall` is how many posts share one model call. At 1, no stranger's words
  * are ever in the same call as another's, so a post that talks to the model
  * can only sway its own label. `dids`, when given, limits the read, and the
- * `remaining` count, to those accounts.
+ * `remaining` count, to those accounts, and the read takes them in the order
+ * given.
+ *
+ * `perRun` is how many posts one run reads, by default one wave of calls at
+ * whatever `perCall` is. Jobs share one queue in the process, so a long
+ * triage is a long silence on every other DM. Sending the command again
+ * continues, like an approval. A wave in which every call failed ends the
+ * run, since the next would wait on the same outage.
  *
  * `failed` counts the rows whose first-wave call threw, and `error` is the
  * last failure from either wave, so an outage is not mistaken for rows simply
@@ -258,7 +267,7 @@ export async function runTriage(
   {
     generate,
     model,
-    perRun = PER_RUN,
+    perRun = null,
     perCall = PER_CALL,
     dids = null,
     log = () => {},
@@ -291,9 +300,15 @@ export async function runTriage(
   });
 
   const withText = rows.filter((r) => r.evidence_uri);
-  const pending = withText
-    .filter((r) => !r.triage && (!only || only.has(r.did)))
-    .slice(0, perRun);
+  const open = withText.filter(
+    (r) => !r.triage && (!only || only.has(r.did)),
+  );
+  if (dids) {
+    const at = new Map();
+    dids.forEach((d, i) => at.has(d) || at.set(d, i));
+    open.sort((a, b) => at.get(a.did) - at.get(b.did));
+  }
+  const pending = open.slice(0, perRun ?? size * CONCURRENCY);
   const noText = rows.length - withText.length;
 
   if (!pending.length) {
@@ -389,6 +404,10 @@ export async function runTriage(
             }),
         ),
       );
+      if (results.every((r) => r === null)) {
+        signal?.throwIfAborted();
+        break;
+      }
 
       const first = new Map();
       for (const r of results) {

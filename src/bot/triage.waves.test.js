@@ -376,6 +376,97 @@ describe('posts with nothing to read', () => {
   });
 });
 
+describe('how long one run holds the job queue', () => {
+  const added = [];
+  afterEach(() => {
+    for (const uri of added.splice(0)) delete POSTS[uri];
+  });
+
+  /** 240 posts with words, enough for 20 waves of single-post calls. */
+  const many = () => {
+    db.decision = [];
+    for (let i = 0; i < 240; i += 1) {
+      const did = `did:plc:n${String(i).padStart(3, '0')}`;
+      const uri = `at://${did}/app.bsky.feed.post/1`;
+      POSTS[uri] = `post ${i}`;
+      added.push(uri);
+      db.decision.push({
+        plan_id: PLAN.id,
+        did,
+        band: 'UNKNOWN',
+        evidence_uri: uri,
+        triage: null,
+      });
+    }
+  };
+
+  it('reads one wave at one post per call', async () => {
+    many();
+    const generate = labeller({});
+    const out = await runTriage(PLAN, {
+      generate,
+      model: 'm',
+      escalation: 'off',
+      perCall: 1,
+    });
+    expect(generate).toHaveBeenCalledTimes(12);
+    expect(out).toMatchObject({ labelled: 12, remaining: 228 });
+  });
+
+  it('stops after a wave in which every call failed', async () => {
+    many();
+    const generate = vi.fn(async () => {
+      throw new Error('timed out');
+    });
+    const out = await runTriage(PLAN, {
+      generate,
+      model: 'm',
+      escalation: 'off',
+      perCall: 1,
+      perRun: 240,
+    });
+    expect(generate).toHaveBeenCalledTimes(12);
+    expect(out).toMatchObject({ labelled: 0, failed: 12, remaining: 240 });
+  });
+
+  it('stops the second wave after a round in which every call failed', async () => {
+    many();
+    const generate = vi.fn(async (opts) => {
+      if (opts.model === 'strong/model') throw new Error('timed out');
+      return labeller({ post: 'hostile' })(opts);
+    });
+    const out = await runTriage(PLAN, {
+      generate,
+      model: 'm',
+      escalation: 'strong/model',
+      perCall: 1,
+    });
+    const second = generate.mock.calls.filter(
+      ([opts]) => opts.model === 'strong/model',
+    );
+    // One round of four, not three rounds for the twelve flagged posts.
+    expect(second).toHaveLength(4);
+    expect(out.secondWave).toMatchObject({ read: 0, failed: 12 });
+    expect(out.labelled).toBe(0);
+  });
+
+  it('reads the accounts it is given in the order given', async () => {
+    many();
+    const generate = labeller({});
+    const dids = ['did:plc:n239', 'did:plc:n238', 'did:plc:n000'];
+    await runTriage(PLAN, {
+      generate,
+      model: 'm',
+      escalation: 'off',
+      perCall: 1,
+      perRun: 2,
+      dids,
+    });
+    const read = db.decision.filter((r) => r.triage).map((r) => r.did);
+    expect(read.sort()).toEqual(['did:plc:n238', 'did:plc:n239']);
+  });
+});
+
 describe('a triage the turn ran out of time for', () => {
   it('reads nothing once the signal has fired', async () => {
     const generate = labeller({ idiot: 'hostile' });
