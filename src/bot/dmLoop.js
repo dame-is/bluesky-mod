@@ -687,15 +687,19 @@ export async function runCommand(
         [{ label: `Put ${who} back on the list`, command: `list add ${did}` }],
       );
     }
-    // The newest change found its account already on the list and wrote
-    // nothing. Reaching past it would take back an older batch instead.
+    // The newest change was a block of someone already listed, which wrote
+    // nothing. Undoing it would take off someone it did not put there, and
+    // reaching past it would take back an older batch instead.
     if (last?.unchanged) {
       const { did } = last.unchanged;
       const found = lookUp ? await lookUp(did).catch(() => null) : null;
       const who = nameOf(found, did);
       return say(
-        `The last change found ${who} already on the list, so it changed nothing and nothing was undone. To take back an earlier change, send "undo <code>"; "history" shows the codes.`,
-        [{ label: 'Show me what changed', command: 'history' }],
+        `The last change was a block of ${who}, who was already on the list, so nothing was undone. "unblock ${who}" takes them off, and "undo <code>" takes back an earlier change ("history" shows the codes).`,
+        [
+          { label: `Take ${who} off the list`, command: `list remove ${did}` },
+          { label: 'Show me what changed', command: 'history' },
+        ],
       );
     }
     const plan = cmd.last ? last.plan : await findPlan(cmd.code);

@@ -1402,7 +1402,7 @@ export function buildActionTools(ctx, deps = DEPS) {
         if (!plan && last?.unchanged) {
           return {
             ok: true,
-            result: `The last change found ${last.unchanged.did} already on the list, so it changed nothing and nothing was undone. An earlier change needs its plan code.`,
+            result: `The last change was a block of ${last.unchanged.did}, who was already on the list, so nothing was undone. Taking them off is remove_from_list, and an earlier change needs its plan code.`,
           };
         }
         if (!plan) return { ok: true, result: 'Nothing to undo.' };

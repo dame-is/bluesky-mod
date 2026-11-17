@@ -252,7 +252,7 @@ describe('the reaction says what a command did, not what its reply says', () => 
     });
     const { chat, reactions, sent } = chatOver([msg('m1', 'undo')]);
     await pass(chat);
-    expect(sent.at(-1).text).toMatch(/already on the list, so it changed nothing/);
+    expect(sent.at(-1).text).toMatch(/already on the list, so nothing was undone/);
     expect(plans.undoPlan).not.toHaveBeenCalled();
     expect(tickOf(reactions)).toEqual([]);
   });

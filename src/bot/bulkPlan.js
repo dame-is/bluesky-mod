@@ -1180,12 +1180,12 @@ export function estimateWrites(n, { kind = 'create' } = {}) {
  * `plan` is null: undo only takes people off, so it has nothing to reverse,
  * and reaching past the removal to an older add would undo something else.
  * An add already undone is passed over, so undoing again steps back to the
- * change before it. A typed block of someone already listed, while an add
- * that wrote their listitem still holds them, changed nothing; it is logged
- * only so an undo of that add leaves them on the list (heldByName). When it
- * is the newest change, `unchanged` names that account and `plan` is null:
- * reaching past it would take back an older batch the owner did not just
- * make.
+ * change before it. A typed block of someone already listed changed
+ * nothing; it is logged only so an undo of the add that put them there
+ * leaves them on the list (heldByName). When it is the newest change,
+ * `unchanged` names that account and `plan` is null: undoing it would take
+ * off someone it did not put there, and reaching past it would take back an
+ * older batch the owner did not just make.
  *
  * A batch sent but never confirmed (see writeRows) counts as a change in the
  * order it was sent, so its plan is named when it is the newest, and the
@@ -1260,26 +1260,9 @@ async function newestChange() {
     });
     const row = rows?.[0];
     if (!row) return { row: null, passed };
-    if (!row.already_listed || !(await heldByWrite(row))) {
-      return { row, passed };
-    }
+    if (!row.already_listed) return { row, passed };
     passed ??= row;
   }
-}
-
-/**
- * Does another plan's live add that wrote a listitem still hold this row's
- * account on the list? A row marked `already_listed` wrote none.
- */
-async function heldByWrite(row) {
-  const rows = await select('decision', {
-    select: 'plan_id,already_listed',
-    eq: { action: 'list_add', did: row.did },
-    where: { acted_at: 'not.is.null', undone_at: 'is.null' },
-  });
-  return (rows || []).some(
-    (r) => r.plan_id !== row.plan_id && !r.already_listed,
-  );
 }
 
 /**

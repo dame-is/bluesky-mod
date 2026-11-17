@@ -476,7 +476,9 @@ describe('the write tools', () => {
     });
     const ctx = ctxFor();
     const out = await buildActionTools(ctx, deps).undo.execute({});
-    expect(out.result).toMatch(/^The last change found did:plc:x already on the list/);
+    expect(out.result).toMatch(
+      /^The last change was a block of did:plc:x, who was already on the list/,
+    );
     expect(deps.undoPlan).not.toHaveBeenCalled();
     expect(ctx.actions).toEqual([]);
   });

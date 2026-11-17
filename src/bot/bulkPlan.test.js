@@ -712,7 +712,11 @@ describe('undo', () => {
     expect([...repo.values()]).toEqual(['did:plc:a']);
     expect(row(PLAN_A, 'did:plc:a')).toMatchObject({ undo_reason: 'too broad' });
     expect(row(PLAN_B, 'did:plc:a').undone_at).toBe(null);
-    expect((await lastChange()).plan.id).toBe(PLAN_B);
+    // The typed block wrote nothing, so a bare undo does not take them off.
+    expect((await lastChange()).unchanged).toEqual({
+      did: 'did:plc:a',
+      planId: PLAN_B,
+    });
   });
 
   it("does not stamp a typed block undone when a band plan's duplicate comes off", async () => {
@@ -979,6 +983,24 @@ describe('undo last', () => {
     );
     expect(out).toMatchObject({ removed: 0, kept: 1 });
     expect([...repo.values()]).toEqual(['did:plc:x']);
+  });
+
+  it('stops at a block of someone listed outside the log', async () => {
+    // Listed by hand or before the database was lost: nothing logged put
+    // them on, so undoing the block would take off someone it never added.
+    db.decision = [
+      added(PLAN_A, 'did:plc:a', '2026-10-01T09:00:00Z', { acted_seq: 1 }),
+      added(PLAN_B, 'did:plc:x', '2026-10-01T10:00:00Z', {
+        approved_via: 'command',
+        already_listed: true,
+        acted_seq: 2,
+      }),
+    ];
+    expect(await lastChange()).toEqual({
+      plan: null,
+      removed: null,
+      unchanged: { did: 'did:plc:x', planId: PLAN_B },
+    });
   });
 
   it("names a batch whose newest rows found accounts already listed", async () => {
