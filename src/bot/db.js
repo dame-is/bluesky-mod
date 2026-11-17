@@ -358,11 +358,12 @@ export async function count(tableName, opts = {}) {
 // --- functions ----------------------------------------------------------------
 
 /**
- * How many finalised snapshots to keep. Each is one row per account anyone in
- * the owner's circle follows, which runs to tens of thousands, so a weekly
- * rebuild kept forever grows the file by that much every week.
+ * How many finalised snapshots to keep: the newest, which is scored against,
+ * and the one before, which is used while a newer one cannot be read. Each is
+ * one row per account anyone in the owner's circle follows, which runs to
+ * hundreds of thousands for someone who follows a few thousand.
  */
-const KEEP_SNAPSHOTS = 4;
+const KEEP_SNAPSHOTS = 2;
 
 const FUNCTIONS = {
   /**

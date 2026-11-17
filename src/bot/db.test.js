@@ -128,6 +128,21 @@ describe('db', () => {
     expect(await count('circle_follow', {})).toBe(0);
   });
 
+  it('keeps the newest two snapshots and drops older ones', async () => {
+    const times = [
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-08T00:00:00.000Z',
+      '2026-01-15T00:00:00.000Z',
+    ];
+    for (const t of times) {
+      await upsert('circle', [{ taken_at: t, did: 'm1', follows_indexed_at: t }]);
+      await upsert('circle_follow', [{ taken_at: t, member_did: 'm1', target_did: 'x' }]);
+      await rpc('finalise_snapshot', { snapshot: t });
+    }
+    const kept = await select('vouch', { select: 'taken_at', order: 'taken_at.asc' });
+    expect(kept.map((r) => r.taken_at)).toEqual(times.slice(1));
+  });
+
   it('keeps the singleton tables single', async () => {
     await upsert('dm_cursor', [{ id: 1, cursor: 'a' }]);
     await upsert('dm_cursor', [{ id: 1, cursor: 'b' }]);

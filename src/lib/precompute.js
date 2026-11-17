@@ -4,7 +4,7 @@
 // follows also follow them. Computing it once per snapshot turns it into a
 // lookup instead of an API call per account. Each decision row records what
 // the gate saw (band, trust, distance, vouches), and the vouch counts behind
-// it are kept for the last four snapshots; the raw edges are dropped once a
+// it are kept for the last two snapshots; the raw edges are dropped once a
 // snapshot is finalised.
 //
 // It takes one follow list per account the owner follows, which is too much

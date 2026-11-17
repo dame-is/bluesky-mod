@@ -42,7 +42,7 @@ At the write it also asks the AppView whether you follow the account at that mom
 
 ### The snapshot
 
-Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. A plan's decision rows record what the gate saw (band, trust, distance and vouches), and a single block or unblock records the band. The vouch counts behind them are kept for the last four snapshots.
+Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. A plan's decision rows record what the gate saw (band, trust, distance and vouches), and a single block or unblock records the band. The vouch counts behind them are kept for the last two snapshots.
 
 Known limits:
 
