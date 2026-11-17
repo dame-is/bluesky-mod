@@ -66,8 +66,10 @@ export async function liveWatches({ now = Date.now() } = {}) {
 
 /**
  * Start watching, or extend and re-mode a watch already running on that post.
+ * `code` is the watch's own plan, which holds what the watch adds, so undo
+ * and cancel take it. `plan` is the baseline scan on a new watch.
  *
- * @returns {Promise<{ watch, plan, extended: boolean }>}
+ * @returns {Promise<{ watch, plan, code: string|null, extended: boolean }>}
  */
 export async function startWatch({
   convoId,
@@ -91,7 +93,12 @@ export async function startWatch({
   if (running) {
     await update('watch', { eq: { id: running.id } }, { until, mode });
     const plan = running.plan_id ? await findPlanById(running.plan_id) : null;
-    return { watch: { ...running, until, mode }, plan, extended: true };
+    return {
+      watch: { ...running, until, mode },
+      plan,
+      code: running.plan_id ? shortCode(running.plan_id) : null,
+      extended: true,
+    };
   }
   // The baseline: everyone so far, scored, with what they wrote, as a scan
   // of its own. The watch's plan starts empty and holds only who arrives
@@ -132,7 +139,12 @@ export async function startWatch({
     eq: { plan_id: planId },
     limit: 1,
   });
-  return { watch: row || watch, plan, extended: false };
+  return {
+    watch: row || watch,
+    plan,
+    code: shortCode(planId),
+    extended: false,
+  };
 }
 
 async function findPlanById(id) {

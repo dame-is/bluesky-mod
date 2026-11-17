@@ -375,13 +375,15 @@ describe('starting a watch', () => {
       db.decision.push(baselineRow('ann'), baselineRow('bob'));
       return { planId: BASE_ID, code: '0a0b0c0d', total: 2 };
     });
-    const { watch, plan } = await startWatch({
+    const { watch, plan, code } = await startWatch({
       convoId: 'c1',
       target: POST,
       auto: true,
     });
     expect(plan).toMatchObject({ planId: BASE_ID, total: 2 });
     expect(watch.plan_id).not.toBe(BASE_ID);
+    // The code handed back is the watch's, which holds what it adds.
+    expect(code).toBe(watch.plan_id.replace(/-/g, '').slice(0, 8));
     expect(watch.stats).toMatchObject({ baseline: 2, baselinePlan: BASE_ID });
     expect(db.plan.find((p) => p.id === watch.plan_id)).toMatchObject({
       totals: { uri: POST },

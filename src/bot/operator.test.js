@@ -1109,6 +1109,27 @@ describe('checked writes', () => {
     expect(action).not.toContain('owner-asked');
   });
 
+  it("hands back the watch's own code, not the baseline scan's", async () => {
+    const deps = fakeDeps({
+      startWatch: vi.fn(async () => ({
+        extended: false,
+        watch: {
+          uri: 'at://did:plc:author/app.bsky.feed.post/3zzz',
+          until: '2026-01-02T00:00:00.000Z',
+        },
+        plan: { code: '0a0b0c0d', total: 3 },
+        code: '9f8e7d6c',
+      })),
+    });
+    const out = await buildActionTools(
+      ctxFor({ convoId: 'c1' }),
+      deps,
+    ).watch_post.execute({
+      post: 'at://did:plc:author/app.bsky.feed.post/3zzz',
+    });
+    expect(out).toMatchObject({ ok: true, code: '9f8e7d6c', engagedSoFar: 3 });
+  });
+
   it('caps how many accounts one approval by name can carry', () => {
     const schema = buildActionTools(ctxFor(), fakeDeps()).approve_plan
       .inputSchema;

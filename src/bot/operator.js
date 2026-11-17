@@ -1501,7 +1501,9 @@ export function buildActionTools(ctx, deps = DEPS) {
           until: out.watch.until,
           blockingHostile: auto,
           engagedSoFar: out.plan?.total ?? null,
-          code: out.plan?.code ?? null,
+          // The watch's own plan, which holds what it adds: undo and cancel
+          // take this code.
+          code: out.code ?? null,
           postUrl,
         };
       } catch (err) {
