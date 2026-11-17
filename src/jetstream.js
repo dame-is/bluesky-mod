@@ -61,8 +61,9 @@ export function connectJetstream({ onEvent }) {
       dids: config.roster.all.join(','),
       resumingFrom: getCursor() ?? '(live tail)',
     });
+    let sock;
     try {
-      ws = new WebSocket(url);
+      sock = new WebSocket(url);
     } catch (err) {
       // Thrown from a timer, this would end the reconnect loop for good.
       logger.error('Could not open the Jetstream socket', {
@@ -72,20 +73,36 @@ export function connectJetstream({ onEvent }) {
       retry();
       return;
     }
+    ws = sock;
 
-    ws.addEventListener('open', () => {
+    // Each socket hands over to the next once, on its 'close' or on the
+    // liveness cycle, whichever comes first, and is ignored after that. Node's
+    // WebSocket fires no 'close' while a peer that has gone silent leaves the
+    // close frame unanswered, so the cycle cannot wait for one; and a 'close'
+    // that does arrive late must not open a second connection, clear the next
+    // socket's timer or pass on a stale event.
+    let retired = false;
+
+    // Recycle the socket on a timer: the only way to notice a connection that
+    // died without a close frame on a stream this quiet. Armed now rather than
+    // on 'open', so a handshake that never completes is recycled too.
+    cycle = setTimeout(() => {
+      if (retired) return;
+      retired = true;
+      logger.debug('Cycling the Jetstream connection for liveness');
+      teardown();
+      retry();
+    }, config.reconnectEveryMs);
+    if (cycle.unref) cycle.unref();
+
+    sock.addEventListener('open', () => {
+      if (retired) return;
       backoff = config.reconnectBaseMs;
       logger.info('Connected to Jetstream', { host: config.jetstreamHost });
-      // Recycle the socket on a timer: the only way to notice a connection
-      // that died without a close frame on a stream this quiet.
-      cycle = setTimeout(() => {
-        logger.debug('Cycling the Jetstream connection for liveness');
-        teardown();
-      }, config.reconnectEveryMs);
-      if (cycle.unref) cycle.unref();
     });
 
-    ws.addEventListener('message', (ev) => {
+    sock.addEventListener('message', (ev) => {
+      if (retired) return;
       let event;
       try {
         event = JSON.parse(
@@ -102,11 +119,13 @@ export function connectJetstream({ onEvent }) {
         .catch((err) => logger.error('Event handler error', { err }));
     });
 
-    ws.addEventListener('error', (ev) => {
+    sock.addEventListener('error', (ev) => {
       logger.warn('WebSocket error', { err: ev?.message || 'unknown' });
     });
 
-    ws.addEventListener('close', () => {
+    sock.addEventListener('close', () => {
+      if (retired) return;
+      retired = true;
       if (cycle) clearTimeout(cycle);
       cycle = null;
       if (closedByUs) return;

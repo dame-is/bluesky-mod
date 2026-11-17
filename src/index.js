@@ -154,6 +154,34 @@ const reconnector = createReconnector({
   log: (level, msg, fields) => logger[level](msg, fields),
 });
 
+/** The reconnector's schedule (session.js), for the first connect. */
+const BOOT_FIRST_WAIT_MS = 30_000;
+const BOOT_MAX_WAIT_MS = 15 * 60_000;
+
+/**
+ * The first connect, retried in this process after any failure. Exiting would
+ * hand the retry to Docker or systemd, which restart within seconds, and with
+ * a dead session every restart spends a createSession, which is capped at 30
+ * per 5 minutes and 300 a day.
+ */
+async function connectAtBoot() {
+  for (let failures = 1; ; failures += 1) {
+    try {
+      return await connect();
+    } catch (err) {
+      const waitMs = Math.min(
+        BOOT_MAX_WAIT_MS,
+        BOOT_FIRST_WAIT_MS * 2 ** (failures - 1),
+      );
+      logger.error('Could not log in as the bot; trying again', {
+        err: String(err?.message || err),
+        retryInS: Math.round(waitMs / 1000),
+      });
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+
 // --- one job at a time -------------------------------------------------------
 let chain = Promise.resolve();
 let pending = 0;
@@ -381,7 +409,13 @@ function runSnapshot({ force = false } = {}) {
           remaining: res.remaining,
           indexed: res.indexed,
         });
-        if (!shuttingDown) setTimeout(step, 250);
+        if (!shuttingDown) {
+          // A DM poll goes in ahead of the next step, so a message sent during
+          // the build waits one step at most. The poll timer alone would skip
+          // nearly every tick, since a step is almost always queued.
+          if (dmTimer) enqueue('dm', pollDms);
+          setTimeout(step, 250);
+        }
         return;
       }
       snapshotBusy = false;
@@ -485,7 +519,7 @@ async function start() {
   openDb();
   loadState();
 
-  const session = await connect();
+  const session = await connectAtBoot();
   try {
     const owner = await agent.app.bsky.actor.getProfile({ actor: config.ownerDid });
     setOwnerHandle(owner.data.handle);
@@ -513,6 +547,21 @@ async function start() {
     );
   }
 
+  // A dry run never posts or DMs. The DM loop, the re-score, watches and
+  // alerts all send DMs or write to the list, so they stay off.
+  if (config.dryRun) {
+    logger.info('DRY_RUN: DMs, the re-score, watches and alerts are off');
+  } else {
+    // The first poll is queued now, ahead of any snapshot step. On a first
+    // start it records where the DM log ends at this moment, so a message
+    // sent from here on, such as a "help" during the first build, is answered
+    // rather than filed as history.
+    enqueue('dm', pollDms);
+    scheduleDmPoll();
+    scheduleDrift();
+    scheduleWatching();
+  }
+
   // Nothing can be scored until the first snapshot exists, so build it now
   // rather than waiting for the hourly check.
   if (!(await hasSnapshot())) {
@@ -523,15 +572,6 @@ async function start() {
   }
 
   scheduleSnapshot();
-  // A dry run never posts or DMs. The DM loop, the re-score, watches and
-  // alerts all send DMs or write to the list, so they stay off.
-  if (config.dryRun) {
-    logger.info('DRY_RUN: DMs, the re-score, watches and alerts are off');
-  } else {
-    scheduleDmPoll();
-    scheduleDrift();
-    scheduleWatching();
-  }
   stream = connectJetstream({ onEvent });
 
   if (config.statsIntervalMs > 0) {

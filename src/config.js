@@ -159,8 +159,12 @@ export const config = {
 const DID = /^did:(plc|web):[a-zA-Z0-9._:%-]+$/;
 const LIST = /^at:\/\/(did:[^/]+)\/app\.bsky\.graph\.list\/[^/]+$/;
 
-/** Everything wrong with the environment, as one error. */
-export function assertConfig(env = process.env) {
+/**
+ * What is wrong with the owner's and the bot's identities. npm run setup
+ * checks these before it logs in, because it writes to whichever account it
+ * logs in as.
+ */
+export function identityProblems(env = process.env) {
   const problems = [];
   if (!DID.test(env.MOD_OWNER_DID || '')) {
     problems.push('MOD_OWNER_DID must be your own account\'s DID (did:plc:...)');
@@ -173,6 +177,17 @@ export function assertConfig(env = process.env) {
   if (!env.MOD_APP_PASSWORD) {
     problems.push('MOD_APP_PASSWORD must be an app password for the bot account, with DM access');
   }
+  if (env.MOD_OWNER_DID && env.MOD_OWNER_DID === env.MOD_IDENTIFIER) {
+    problems.push(
+      'MOD_IDENTIFIER is the same account as MOD_OWNER_DID; it and MOD_APP_PASSWORD must belong to the bot account, not yours',
+    );
+  }
+  return problems;
+}
+
+/** Everything wrong with the environment, as one error. */
+export function assertConfig(env = process.env) {
+  const problems = identityProblems(env);
   if (!LIST.test(env.MOD_LIST_URI || '')) {
     problems.push(
       'MOD_LIST_URI must be the at:// URI of a list the bot account owns (npm run setup creates one)',
@@ -183,9 +198,6 @@ export function assertConfig(env = process.env) {
     problems.push(
       'MOD_LIST_URI must name a list in the BOT account\'s repo (its at:// URI starts with MOD_IDENTIFIER)',
     );
-  }
-  if (env.MOD_OWNER_DID && env.MOD_OWNER_DID === env.MOD_IDENTIFIER) {
-    problems.push('MOD_OWNER_DID and MOD_IDENTIFIER are the same account; the bot would answer itself');
   }
   problems.push(...modelProblems(env));
   if (config.dmMode === 'agent' && !modelsEnabled()) {
