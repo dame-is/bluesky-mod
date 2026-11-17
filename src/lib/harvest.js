@@ -155,8 +155,9 @@ async function drainSource(uri, source, { signal, maxPages = MAX_PAGES } = {}) {
  *
  * `truncated` is true when anything was left out: a source cut at the page
  * cap, a source that never answered, or a source past MAX_OTHER_SOURCES.
- * `unread` names the kinds of the last two, with Constellation's count of
- * their records.
+ * `unread` names the kinds of the sources that never answered, with
+ * Constellation's count of their records: what sending the post again may
+ * read. A source past the cap is skipped every time, so it is not in `unread`.
  */
 export async function harvestPost(uri, opts = {}) {
   const { signal, maxPages, onProgress, only = null } = opts;
@@ -181,7 +182,6 @@ export async function harvestPost(uri, opts = {}) {
   const unreadByKind = new Map();
   const unread = (kind, count) =>
     unreadByKind.set(kind, (unreadByKind.get(kind) || 0) + count);
-  for (const s of others.slice(MAX_OTHER_SOURCES)) unread('other', s.count);
   const sources = [];
   const byDid = new Map();
   let records = 0;
@@ -246,7 +246,10 @@ export async function harvestPost(uri, opts = {}) {
     sources,
     participants,
     totals: { participants: participants.length, engagements, records },
-    truncated: sources.some((s) => s.truncated) || unreadByKind.size > 0,
+    truncated:
+      sources.some((s) => s.truncated) ||
+      unreadByKind.size > 0 ||
+      others.length > MAX_OTHER_SOURCES,
     unread: [...unreadByKind].map(([kind, count]) => ({ kind, count })),
   };
 }

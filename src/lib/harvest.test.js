@@ -149,7 +149,17 @@ describe('sources a stranger can add', () => {
     expect(constellation.getBacklinks.mock.calls.length).toBeLessThanOrEqual(20);
     expect(h.sources[0].source).toBe(REPLIES.source);
     expect(h.truncated).toBe(true);
-    expect(h.unread).toEqual([{ kind: 'other', count: 990 }]);
+    // Sending the post again would skip the same ones, so they are not
+    // listed as unread, which is what a retry could read.
+    expect(h.unread).toEqual([]);
+  });
+
+  it('still lists one of them that failed within the cap as unread', async () => {
+    constellation.flattenSources.mockReturnValueOnce([...ATTACK, REPLIES]);
+    answerEverySource({ except: [ATTACK[3].source] });
+    const h = await harvestPost('at://did:plc:a/app.bsky.feed.post/1');
+    expect(h.truncated).toBe(true);
+    expect(h.unread).toEqual([{ kind: 'other', count: 1 }]);
   });
 
   it('counts only the real quote paths as quotes, so a watch reading quotes skips the rest', async () => {
