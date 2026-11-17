@@ -90,7 +90,7 @@ export async function getBacklinkSources(target, { signal } = {}) {
  * Paginated backlinks for a (target, source) pair. Returns the raw response,
  * with its rows under `records`, or `null`.
  */
-export async function getBacklinks(target, source, { limit = 25, cursor, dids, signal } = {}) {
+export async function getBacklinks(target, source, { limit = 25, cursor, signal } = {}) {
   if (!target || !source) return null;
   const params = new URLSearchParams({
     subject: target,
@@ -98,9 +98,6 @@ export async function getBacklinks(target, source, { limit = 25, cursor, dids, s
     limit: String(limit),
   });
   if (cursor) params.set('cursor', cursor);
-  // Only links made by these accounts: "which of these fifty block the owner"
-  // in one request, rather than paging through everyone who does.
-  for (const did of dids || []) params.append('did', did);
   const url = `${CONSTELLATION_URL}/xrpc/blue.microcosm.links.getBacklinks?${params}`;
   return fetchJsonOrNull(url, signal ? { signal } : undefined);
 }

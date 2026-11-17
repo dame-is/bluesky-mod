@@ -191,6 +191,47 @@ describe('a list longer than the held copy reads', () => {
   });
 });
 
+describe('the list and the blockers, each on its own clock', () => {
+  it('asks Constellation again after a failure without walking the list again', async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    atproto.fetchWithTimeout.mockResolvedValue(page([record('r1', 'did:plc:a')]));
+    constellation.getBacklinks.mockResolvedValue(null);
+    await facts.graphFacts({ list: LIST, now });
+    expect(facts.blocksMe('did:plc:b')).toBe(null);
+    const walked = atproto.fetchWithTimeout.mock.calls.length;
+
+    constellation.getBacklinks.mockResolvedValue({
+      records: [{ did: 'did:plc:b' }],
+      cursor: null,
+    });
+    t += 3 * 60_000;
+    await facts.graphFacts({ list: LIST, now });
+    expect(facts.blocksMe('did:plc:b')).toBe(true);
+    expect(atproto.fetchWithTimeout.mock.calls.length).toBe(walked);
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
+  });
+
+  it('walks the list again after a failure without asking Constellation again', async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    atproto.fetchWithTimeout.mockResolvedValue({ ok: false, status: 502 });
+    constellation.getBacklinks.mockResolvedValue({
+      records: [{ did: 'did:plc:b' }],
+      cursor: null,
+    });
+    await facts.graphFacts({ list: LIST, now });
+    const asked = constellation.getBacklinks.mock.calls.length;
+
+    atproto.fetchWithTimeout.mockResolvedValue(page([record('r1', 'did:plc:a')]));
+    t += 3 * 60_000;
+    await facts.graphFacts({ list: LIST, now });
+    expect(facts.isListed(LIST, 'did:plc:a')).toBe(true);
+    expect(constellation.getBacklinks.mock.calls.length).toBe(asked);
+    expect(facts.blocksMe('did:plc:b')).toBe(true);
+  });
+});
+
 describe("this process's own writes", () => {
   it('are let go once they are too old to be read, so they do not pile up', () => {
     vi.useFakeTimers({ toFake: ['Date'], now: 1_000_000 });

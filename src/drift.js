@@ -269,6 +269,59 @@ export function renderBrief({ scored, drifted, gone, added }) {
   return lines.join('\n').trim();
 }
 
+/**
+ * How far ahead of the clock a stored time may be before it is taken for one
+ * written while the clock ran fast.
+ */
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+/**
+ * Move back the times stored while the clock ran fast. Left alone, a brief
+ * dated a year ahead holds off every run for that year, and an audit dated
+ * ahead stays the baseline over every audit after it.
+ *
+ * A brief's time says when the last run was, and one dated ahead cannot say,
+ * so it is dated to make the next run due. Audits dated ahead are the newest
+ * there are, so they are dated just before now, keeping their order.
+ */
+async function moveBackTimesAhead(dueAfter) {
+  const now = Date.now();
+  const ahead = `gt.${new Date(now + CLOCK_SKEW_MS).toISOString()}`;
+  const [briefs, audits] = await Promise.all([
+    select('brief', {
+      select: 'for_date',
+      where: { for_date: ahead },
+      order: 'for_date.desc',
+      limit: 1,
+    }),
+    selectAll('audit', {
+      select: 'id,started_at',
+      where: { started_at: ahead },
+      order: 'started_at.asc',
+    }),
+  ]);
+  const newest = briefs[0]?.for_date ?? audits.at(-1)?.started_at;
+  if (!newest) return;
+  logger.warn('Drift records were dated ahead of the clock; moved them back', {
+    aheadHours: Number(((Date.parse(newest) - now) / 3_600_000).toFixed(1)),
+    audits: audits.length,
+  });
+  if (briefs.length) {
+    await update(
+      'brief',
+      { where: { for_date: ahead } },
+      { for_date: new Date(now - dueAfter).toISOString() },
+    );
+  }
+  for (const [i, { id }] of audits.entries()) {
+    await update(
+      'audit',
+      { eq: { id } },
+      { started_at: new Date(now - audits.length + i).toISOString() },
+    );
+  }
+}
+
 /** Make an audit the baseline for the next one. */
 async function finishAudit(auditId) {
   await update(
@@ -308,6 +361,8 @@ export async function maybeRunDrift(agent, chat, convoId) {
   // Nowhere to send it: wait for the next check rather than spend the week's
   // run on a brief nobody receives.
   if (!convoId) return null;
+  const dueAfter = config.driftEveryHours * 3600_000;
+  await moveBackTimesAhead(dueAfter);
   const [latest] = await select('brief', {
     select: 'id,for_date,body,sent_at',
     order: 'for_date.desc',
@@ -316,7 +371,6 @@ export async function maybeRunDrift(agent, chat, convoId) {
   // `for_date` is the moment of the run, so a run every few hours is due
   // from then and not from the start of its day.
   const last = latest?.for_date ? Date.parse(latest.for_date) : 0;
-  const dueAfter = config.driftEveryHours * 3600_000;
   if (Date.now() - last < dueAfter) {
     if (latest && !latest.sent_at && latest.body !== NO_DRIFT) {
       return deliver(chat, convoId, latest);

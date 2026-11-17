@@ -18,6 +18,7 @@
 
 import { OWNER_DID } from './constants.js';
 import { config } from './config.js';
+import { logger } from './logger.js';
 import { resolvePds } from './lib/atproto.js';
 import {
   readCircle,
@@ -77,13 +78,55 @@ const lastFailed = { takenAt: null, at: new Map() };
  */
 let readSoFar = new Map();
 
+/**
+ * How far ahead of the clock a snapshot may be dated before it is taken for
+ * one written while the clock ran fast.
+ */
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+const aheadOfClock = () => new Date(Date.now() + CLOCK_SKEW_MS).toISOString();
+
+/**
+ * The newest snapshot, leaving out any dated ahead of the clock. Its age cannot
+ * be told, so it is never the one kept fresh: a new snapshot is built beside
+ * it, scoring goes on reading it meanwhile, and it is dropped once the new one
+ * is finalised.
+ */
 async function currentSnapshot() {
   const rows = await select('circle', {
     select: 'taken_at',
+    where: { taken_at: `lte.${aheadOfClock()}` },
     order: 'taken_at.desc',
     limit: 1,
   });
   return rows?.[0]?.taken_at ?? null;
+}
+
+/** Delete every snapshot dated ahead of the clock. */
+async function dropSnapshotsAhead() {
+  const limit = aheadOfClock();
+  const ahead = new Set(
+    (
+      await selectAll('circle', {
+        select: 'taken_at',
+        where: { taken_at: `gt.${limit}` },
+        order: 'taken_at.desc',
+      })
+    )
+      .map((r) => r.taken_at)
+      .filter((takenAt) => takenAt > limit),
+  );
+  for (const takenAt of ahead) {
+    logger.warn('Dropped a snapshot dated ahead of the clock', {
+      snapshot: takenAt,
+      aheadHours: Number(
+        ((Date.parse(takenAt) - Date.now()) / 3_600_000).toFixed(1),
+      ),
+    });
+    for (const table of ['vouch', 'circle_follow', 'circle']) {
+      await del(table, { eq: { taken_at: takenAt } });
+    }
+  }
 }
 
 async function startSnapshot(pds) {
@@ -318,6 +361,7 @@ export async function snapshotStep({
   // so a count here is low only by the members written off (counted below)
   // and by follows past the 1,500 each member is read to.
   const written = await rpc('finalise_snapshot', { snapshot: takenAt });
+  await dropSnapshotsAhead();
   const gaps = await count('circle', {
     eq: { taken_at: takenAt },
     not_null: 'unreadable',

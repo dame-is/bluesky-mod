@@ -29,6 +29,8 @@ const FACTS_TTL_MS = 30 * 60_000;
  * A failed load is retried sooner than a good one is refreshed. One that only
  * ran into a page cap is kept for the full FACTS_TTL_MS: walking it again
  * gives the same answer, and costs hundreds of requests on the job queue.
+ * The list and the blockers each keep their own time, so one failing does not
+ * send the other to be read again.
  */
 const RETRY_MS = 2 * 60_000;
 /** How long this process remembers its own writes over Constellation's lag. */
@@ -176,42 +178,62 @@ function dropOld(map, now) {
   }
 }
 
+/** Is a half of the held copy, loaded at `at`, due to be read again? */
+const due = (at, failed, now) =>
+  at == null || now - at >= (failed ? RETRY_MS : FACTS_TTL_MS);
+
+/** `{ value }`, or `{ failed: true }` when the read threw. */
+const settle = (promise) =>
+  promise.then(
+    (value) => ({ value }),
+    () => ({ failed: true }),
+  );
+
 /**
- * The held list and blockers, reloaded when stale. Concurrent callers share
- * one load.
+ * The held list and blockers, each reloaded when it is stale. Concurrent
+ * callers share one load.
  *
  * A list longer than the walk reads is held as far as it got, with
  * `complete: false`: an account it saw is listed, and one it did not reach is
  * unknown rather than unlisted.
  */
 export async function graphFacts({ list, now = Date.now } = {}) {
-  const fresh =
-    held &&
-    held.list === list &&
-    now() - held.loadedAt < (held.failed ? RETRY_MS : FACTS_TTL_MS);
-  if (fresh) return held;
+  const t = now();
+  const listDue =
+    !held || held.list !== list || due(held.listAt, held.listFailed, t);
+  const blockersDue = !held || due(held.blockersAt, held.blockersFailed, t);
+  if (!listDue && !blockersDue) return held;
   if (!loading) {
     loading = (async () => {
-      let failed = false;
-      const failure = () => {
-        failed = true;
-        return null;
-      };
       const [walk, blockers] = await Promise.all([
-        walkListed(list, {
-          fetchImpl: fetchWithTimeout,
-          maxPages: LIST_MAX_PAGES,
-        }).catch(failure),
-        readBlockers(OWNER_DID).catch(failure),
+        listDue
+          ? settle(
+              walkListed(list, {
+                fetchImpl: fetchWithTimeout,
+                maxPages: LIST_MAX_PAGES,
+              }),
+            )
+          : null,
+        blockersDue ? settle(readBlockers(OWNER_DID)) : null,
       ]);
-      held = {
-        list,
-        listed: walk?.listed ?? null,
-        complete: Boolean(walk?.complete),
-        blockers,
-        failed,
-        loadedAt: now(),
-      };
+      const at = now();
+      held = { ...held };
+      if (walk) {
+        Object.assign(held, {
+          list,
+          listed: walk.value?.listed ?? null,
+          complete: Boolean(walk.value?.complete),
+          listFailed: Boolean(walk.failed),
+          listAt: at,
+        });
+      }
+      if (blockers) {
+        Object.assign(held, {
+          blockers: blockers.value ?? null,
+          blockersFailed: Boolean(blockers.failed),
+          blockersAt: at,
+        });
+      }
       return held;
     })().finally(() => {
       loading = null;

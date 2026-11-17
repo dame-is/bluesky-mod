@@ -225,6 +225,30 @@ describe('a brief that could not be sent', () => {
   });
 });
 
+describe('a clock that ran fast', () => {
+  it('does not hold off the re-score, or keep its audit as the baseline, once it is put right', async () => {
+    members.push(A);
+    // The clock is a year fast: the run and its audit are dated a year ahead.
+    expect(await checkAt('2027-11-01T12:00:00Z')).toBe(null);
+    expect(listReads).toHaveBeenCalledTimes(1);
+
+    // Put right the next day. The brief dated ahead says nothing about when
+    // the last run was, so a run is due.
+    expect(await checkAt('2026-11-02T12:00:00Z')).toBe(null);
+    expect(listReads).toHaveBeenCalledTimes(2);
+    // And counts from that run, not again at every check.
+    await checkAt('2026-11-02T13:00:00Z');
+    expect(listReads).toHaveBeenCalledTimes(2);
+
+    bands.set(A, 'CONNECTED');
+    expect(await checkAt('2026-11-09T12:00:00Z')).toContain(
+      `@${A.slice(8)} is now CONNECTED`,
+    );
+    // Said once: the audit dated ahead is no longer the newest.
+    expect(await checkAt('2026-11-16T12:00:00Z')).toBe(null);
+  });
+});
+
 describe('when the next run is due', () => {
   it('counts from the moment of the last run, not the start of its day', async () => {
     members.push(A);
