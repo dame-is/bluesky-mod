@@ -125,6 +125,33 @@ describe('botAgent', () => {
     }
   });
 
+  it('keeps the signal a caller puts on the request the library builds', async () => {
+    // The library calls fetch with a Request and no init, and puts a caller's
+    // signal on that Request. A signal in init would replace it, so a caller
+    // that has given up would still send the write.
+    const seen = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input, init) => {
+        seen.push(init?.signal);
+        return new Response('{}');
+      }),
+    );
+    try {
+      const { agent } = await botAgent();
+      const url = 'https://pds.example/xrpc/x';
+      await agent.opts.fetch(new Request(url, { signal: AbortSignal.abort() }));
+      await agent.opts.fetch(new Request(url));
+      expect(seen).toHaveLength(2);
+      expect(seen[0]).toBeInstanceOf(AbortSignal);
+      expect(seen[0].aborted).toBe(true);
+      expect(seen[1]).toBeInstanceOf(AbortSignal);
+      expect(seen[1].aborted).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('resumes a stored session instead of spending a createSession', async () => {
     // createSession is capped at 300 a day per account; a refresh is not.
     sessionRow = { did: BOT, refreshJwt: 'r' };
