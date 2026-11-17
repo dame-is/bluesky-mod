@@ -154,7 +154,7 @@ const oneLine = (text) =>
  * A row the model did not answer for stays null and is left unlabelled, so a
  * malformed reply costs a retry rather than a wrong label.
  */
-async function labelBatch(items, { generate, model, usage = [] }) {
+async function labelBatch(items, { generate, model, usage = [], signal }) {
   const body = items
     .map(
       (it, i) => `${i + 1}. ${untrusted(`post-${i + 1}`, oneLine(it.text))}`,
@@ -164,8 +164,11 @@ async function labelBatch(items, { generate, model, usage = [] }) {
     model,
     instructions: { role: 'system', content: PROMPT },
     messages: [{ role: 'user', content: body }],
-    // A hung call would hold the shared job queue.
-    abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+    // A hung call would hold the shared job queue. The caller's signal ends
+    // it sooner.
+    abortSignal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(MODEL_TIMEOUT_MS)])
+      : AbortSignal.timeout(MODEL_TIMEOUT_MS),
   });
   usage.push({
     model: String(model),
@@ -189,7 +192,10 @@ const SECOND_CONCURRENCY = 4;
  *
  * @returns {Promise<Map<object, string|null>>}
  */
-async function secondWave(items, { generate, model, usage, perCall, fail }) {
+async function secondWave(
+  items,
+  { generate, model, usage, perCall, fail, signal },
+) {
   const labels = new Map();
   const batches = [];
   for (let i = 0; i < items.length; i += perCall) {
@@ -198,7 +204,7 @@ async function secondWave(items, { generate, model, usage, perCall, fail }) {
   for (let w = 0; w < batches.length; w += SECOND_CONCURRENCY) {
     await Promise.all(
       batches.slice(w, w + SECOND_CONCURRENCY).map((batch) =>
-        labelBatch(batch, { generate, model, usage })
+        labelBatch(batch, { generate, model, usage, signal })
           .then((out) => batch.forEach((row, n) => labels.set(row, out[n])))
           .catch((err) => fail('Second-wave triage batch failed', err)),
       ),
@@ -242,6 +248,9 @@ async function recordUsage(rows) {
  * `failed` counts the rows whose first-wave call threw, and `error` is the
  * last failure from either wave, so an outage is not mistaken for rows simply
  * left for the next run.
+ *
+ * `signal` ends the calls in flight and throws before the next wave starts.
+ * Labels already written stay, since sending it again continues.
  */
 export async function runTriage(
   plan,
@@ -253,6 +262,7 @@ export async function runTriage(
     dids = null,
     log = () => {},
     escalation = ESCALATION_MODEL,
+    signal,
   },
 ) {
   // TWO WAVES when an escalation model is configured. The first-wave model
@@ -357,77 +367,83 @@ export async function runTriage(
   let labelled = 0;
   let failed = 0;
   // In waves: the calls are mostly waiting, and one after another they would
-  // hold the shared job queue many times as long.
-  for (let w = 0; w < batches.length; w += CONCURRENCY) {
-    const wave = batches.slice(w, w + CONCURRENCY);
-    const waveItems = wave.flat();
-    const results = await Promise.all(
-      wave.map((batch) =>
-        labelBatch(batch, { generate, model, usage: firstUsage })
-          .then((labels) => ({ batch, labels }))
-          // A failed call leaves its rows pending for the next run. It is
-          // counted and logged, so it cannot pass for the model skipping rows.
-          .catch((err) => {
-            failed += batch.length;
-            fail('Triage batch failed', err);
-            return null;
-          }),
-      ),
-    );
+  // hold the shared job queue many times as long. What was spent is recorded
+  // even when the signal stops it part way.
+  try {
+    for (let w = 0; w < batches.length; w += CONCURRENCY) {
+      signal?.throwIfAborted();
+      const wave = batches.slice(w, w + CONCURRENCY);
+      const waveItems = wave.flat();
+      const results = await Promise.all(
+        wave.map((batch) =>
+          labelBatch(batch, { generate, model, usage: firstUsage, signal })
+            .then((labels) => ({ batch, labels }))
+            // A failed call leaves its rows pending for the next run. It is
+            // counted and logged, so it cannot pass for the model skipping
+            // rows.
+            .catch((err) => {
+              failed += batch.length;
+              fail('Triage batch failed', err);
+              return null;
+            }),
+        ),
+      );
 
-    const first = new Map();
-    for (const r of results) {
-      if (!r) continue;
-      r.batch.forEach((row, n) => first.set(row, r.labels[n] || null));
-    }
-    const candidates = twoWaves
-      ? waveItems.filter((row) => first.get(row) === 'hostile')
-      : [];
-    const second = candidates.length
-      ? await secondWave(candidates, {
-          generate,
-          model: escalation,
-          usage: secondUsage,
-          perCall: size,
-          fail,
-        })
-      : new Map();
-    escalated += candidates.length;
-    secondFailed += candidates.filter((row) => !second.get(row)).length;
-    const toSecond = new Set(candidates);
+      const first = new Map();
+      for (const r of results) {
+        if (!r) continue;
+        r.batch.forEach((row, n) => first.set(row, r.labels[n] || null));
+      }
+      const candidates = twoWaves
+        ? waveItems.filter((row) => first.get(row) === 'hostile')
+        : [];
+      const second = candidates.length
+        ? await secondWave(candidates, {
+            generate,
+            model: escalation,
+            usage: secondUsage,
+            perCall: size,
+            fail,
+            signal,
+          })
+        : new Map();
+      escalated += candidates.length;
+      secondFailed += candidates.filter((row) => !second.get(row)).length;
+      const toSecond = new Set(candidates);
 
-    const writes = [];
-    for (const row of waveItems) {
-      // A post the second wave was meant to read and could not stays pending.
-      // Its first-wave label is exactly the one that is not trusted alone.
-      const label = toSecond.has(row) ? second.get(row) : first.get(row);
-      if (!label) continue;
-      if (toSecond.has(row) && first.get(row) !== label) overturned += 1;
-      writes.push({
-        plan_id: plan.id,
-        did: row.did,
-        band: row.band,
-        triage: label,
-        // The words, kept. This is what makes the label answerable later:
-        // without it the log says only that a model disliked someone.
-        triage_quote: row.text.slice(0, 500),
-        triage_at: now,
-        // The model whose label this is, so "who decided this" is answerable
-        // per row.
-        triage_model: String(toSecond.has(row) ? escalation : model),
-      });
+      const writes = [];
+      for (const row of waveItems) {
+        // A post the second wave was meant to read and could not stays pending.
+        // Its first-wave label is exactly the one that is not trusted alone.
+        const label = toSecond.has(row) ? second.get(row) : first.get(row);
+        if (!label) continue;
+        if (toSecond.has(row) && first.get(row) !== label) overturned += 1;
+        writes.push({
+          plan_id: plan.id,
+          did: row.did,
+          band: row.band,
+          triage: label,
+          // The words, kept. This is what makes the label answerable later:
+          // without it the log says only that a model disliked someone.
+          triage_quote: row.text.slice(0, 500),
+          triage_at: now,
+          // The model whose label this is, so "who decided this" is answerable
+          // per row.
+          triage_model: String(toSecond.has(row) ? escalation : model),
+        });
+      }
+      if (writes.length) {
+        await upsert('decision', writes);
+        labelled += writes.length;
+      }
+      log('Triage wave done', { labelled, failed, of: items.length });
     }
-    if (writes.length) {
-      await upsert('decision', writes);
-      labelled += writes.length;
-    }
-    log('Triage wave done', { labelled, failed, of: items.length });
+  } finally {
+    await recordUsage([
+      ...firstUsage.map((u) => ({ ...u, kind: 'triage' })),
+      ...secondUsage.map((u) => ({ ...u, kind: 'triage-escalated' })),
+    ]);
   }
-
-  await recordUsage([
-    ...firstUsage.map((u) => ({ ...u, kind: 'triage' })),
-    ...secondUsage.map((u) => ({ ...u, kind: 'triage-escalated' })),
-  ]);
 
   const after = await selectAll('decision', {
     select: 'did,band,triage,evidence_uri,acted_at,undone_at,already_listed',

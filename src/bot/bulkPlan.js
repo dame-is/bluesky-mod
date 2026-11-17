@@ -154,20 +154,25 @@ function withoutSelves(harvest, dids) {
 /**
  * Harvest a post, score everyone on it, and store an unapproved plan.
  *
+ * `signal` stops the harvest, and a plan cut short by it is not stored.
+ *
  * @returns {Promise<{code, uri, kind, total, byBand, truncated, protectedCount}>}
  */
-export async function proposePlan({ link, kind }) {
+export async function proposePlan({ link, kind, signal }) {
   const target = await resolveTarget(link);
   // A list, starter pack or feed has members or subscribers, not people who
   // engaged with it, and a scan would read them as the second.
   if (target.collection !== 'app.bsky.feed.post') {
     throw new TargetError('I scan posts, and that is not a post.');
   }
-  const harvest = withoutSelves(await harvestPost(target.uri), [
+  const harvest = withoutSelves(await harvestPost(target.uri, { signal }), [
     OWNER_DID,
     ownerOf(listUri()),
     target.did,
   ]);
+  // An aborted harvest returns what it had, marked truncated, rather than
+  // throwing.
+  signal?.throwIfAborted();
   const { ref, takenAt } = await loadReference();
   const scorer = createScorer(ref);
 
@@ -178,6 +183,7 @@ export async function proposePlan({ link, kind }) {
   const scores = await scorer.score([
     ...new Set([...harvest.participants.map((p) => p.did), target.did]),
   ]);
+  signal?.throwIfAborted();
   const summary = summarise(harvest, scores);
   const author = scores.get(target.did) ?? null;
 

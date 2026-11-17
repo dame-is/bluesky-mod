@@ -352,3 +352,37 @@ describe('posts with nothing to read', () => {
     expect(out.counts).toEqual({ hostile: 1, arguing: 0, neutral: 1 });
   });
 });
+
+describe('a triage the turn ran out of time for', () => {
+  it('reads nothing once the signal has fired', async () => {
+    const generate = labeller({ idiot: 'hostile' });
+    await expect(
+      runTriage(PLAN, {
+        generate,
+        model: 'm',
+        escalation: null,
+        signal: AbortSignal.abort(new Error('That took too long')),
+      }),
+    ).rejects.toThrow('That took too long');
+    expect(generate).not.toHaveBeenCalled();
+    expect(db.decision.filter((r) => r.triage && r.triage_model)).toEqual([]);
+  });
+
+  it('ends a model call in flight when the signal fires', async () => {
+    const stop = new AbortController();
+    const seen = [];
+    const generate = vi.fn(async (opts) => {
+      seen.push(opts.abortSignal);
+      stop.abort(new Error('That took too long'));
+      return labeller({})(opts);
+    });
+    await runTriage(PLAN, {
+      generate,
+      model: 'm',
+      escalation: null,
+      signal: stop.signal,
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].aborted).toBe(true);
+  });
+});

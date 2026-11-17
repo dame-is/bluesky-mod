@@ -162,6 +162,8 @@ export async function harvestPost(uri, opts = {}) {
   const raw = await getBacklinkSources(uri, { signal });
   const flat = flattenSources(raw);
   if (!flat) {
+    // A caller's abort is a timeout, not a dead index.
+    signal?.throwIfAborted();
     throw new Error(
       'Constellation did not answer. The backlink index is the only complete source for this, so there is no degraded mode worth running',
     );

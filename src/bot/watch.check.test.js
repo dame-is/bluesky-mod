@@ -266,4 +266,14 @@ describe('starting a watch', () => {
     expect(harvestPost).not.toHaveBeenCalled();
     expect(db.watch).toEqual([]);
   });
+
+  it('hands the turn signal to the scan it starts', async () => {
+    harvestPost.mockClear();
+    const signal = AbortSignal.abort(new Error('That took too long'));
+    await expect(
+      startWatch({ convoId: 'c1', target: POST, signal }),
+    ).rejects.toThrow('That took too long');
+    expect(harvestPost.mock.calls[0][1]).toMatchObject({ signal });
+    expect(db.watch).toEqual([]);
+  });
 });

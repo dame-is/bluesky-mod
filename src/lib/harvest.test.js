@@ -17,6 +17,7 @@ vi.mock('./constellation.js', () => ({
 }));
 
 const { harvestPost } = await import('./harvest.js');
+const constellation = await import('./constellation.js');
 
 const page = (n, cursor) => ({
   records: Array.from({ length: 2 }, (_, i) => ({
@@ -31,6 +32,21 @@ beforeEach(async () => {
   const c = await import('./constellation.js');
   c.getBacklinks.mockClear();
   c.getBacklinks.mockImplementation(async () => pages.script.shift() ?? null);
+});
+
+describe('a harvest the caller stopped', () => {
+  it('throws the abort, not a dead index, when nothing came back', async () => {
+    constellation.flattenSources.mockReturnValueOnce(null);
+    await expect(
+      harvestPost('at://did:plc:a/app.bsky.feed.post/1', {
+        signal: AbortSignal.abort(new Error('the turn ran out of time')),
+      }),
+    ).rejects.toThrow('the turn ran out of time');
+    constellation.flattenSources.mockReturnValueOnce(null);
+    await expect(
+      harvestPost('at://did:plc:a/app.bsky.feed.post/1'),
+    ).rejects.toThrow(/Constellation did not answer/);
+  });
 });
 
 describe('a harvest that fails part way', () => {
@@ -56,7 +72,6 @@ describe('a harvest that fails part way', () => {
   });
 });
 
-const constellation = await import('./constellation.js');
 const LIKES = {
   collection: 'app.bsky.feed.like',
   path: '.subject.uri',

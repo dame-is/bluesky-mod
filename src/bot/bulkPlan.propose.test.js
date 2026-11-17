@@ -43,9 +43,13 @@ vi.mock('../lib/target.js', async (importOriginal) => {
 });
 const harvested = [];
 const participants = [];
+const stopDuringHarvest = { controller: null };
 vi.mock('../lib/harvest.js', () => ({
   harvestPost: async (uri) => {
     harvested.push(uri);
+    // Stands in for a deadline that passes while the post is read: the
+    // harvest returns what it had rather than throwing.
+    stopDuringHarvest.controller?.abort(new Error('That took too long'));
     const engagements = {};
     for (const p of participants) {
       for (const [k, n] of Object.entries(p.engagements)) {
@@ -79,6 +83,7 @@ beforeEach(() => {
   stored.decision.length = 0;
   participants.length = 0;
   harvested.length = 0;
+  stopDuringHarvest.controller = null;
 });
 
 describe('who a scan puts in a plan', () => {
@@ -121,5 +126,21 @@ describe('what a scan reads', () => {
     }
     expect(harvested).toEqual([]);
     expect(stored.plan).toEqual([]);
+  });
+});
+
+describe('a scan the turn ran out of time for', () => {
+  it('stores no plan from a harvest the signal cut short', async () => {
+    participants.push(engaged('did:plc:s1', { quote: 1 }));
+    stopDuringHarvest.controller = new AbortController();
+    await expect(
+      proposePlan({
+        link: POST,
+        kind: 'everyone',
+        signal: stopDuringHarvest.controller.signal,
+      }),
+    ).rejects.toThrow('That took too long');
+    expect(stored.plan).toEqual([]);
+    expect(stored.decision).toEqual([]);
   });
 });

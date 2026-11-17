@@ -70,6 +70,7 @@ export async function startWatch({
   hours = 24,
   auto = false,
   now = Date.now(),
+  signal,
 }) {
   const resolved = await resolveTarget(target);
   // A watch reads a post's quotes and replies. A list's members or a feed's
@@ -89,7 +90,11 @@ export async function startWatch({
   }
   // The baseline: everyone so far, scored, with what they wrote. Later checks
   // only add the new ones to this same plan.
-  const plan = await proposePlan({ link: resolved.uri, kind: 'everyone' });
+  const plan = await proposePlan({
+    link: resolved.uri,
+    kind: 'everyone',
+    signal,
+  });
   const watch = {
     convo_id: convoId,
     uri: resolved.uri,
