@@ -16,9 +16,10 @@
 // answered and who may write, and the classic path is reached by a leading
 // "!" or by answering a live classic menu. See src/bot/operator.js.
 //
-// At most once, on purpose. The cursor advances before any reply is sent, so
-// a message that crashes its turn is dropped rather than replayed. Advancing
-// after would turn one poisoned message into an endless loop of DMs.
+// At most once, on purpose. The cursor moves past each message before it is
+// handled, so a message that crashes its turn is dropped rather than replayed,
+// and a restart in the middle of a pass picks up at the message after it.
+// Advancing after would turn one poisoned message into an endless loop of DMs.
 
 import { generateText } from 'ai';
 import { modelsEnabled } from '../models.js';
@@ -314,34 +315,67 @@ function withMenu(text, options) {
     : text;
 }
 
-/** The named accounts in a plan, and what the owner can do about them. */
-function renderReview(plan, review) {
-  const lines = [`Plan ${plan.code}: ${review.total} need a look:`, ''];
+/**
+ * An account as a reply names it: "@handle" while the handle verifies, and
+ * otherwise `fallback`, normally the DID. "handle.invalid" is what the network
+ * reports for a handle that no longer points back at its account, and it
+ * resolves to nobody.
+ */
+const nameOf = (account, fallback) =>
+  account?.handle && account.handle !== 'handle.invalid'
+    ? `@${account.handle}`
+    : fallback;
+
+/** Every band but PROTECTED. */
+const ALL_BANDS = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED'];
+
+/** "A", "A and B", "A, B and C". */
+const andList = (items) =>
+  items.length > 1
+    ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
+    : items.join('');
+
+/**
+ * The named accounts in a plan, and what the owner can do about them.
+ *
+ * The plan row carries no code, so it is derived from the id. "Add" covers
+ * the whole set under review, not only the rows on screen: when some are past
+ * the fold it approves every band the review asked for (all but UNKNOWN when
+ * it named none), so an account below row 15 is not left out. Its label names
+ * those bands rather than a count, since PROTECTED rows and accounts already
+ * on the list are in the review and are never added.
+ */
+function renderReview(plan, review, { bands: asked = [] } = {}) {
+  const code = shortCode(plan.id);
+  const lines = [`Plan ${code}: ${review.total} need a look:`, ''];
   for (const r of review.rows) {
     const reach =
       r.followers != null ? `, ${r.followers.toLocaleString()} followers` : '';
     lines.push(`  @${r.handle}: ${r.band}, ${r.vouches ?? 0} vouches${reach}`);
   }
-  if (review.total > review.shown) {
+  const allShown = review.total <= review.shown;
+  if (!allShown) {
     lines.push('', `(${review.total - review.shown} more)`);
   }
-  const bands = [...new Set(review.rows.map((r) => r.band))].filter(
-    (b) => b !== 'PROTECTED',
+  const under = allShown
+    ? review.rows.map((r) => r.band)
+    : asked.length
+      ? asked
+      : ALL_BANDS.filter((b) => b !== 'UNKNOWN');
+  const bands = ['CONNECTED', 'PERIPHERAL', 'NOTABLE', 'UNKNOWN'].filter((b) =>
+    under.includes(b),
   );
   const options = [];
   if (bands.length) {
     options.push({
-      label: `Add all ${review.total} of these`,
-      command: `approve ${plan.code} ${bands.join(',')}`,
+      label: `Add the ${andList(bands)} ones`,
+      command: `approve ${code} ${bands.join(',')}`,
     });
   }
-  options.push({ label: 'Do nothing', command: `cancel ${plan.code}` });
-  lines.push('', `Or name them: approve ${plan.code} @handle @handle`);
+  options.push({ label: 'Do nothing', command: `cancel ${code}` });
+  lines.push('', `Or name them: approve ${code} @handle @handle`);
   return { text: lines.join('\n'), options };
 }
-
-/** Every band but PROTECTED. */
-const ALL_BANDS = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED'];
 
 /**
  * Run one typed command and return what to say back.
@@ -578,7 +612,7 @@ export async function runCommand(
       const review = await reviewPlan(plan, { bands: cmd.bands });
       if (!review.total)
         return say('Nothing in this plan needs a look. It is all UNKNOWN.');
-      return renderReview(plan, review);
+      return renderReview(plan, review, { bands: cmd.bands });
     }
 
     // The personal path: named accounts the sender read and decided on.
@@ -632,19 +666,22 @@ export async function runCommand(
 
   // Wording that might not mean the attached post's author. Name the author,
   // show what the gate knows about them, and let the sender choose, rather
-  // than refuse or guess.
+  // than refuse or guess. The writes on offer carry the DID read from the
+  // post, so a handle that changes hands before the answer cannot redirect
+  // them.
   if (cmd.fromPost && cmd.confirm) {
     const found = lookUp ? await lookUp(cmd.actor).catch(() => null) : null;
     if (!found) {
       return say('I could not resolve the author of that post.');
     }
-    const handle = `@${found.handle || found.did}`;
+    const did = found.did || cmd.actor;
+    const handle = nameOf(found, did);
     const choices = [
       ...(cmd.action === 'list_add' && !found.protectedReason
         ? [
             {
               label: `Add ${handle} to the list`,
-              command: `list add ${handle}`,
+              command: `list add ${did}`,
             },
           ]
         : []),
@@ -652,7 +689,7 @@ export async function runCommand(
         ? [
             {
               label: `Remove ${handle} from the list`,
-              command: `list remove ${handle}`,
+              command: `list remove ${did}`,
             },
           ]
         : []),
@@ -668,27 +705,33 @@ export async function runCommand(
     );
   }
 
-  // An actor taken from an attached post is a DID, which makes a receipt
-  // nobody can check. Resolve it to a handle and say whose post it was, so a
-  // sender who meant the author of a quoted post sees the mistake at once.
-  let actor = cmd.actor;
-  let preface = '';
-  if (cmd.fromPost) {
-    const account = lookUp ? await lookUp(actor).catch(() => null) : null;
-    if (account?.handle) actor = account.handle;
-    preface = `That post is by @${String(actor).replace(/^@/, '')}.\n\n`;
-  }
+  // The write takes the actor as parsed. For an attached post that is the
+  // DID in its URI, which a receipt nobody can check would show, so the reply
+  // names the account by its handle and says whose post it was, and a sender
+  // who meant the author of a quoted post sees the mistake at once. The
+  // handle is for reading only: it can fail to verify or pass to someone
+  // else, and the DID cannot.
+  const byDid = /^did:/.test(String(cmd.actor));
+  const account =
+    cmd.fromPost && lookUp ? await lookUp(cmd.actor).catch(() => null) : null;
 
-  const out = await applyCommand(writeAgent, cmd.action, actor, {
+  const out = await applyCommand(writeAgent, cmd.action, cmd.actor, {
     raw: cmd.raw,
     lookUp,
   });
+
+  const at = byDid
+    ? nameOf(account || out.account, cmd.actor)
+    : `@${String(cmd.actor).replace(/^@/, '')}`;
+  const preface = cmd.fromPost ? `That post is by ${at}.\n\n` : '';
+  const message = byDid
+    ? out.message.replaceAll(cmd.actor, at)
+    : out.message;
 
   // The way back, and the way to look closer, offered with the receipt. The
   // way back names this account by DID, so it takes off exactly this one
   // whatever else was added since, and it is offered only when the block put
   // them on the list.
-  const at = `@${String(actor).replace(/^@/, '')}`;
   const after =
     out.ok && cmd.action === 'list_add'
       ? [
@@ -698,7 +741,7 @@ export async function runCommand(
           { label: `Read ${at}'s recent posts`, command: `read ${at}` },
         ]
       : null;
-  return say(preface + out.message, after);
+  return say(preface + message, after);
 }
 
 /**
@@ -735,6 +778,27 @@ export function plainText(text) {
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/__([^_\n]+)__/g, '$1')
     .replace(/^#{1,6}\s+/gm, '');
+}
+
+/**
+ * Send the reply to a change that went through.
+ *
+ * A send that fails is logged rather than thrown, so the message still gets
+ * its ✅: the list moved, and a ❌ with no reply invites the same command
+ * again, which for a bare "undo" takes off the batch before.
+ *
+ * @returns {Promise<string[]|null>} the sent message ids, or null when the
+ *   reply did not go, so a menu it carried is not stored
+ */
+async function sendReceipt(send, text, { allow, log = () => {} } = {}) {
+  try {
+    return await send(text, { allow });
+  } catch (err) {
+    log('A change went through but its reply was not sent', {
+      err: String(err?.message || err),
+    });
+    return null;
+  }
 }
 
 /** How long an agent turn runs before it says it is working on it. */
@@ -858,8 +922,12 @@ async function answerAsAgent({
     }
   }
 
-  const sentIds = await send(text, { allow });
-  if (asked.length) {
+  // A turn that changed the list keeps its ✅ when only the reply failed. A
+  // question that was not sent is not stored, so no "yes" can answer it.
+  const sentIds = reply.actions.length
+    ? await sendReceipt(send, text, { allow, log })
+    : await send(text, { allow });
+  if (asked.length && sentIds) {
     await savePending(entry.convoId, {
       commands: asked.flatMap((p) => p.commands),
       describe: asked.map((p) => p.describe).join('; '),
@@ -950,16 +1018,18 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
     return { outcome: 'failed', quick: quick.action };
   }
   const a = out.account;
-  const handle = (a?.handle || String(quick.actor)).replace(/^@/, '');
+  // How the replies name the account, and the "unblock" they suggest: by
+  // handle while it verifies, by DID otherwise.
+  const at = nameOf(a, String(quick.actor));
   log('Quick lane', {
     action: quick.action,
-    actor: handle,
+    actor: at,
     ok: out.ok,
     changed: Boolean(out.changed),
     band: a?.band ?? '-',
   });
   if (!out.ok) {
-    await send(out.message.replace(String(quick.actor), `@${handle}`));
+    await send(out.message.replace(String(quick.actor), at));
     return { outcome: 'failed', quick: quick.action };
   }
   const adding = quick.action === 'list_add';
@@ -969,18 +1039,20 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
       a.vouches ? `followed by ${a.vouches} people you follow` : null,
       a.followers ? `${a.followers.toLocaleString('en-US')} followers` : null,
     ].filter(Boolean);
-    await send(
-      `Blocked @${handle}. Worth knowing: ${why.join(', ')}. "unblock @${handle}" takes it back.`,
+    await sendReceipt(
+      send,
+      `Blocked ${at}. Worth knowing: ${why.join(', ')}. "unblock ${at}" takes it back.`,
+      { log },
     );
     return { outcome: 'done', quick: quick.action };
   }
   if (!adding && out.already) {
-    await send(`@${handle} was not on the list.`);
+    await send(`${at} was not on the list.`);
     return { outcome: null, quick: quick.action };
   }
   noteQuiet(convoId, {
     action: quick.action,
-    handle,
+    handle: at.replace(/^@/, ''),
     already: Boolean(out.already),
     blocksYou: Boolean(a?.blocksYou),
   });
@@ -1231,7 +1303,8 @@ async function withoutModel({
           { commands: picked.map((o) => o.command) },
           ctx,
         );
-        await send(out.text);
+        if (out.failed) await send(out.text);
+        else await sendReceipt(send, out.text, { log });
         log('Answered a card', { keys: keys.join(','), ok: !out.failed });
         return {
           convoId,
@@ -1357,12 +1430,44 @@ async function directConvos(chat, entries, { log = () => {} } = {}) {
 
 /**
  * How many waiting messages one pass answers. Past that the oldest are
- * skipped: after an outage, the latest messages are the ones worth answering.
+ * skipped, and the conversation is told: after an outage, the latest messages
+ * are the ones worth answering.
  */
 const MAX_BACKLOG = 30;
 
-/** Pages of getLog a cold start will walk to reach the live tail. */
+/** Pages of getLog a cold start reads looking for the end of the log. */
 const COLD_START_MAX_PAGES = 50;
+
+/**
+ * Set when a cold start stopped at COLD_START_MAX_PAGES before the end of the
+ * log. A message sent before then is history, not a request, whichever pass
+ * reads it. Held for this process only.
+ */
+let historyBefore = null;
+
+/** How many skipped messages the notice quotes back. */
+const SKIPPED_QUOTED = 10;
+
+/**
+ * What the bot says when a backlog was cut at MAX_BACKLOG: the start of each
+ * message it skipped, so the sender can tell which to send again. Their own
+ * words, in their own one-to-one conversation.
+ */
+function skippedText(messages) {
+  const quote = (m) => {
+    const t = String(m.text ?? '').replace(/\s+/g, ' ').trim();
+    if (!t) return sharedPostUri(m) ? '(a shared post)' : '(no text)';
+    return `"${t.length > 80 ? `${t.slice(0, 80)}…` : t}"`;
+  };
+  const n = messages.length;
+  const lines = messages.slice(0, SKIPPED_QUOTED).map(quote);
+  if (n > SKIPPED_QUOTED) lines.push(`and ${n - SKIPPED_QUOTED} more`);
+  return [
+    `Too many messages were waiting, so I skipped the oldest ${n === 1 ? 'one' : n}:`,
+    ...lines,
+    'Send again any that still matter.',
+  ].join('\n');
+}
 
 /**
  * Where the last pass got to: a cursor, null when the log was empty at cold
@@ -1375,9 +1480,9 @@ async function readCursor() {
 
 /**
  * Store the resume point, only when it has moved: the poll runs every couple
- * of seconds and almost never finds anything. The write happens before any
- * reply is sent, which is what makes a crashed turn a dropped message rather
- * than a replayed one.
+ * of seconds and almost never finds anything. The write happens before the
+ * message it moves past is handled, which is what makes a crashed turn a
+ * dropped message rather than a replayed one.
  */
 let lastWritten;
 
@@ -1390,28 +1495,40 @@ async function writeCursor(cursor) {
 }
 
 /**
- * Walk getLog to its end and remember where that was, answering nothing.
+ * Walk getLog until a page comes back empty and remember where that was,
+ * answering nothing.
  *
- * getLog with no cursor replays the whole chat history from the beginning, so
- * without this the first run would answer messages sent weeks ago as though
+ * Without this the first run could answer messages sent weeks ago as though
  * they had just arrived. The Jetstream subscription starts from the live tail
- * for the same reason.
+ * for the same reason. A walk that stops at COLD_START_MAX_PAGES has not
+ * reached the end, so it says so, and anything sent before it began is
+ * skipped as history when a later pass reads it.
  */
 async function seekToTail(chat, { log = () => {} } = {}) {
+  const began = Date.now();
   let cursor = null;
   let seen = 0;
-  for (let page = 0; page < COLD_START_MAX_PAGES; page += 1) {
+  let atEnd = false;
+  for (let page = 0; page < COLD_START_MAX_PAGES && !atEnd; page += 1) {
     const res = await chat.chat.bsky.convo.getLog(cursor ? { cursor } : {});
     const entries = res.data.logs || [];
     seen += entries.length;
     if (res.data.cursor) cursor = res.data.cursor;
-    if (!entries.length) break;
+    atEnd = !entries.length;
   }
   // An empty log can come back with no cursor. Store null for it, so the next
   // pass reads the log from the start and the first message anyone sends is
   // answered rather than skipped as history.
   if (cursor || !seen) await writeCursor(cursor);
-  log('DM cursor initialised at the live tail', { cursor });
+  historyBefore = atEnd ? null : began;
+  if (atEnd) {
+    log('DM cursor initialised at the live tail', { cursor });
+  } else {
+    log(
+      'The DM log is longer than a cold start reads; messages sent before now are skipped as history',
+      { cursor, pages: COLD_START_MAX_PAGES },
+    );
+  }
   return cursor;
 }
 
@@ -1424,9 +1541,10 @@ async function seekToTail(chat, { log = () => {} } = {}) {
  *   Repo writes must not go through the chat proxy; without this agent,
  *   commands are unavailable rather than misrouted.
  * @param {Function} opts.getIo   async () => tool backends, from makeIo().
- *   A factory, not an object: building it loads the vouch snapshot, and a
- *   poll that finds nothing (almost every poll) must not pay for that. The
- *   same laziness lets the snapshot be released while idle.
+ *   A factory, not an object: building it loads the vouch snapshot, and
+ *   neither a poll that finds nothing (almost every poll) nor a message that
+ *   needs no scores may pay for that, or fail when there is no snapshot yet.
+ *   The same laziness lets the snapshot be released while idle.
  * @param {string} [opts.model]
  * @param {string} opts.botDid    the bot account's DID
  * @param {Function} [opts.generate]  injected for tests
@@ -1451,7 +1569,28 @@ export async function runDmPass({
   }
 
   const res = await chat.chat.bsky.convo.getLog(cursor ? { cursor } : {});
-  const entries = res.data.logs || [];
+  const end = res.data.cursor;
+  // A message moves the cursor to its own rev, so an entry whose rev is the
+  // cursor was read before, whether or not the chat service sends it again.
+  const entries = (res.data.logs || []).filter(
+    (entry) => !(cursor && entry.rev === cursor),
+  );
+
+  // A message the bot picked up carries its reaction from then on. When the
+  // cursor is behind such a message again, as after a restored backup, a
+  // reaction of the bot's on the same page marks it as answered already.
+  const pickedUp = new Set(
+    entries
+      .filter(
+        (entry) =>
+          entry.$type === 'chat.bsky.convo.defs#logAddReaction' &&
+          entry.reaction?.sender?.did === botDid,
+      )
+      .map((entry) => entry.message?.id),
+  );
+  const isHistory = (entry) =>
+    historyBefore !== null &&
+    Date.parse(entry.message?.sentAt) < historyBefore;
 
   // Never the bot's own messages, even if its DID is on the roster: answering
   // itself would loop forever.
@@ -1462,6 +1601,15 @@ export async function runDmPass({
       roster.answers(entry.message?.sender?.did) &&
       typeof entry.message?.text === 'string',
   );
+  const unseen = fromRoster.filter(
+    (entry) => !pickedUp.has(entry.message.id) && !isHistory(entry),
+  );
+  if (unseen.length < fromRoster.length) {
+    log('Skipped messages already answered or sent before the DM log was read', {
+      answered: fromRoster.filter((e) => pickedUp.has(e.message.id)).length,
+      history: fromRoster.filter(isHistory).length,
+    });
+  }
   // A thumbs-up or thumbs-down from a writer, on one of the bot's own messages.
   // Only one that carries a stored question does anything.
   const rosterReactions = entries.filter(
@@ -1472,29 +1620,30 @@ export async function runDmPass({
       entry.message?.sender?.did === botDid,
   );
 
-  // Advance regardless of what we do with the contents: a message the bot will
-  // not answer must not be replayed on every pass forever.
-  if (res.data.cursor) await writeCursor(res.data.cursor);
-
   // One-to-one conversations only, so the roster check above also decides
   // who reads the reply.
-  const direct = await directConvos(
-    chat,
-    [...fromRoster, ...rosterReactions],
-    { log },
-  );
-  const inbound = fromRoster.filter((e) => direct.has(e.convoId));
+  const direct = await directConvos(chat, [...unseen, ...rosterReactions], {
+    log,
+  });
+  const inbound = unseen.filter((e) => direct.has(e.convoId));
   const reactions = rosterReactions.filter((e) => direct.has(e.convoId));
 
+  // Advance past everything, answered or not, once the page is done with: a
+  // message the bot will not answer must not be replayed on every pass
+  // forever. Each message answered below moves the cursor past itself first.
   if (!inbound.length && !reactions.length) {
+    if (end) await writeCursor(end);
     await flushSummaries(chat, { log });
     return { answered: 0, scanned: entries.length, turns: [] };
   }
 
   // Only now is any of this worth loading. The config file is read per pass,
   // not cached, so an edit takes effect on the next message; one file read is
-  // small next to a model call.
-  const [io, config] = await Promise.all([getIo(), loadAgentConfig()]);
+  // small next to a model call. The tool backends are loaded by the message
+  // that needs them: until the first snapshot exists they cannot load, and
+  // "help", the menus and the list commands still answer while the message
+  // that needed scores says why it could not.
+  const config = await loadAgentConfig();
   const openers = parseOpeners(config?.openers);
   // The config file can move limits within the ranges in agentConfig.js,
   // never past them.
@@ -1532,8 +1681,9 @@ export async function runDmPass({
 
   // A 👍 or 👎 on a question the bot asked runs or drops exactly what it
   // described. Nothing else about a reaction is read. Each one is caught on
-  // its own: the cursor has moved, so a throw here would drop every message
-  // below it unanswered.
+  // its own, so a throw here cannot cost the messages below it an answer.
+  // Read again after a restart, a reaction does nothing: its question is
+  // cleared before it runs.
   for (const r of reactions) {
     try {
       const value = r.reaction?.value;
@@ -1570,7 +1720,35 @@ export async function runDmPass({
     }
   }
 
+  // Past MAX_BACKLOG the oldest go unanswered. Each conversation they came
+  // from is told, so a block among them is not lost without a trace.
+  const skipped = inbound.slice(0, -MAX_BACKLOG);
+  if (skipped.length) {
+    const byConvo = new Map();
+    for (const e of skipped) {
+      byConvo.set(e.convoId, [...(byConvo.get(e.convoId) || []), e.message]);
+    }
+    log('Skipped the oldest waiting messages', {
+      skipped: skipped.length,
+      convos: byConvo.size,
+    });
+    for (const [convoId, messages] of byConvo) {
+      await sendTo(convoId)(skippedText(messages)).catch((err) =>
+        log('Could not say what was skipped', {
+          convoId,
+          err: String(err?.message || err),
+        }),
+      );
+    }
+  }
+
   for (const arrived of inbound.slice(-MAX_BACKLOG)) {
+    // At most once: the cursor moves past this message before anything is
+    // done with it, so a crash or a restart in the middle of its turn drops
+    // it, and the messages after it are read again by the next pass.
+    const resume = arrived.rev || end;
+    if (resume) await writeCursor(resume);
+
     // "!" is stripped before anything parses the text, so "!block @x" is
     // exactly "block @x" to the classic path. Facets are read for their URIs
     // and DIDs only, never their byte ranges, so the shift does not matter.
@@ -1641,13 +1819,14 @@ export async function runDmPass({
             model: activeModel,
             log,
           });
-          await send(out.text);
+          outcome = out.failed ? 'failed' : 'done';
+          if (out.failed) await send(out.text);
+          else await sendReceipt(send, out.text, { log });
           log('Ran a confirmed change', {
             via: 'reply',
             commands: pending.commands.join(' | '),
             ok: !out.failed,
           });
-          outcome = out.failed ? 'failed' : 'done';
           turns.push({ convoId: entry.convoId, pending: 'confirmed' });
           continue;
         }
@@ -1817,7 +1996,7 @@ export async function runDmPass({
               const body = renderReport(account, { template: config?.report });
               // One line at the end for what a report cannot hold: every
               // decision recorded about them.
-              const deeper = `\n\nFull record: history ${account.handle ? `@${account.handle}` : account.did}`;
+              const deeper = `\n\nFull record: history ${nameOf(account, account.did)}`;
               await send(withMenu(`${body}${deeper}`, actions));
               await offerChoices(entry.convoId, actions);
               log('Rendered a lookup', { actor, band: account.band });
@@ -1855,7 +2034,7 @@ export async function runDmPass({
       // unreadable.
       if (reading && cmd.fromPost) {
         const account = await (await getIo()).lookUp(reading).catch(() => null);
-        if (account?.handle) reading = account.handle;
+        reading = nameOf(account, reading).replace(/^@/, '');
       }
 
       // Without a 👀, say something before slow work: a harvest or a model
@@ -1905,8 +2084,12 @@ export async function runDmPass({
         ) {
           outcome = 'done';
         }
-        await send(withMenu(reply.text, options));
-        await offerChoices(entry.convoId, options, reply.lastPost);
+        const text = withMenu(reply.text, options);
+        const shown =
+          outcome === 'done'
+            ? await sendReceipt(send, text, { log })
+            : await send(text);
+        if (shown) await offerChoices(entry.convoId, options, reply.lastPost);
         log('Ran a command', {
           action: cmd.action,
           actor: cmd.actor ?? cmd.target ?? cmd.code ?? '(none)',
@@ -1928,7 +2111,9 @@ export async function runDmPass({
 
       // Read the conversation back so a follow-up means something.
       let reply;
+      let io;
       try {
+        io = await getIo();
         const history = await readHistory(chat, entry, { botDid, limits });
         reply = await answer({
           generate,
@@ -2052,6 +2237,7 @@ export async function runDmPass({
     }
   }
 
+  if (end) await writeCursor(end);
   await flushSummaries(chat, { log });
   return { answered: turns.length, scanned: entries.length, turns };
 }

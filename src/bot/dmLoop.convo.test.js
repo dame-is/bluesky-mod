@@ -329,6 +329,91 @@ describe('"Undo that" after a single block', () => {
   });
 });
 
+describe('before the first snapshot', () => {
+  const NOT_BUILT =
+    'the follow-graph snapshot is not built yet. It builds by itself after the bot starts and takes a few minutes; ask again shortly';
+  const getIo = vi.fn(async () => {
+    throw new Error(NOT_BUILT);
+  });
+
+  it('answers what needs no scores, and says so for what does', async () => {
+    getIo.mockClear();
+    const { chat, sent, reactions } = chatWith([
+      msg('m1', 'help'),
+      msg('m2', 'what is going on with my mentions?'),
+      msg('m3', '@x.test'),
+    ]);
+    const res = await pass(chat, { getIo });
+    expect(res.answered).toBe(3);
+    const texts = sent.map((s) => s.text);
+    expect(texts.some((t) => t.includes('WHAT THE NETWORK IS SAYING'))).toBe(
+      true,
+    );
+    expect(texts).toContain(`That failed: ${NOT_BUILT}`.slice(0, 213));
+    expect(reactions).toContain('+❌@m2');
+    expect(texts.at(-1)).toMatch(/^That lookup failed: the follow-graph/);
+    // Nothing loaded the snapshot for "help".
+    expect(getIo).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("an attached post's author is written by DID", () => {
+  const AUTHOR = 'did:plc:author';
+  const ioWith = (handle) => ({
+    ...io,
+    lookUp: async (a) => ({ did: AUTHOR, handle, band: 'UNKNOWN', actor: a }),
+  });
+
+  it('blocks the author whose handle no longer verifies', async () => {
+    const { chat, sent } = chatWith([msg('m1', 'block', { embed: POST })]);
+    await pass(chat, { getIo: async () => ioWith('handle.invalid') });
+    expect(listWrite.applyCommand).toHaveBeenCalledTimes(1);
+    expect(listWrite.applyCommand.mock.calls[0].slice(1, 3)).toEqual([
+      'list_add',
+      AUTHOR,
+    ]);
+    expect(sent.at(-1).text).toMatch(/^That post is by did:plc:author\./);
+    expect(sent.at(-1).text).not.toContain('handle.invalid');
+  });
+
+  it('writes the DID and names the handle in the reply', async () => {
+    const { chat, sent } = chatWith([msg('m1', 'block', { embed: POST })]);
+    await pass(chat, { getIo: async () => ioWith('poster.test') });
+    expect(listWrite.applyCommand.mock.calls[0][2]).toBe(AUTHOR);
+    expect(sent.at(-1).text).toMatch(
+      /^That post is by @poster\.test\.\n\nAdded @poster\.test\./,
+    );
+  });
+
+  it('asks with a menu whose write runs on the DID it showed', async () => {
+    let { chat, sent } = chatWith([
+      msg('m1', 'block whoever is in the replies', { embed: POST }),
+    ]);
+    await pass(chat, { getIo: async () => ioWith('poster.test') });
+    expect(listWrite.applyCommand).not.toHaveBeenCalled();
+    expect(shownMenu(sent.at(-1).text)[0]).toBe('Add @poster.test to the list');
+    const rows = await db.select('dm_choice', {
+      select: 'options',
+      eq: { convo_id: 'c1' },
+    });
+    expect(rows[0].options[0].command).toBe(`list add ${AUTHOR}`);
+
+    // The handle passes to someone else before the owner answers.
+    ({ chat } = chatWith([msg('m2', '1')]));
+    await pass(chat, { getIo: async () => ioWith('someone.else') });
+    expect(listWrite.applyCommand.mock.calls[0].slice(1, 3)).toEqual([
+      'list_add',
+      AUTHOR,
+    ]);
+  });
+
+  it('points "Full record" at the DID when the handle does not verify', async () => {
+    const { chat, sent } = chatWith([msg('m1', '@spam.test')]);
+    await pass(chat, { getIo: async () => ioWith('handle.invalid') });
+    expect(sent.at(-1).text).toContain(`Full record: history ${AUTHOR}`);
+  });
+});
+
 describe('a stored question and a message that names its own target', () => {
   for (const mode of ['agent', 'classic']) {
     it(`${mode}: "block them" with a post blocks its author, not the question`, async () => {
