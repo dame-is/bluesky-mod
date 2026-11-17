@@ -1249,9 +1249,19 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
 }
 
 /**
+ * Posts per round of a card's "hostile": one wave of single-post calls
+ * (CONCURRENCY in triage.js), so a round holds the shared job queue no longer
+ * than one batched wave does.
+ */
+const HOSTILE_PER_ROUND = 12;
+
+/**
  * "hostile" on a card: read the replies and quotes, then add the hostile.
- * Three rounds of triage at most; anything still unread is said, so the
- * counts are not taken for the whole post.
+ *
+ * Nobody reads the quotes before this adds, so each post gets a model call of
+ * its own, as on an auto watch, and a post that talks to the model can sway no
+ * label but its own. Three rounds at most; anything still unread is said, so
+ * the counts are not taken for the whole post.
  */
 async function runHostile(code, { writeAgent, generate, model, log }) {
   if (!(modelsEnabled() && model)) {
@@ -1263,7 +1273,13 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   let failedReads = 0;
   // A round that labels nothing is failing, and another would fail the same.
   for (let round = 0; round < 3; round += 1) {
-    out = await runTriage(plan, { generate, model, log });
+    out = await runTriage(plan, {
+      generate,
+      model,
+      log,
+      perCall: 1,
+      perRun: HOSTILE_PER_ROUND,
+    });
     failedReads += failedReadsOf(out);
     if (!out.remaining || !out.labelled) break;
   }
