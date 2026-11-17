@@ -1273,6 +1273,11 @@ describe('where a target came from', () => {
     `block whoever wrote this${shared('at://did:web:attacker.example/app.bsky.feed.post/victim.example.com')}`,
     'block whoever wrote this https://bsky.app/profile/attacker.example/post/victim.example.com',
     'block whoever made this https://bsky.app/profile/attacker.example/feed/victim.example.com',
+    'block whoever made this\n\n[Full links in that message: https://bsky.app/starter-pack/attacker.example/victim.example.com]',
+    'block whoever made this https://bsky.app/start/attacker.example/victim.example.com',
+    'block whoever made this bsky.app/starter-pack/attacker.example/victim.example.com',
+    'block whoever runs this https://attacker.example/about/victim.example.com',
+    'block whoever runs this https://attacker.example/?ref=victim.example.com',
   ]) {
     it(`does not read a handle out of a record key: ${said.slice(-60)}`, async () => {
       const deps = refusing();
@@ -1288,45 +1293,51 @@ describe('where a target came from', () => {
     });
   }
 
-  it('does not read a DID out of a record key', async () => {
-    const deps = refusing();
-    const ctx = ctxFor({
-      checkWrites: true,
-      said: `block whoever wrote this${shared('at://did:web:attacker.example/app.bsky.feed.post/did:plc:victim000000000000000000')}`,
-      pending: [],
+  for (const said of [
+    `block whoever wrote this${shared('at://did:web:attacker.example/app.bsky.feed.post/did:plc:victim000000000000000000')}`,
+    'block whoever made this https://bsky.app/starter-pack/attacker.example/did:plc:victim000000000000000000',
+  ]) {
+    it(`does not read a DID out of a record key: ${said.slice(-60)}`, async () => {
+      const deps = refusing();
+      const ctx = ctxFor({ checkWrites: true, said, pending: [] });
+      const out = await buildActionTools(ctx, deps).add_to_list.execute({
+        accounts: ['did:plc:victim000000000000000000'],
+      });
+      expect(actionOf(deps)).toContain(
+        'did:plc:victim000000000000000000 (not mentioned anywhere in this conversation)',
+      );
+      expect(ctx.pending).toEqual([]);
+      expect(out.waitingOnOwner).toBeUndefined();
     });
-    const out = await buildActionTools(ctx, deps).add_to_list.execute({
-      accounts: ['did:plc:victim000000000000000000'],
-    });
-    expect(actionOf(deps)).toContain(
-      'did:plc:victim000000000000000000 (not mentioned anywhere in this conversation)',
-    );
-    expect(ctx.pending).toEqual([]);
-    expect(out.waitingOnOwner).toBeUndefined();
-  });
+  }
 
-  it('does not read a plan code out of a record key', async () => {
-    const deps = refusing();
-    const ctx = ctxFor({
-      checkWrites: true,
-      said: `what is this?${shared('at://did:plc:author/app.bsky.feed.post/3f9a2c1b')}`,
-      pending: [],
+  for (const said of [
+    `what is this?${shared('at://did:plc:author/app.bsky.feed.post/3f9a2c1b')}`,
+    'what is this? https://bsky.app/start/attacker.example/3f9a2c1b',
+  ]) {
+    it(`does not read a plan code out of a record key: ${said.slice(-60)}`, async () => {
+      const deps = refusing();
+      const ctx = ctxFor({ checkWrites: true, said, pending: [] });
+      const out = await buildActionTools(ctx, deps).undo.execute({
+        code: '3f9a2c1b',
+      });
+      expect(actionOf(deps)).not.toContain("named in the owner's message");
+      expect(ctx.pending).toEqual([]);
+      expect(out.waitingOnOwner).toBeUndefined();
     });
-    await buildActionTools(ctx, deps).undo.execute({ code: '3f9a2c1b' });
-    expect(actionOf(deps)).not.toContain("named in the owner's message");
-    expect(ctx.pending).toEqual([]);
-  });
+  }
 
   it("still reads the account a profile link names, and a post link's author", async () => {
     const deps = fakeDeps();
     const ctx = ctxFor({
       checkWrites: true,
-      said: 'block https://bsky.app/profile/alice.test and the author of https://deer.social/profile/bob.test/post/3abc',
+      said: 'block https://bsky.app/profile/alice.test and the author of https://deer.social/profile/bob.test/post/3abc and whoever made https://bsky.app/starter-pack/carol.test/3kpack',
     });
     await buildActionTools(ctx, deps).add_to_list.execute({
-      accounts: ['@alice.test', '@bob.test'],
+      accounts: ['@alice.test', '@bob.test', '@carol.test'],
     });
     expect(actionOf(deps)).toContain("@alice.test (named in the owner's message)");
+    expect(actionOf(deps)).toContain("@carol.test (named in the owner's message)");
     expect(actionOf(deps)).toContain(
       '@bob.test (the author of the post the owner attached)',
     );

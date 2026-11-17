@@ -373,17 +373,27 @@ function noteFor(raw, reason) {
   return why ? `${raw}${AGENT_MARK}${why}]` : raw;
 }
 
+/** The account a profile or starter-pack path names, at the start of a path. */
+const ACTOR_PATH = /^\/(?:profile|starter-pack|start)\/[^\s/?#]+/i;
+
 /**
  * The text with everything after the account in a link or at:// URI removed.
  * Whoever writes a record picks its key, and a key may contain "." and ":",
- * so a post's key can spell a handle, a DID or a plan code. The account part
- * stays, so `at://<account>` and `/profile/<account>` still name who a link
- * points at.
+ * so a record's key can spell a handle, a DID or a plan code. The path and
+ * query of a link to any other site can spell anything. What stays is the
+ * account of an at:// URI, the host of a link, and the account in
+ * `/profile/<account>`, `/starter-pack/<account>` and `/start/<account>`, so
+ * those still name who a link points at. A link counts with or without its
+ * `https://`.
  */
 function withoutRecordKeys(text) {
   return String(text ?? '')
     .replace(/(at:\/\/[^\s/]+)\/\S*/gi, '$1')
-    .replace(/(\/profile\/[^\s/?#]+)[/?#]\S*/gi, '$1');
+    .replace(/(\/(?:profile|starter-pack|start)\/[^\s/?#]+)[/?#]\S*/gi, '$1')
+    .replace(
+      /(?<![\w.@-])(https?:\/\/[^\s/?#]+|[a-z0-9-]+(?:\.[a-z0-9-]+)+)([/?#]\S*)/gi,
+      (_, host, path) => host + (ACTOR_PATH.exec(path)?.[0] ?? ''),
+    );
 }
 
 /**
