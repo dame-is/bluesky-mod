@@ -343,6 +343,10 @@ const nameOf = (account, fallback) =>
     ? `@${account.handle}`
     : fallback;
 
+/** What a request to sort by tone gets when there is no model to read with. */
+const NO_MODEL_TO_SORT =
+  'Sorting by tone needs an AI model, and this bot has none set up.';
+
 /** Every band but PROTECTED. */
 const ALL_BANDS = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED'];
 
@@ -487,7 +491,7 @@ export async function runCommand(
 
   if (cmd.action === 'plan') {
     const plan = await proposePlan({ link: cmd.target, kind: cmd.kind });
-    const actions = planActions(plan);
+    const actions = planActions(plan, { hasModel: modelsEnabled() });
     const head = cmd.remembered ? 'Using the post you sent earlier.\n\n' : '';
     return {
       text: `${head}${renderPlanReport(plan, { template })}`,
@@ -556,6 +560,9 @@ export async function runCommand(
   }
 
   if (['approve', 'cancel', 'review', 'triage'].includes(cmd.action)) {
+    if (cmd.action === 'triage' && !(modelsEnabled() && model)) {
+      return say(NO_MODEL_TO_SORT);
+    }
     const plan = await findPlan(cmd.code);
     if (!plan) return say(`No plan with code ${cmd.code}.`);
 
@@ -786,10 +793,15 @@ export async function runCommand(
             },
           ]
         : []),
-      {
-        label: `Read ${handle}'s recent posts first`,
-        command: `read ${handle}`,
-      },
+      // Reading needs a model, as help and the other menus say.
+      ...(modelsEnabled()
+        ? [
+            {
+              label: `Read ${handle}'s recent posts first`,
+              command: `read ${handle}`,
+            },
+          ]
+        : []),
     ];
     const body = renderReport(found, { template: reportTemplate });
     return say(
@@ -831,7 +843,9 @@ export async function runCommand(
           ...(out.changed && out.did
             ? [{ label: 'Undo that', command: `list remove ${out.did}` }]
             : []),
-          { label: `Read ${at}'s recent posts`, command: `read ${at}` },
+          ...(modelsEnabled()
+            ? [{ label: `Read ${at}'s recent posts`, command: `read ${at}` }]
+            : []),
         ]
       : null;
   return say(preface + message, after);
@@ -1166,6 +1180,9 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
  * counts are not taken for the whole post.
  */
 async function runHostile(code, { writeAgent, generate, model, log }) {
+  if (!(modelsEnabled() && model)) {
+    return { text: NO_MODEL_TO_SORT, failed: true };
+  }
   const plan = await findPlan(code);
   if (!plan) return { text: `No plan with code ${code}.`, failed: true };
   let out = null;
@@ -2075,7 +2092,9 @@ export async function runDmPass({
             await send(ackFor({ action: 'plan' }, { openers })).catch(() => {});
           try {
             const plan = await proposePlan({ link: post, kind: 'everyone' });
-            const actions = offerable(planActions(plan));
+            const actions = offerable(
+              planActions(plan, { hasModel: modelsEnabled() }),
+            );
             const body = renderPlanReport(plan, {
               template: config?.postReport,
             });
@@ -2107,7 +2126,9 @@ export async function runDmPass({
             const io = await getIo();
             const account = await io.lookUp(actor);
             if (account) {
-              const actions = offerable(actionsFor(account));
+              const actions = offerable(
+                actionsFor(account, { hasModel: modelsEnabled() }),
+              );
               const body = renderReport(account, { template: config?.report });
               // One line at the end for what a report cannot hold: every
               // decision recorded about them.

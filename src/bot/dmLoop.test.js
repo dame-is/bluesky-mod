@@ -1,4 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+
+// Whether a model is set up, as models.js would report it.
+const models = vi.hoisted(() => ({ on: true }));
+vi.mock('../models.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  modelsEnabled: () => models.on,
+}));
+
 import {
   sharedPostUri,
   composeMessage,
@@ -141,6 +149,44 @@ describe('a verb with no plan code', () => {
       expect(NUDGE.plan).toContain(out.text);
     });
   }
+});
+
+describe('with no model set up', () => {
+  afterEach(() => {
+    models.on = true;
+  });
+
+  it('says sorting by tone needs a model, before looking for the plan', async () => {
+    models.on = false;
+    const out = await runCommand(parseCommand('triage 1c2d3e4f'), {}, {
+      canWrite: true,
+      model: 'some/model',
+    });
+    expect(out.text).toBe(
+      'Sorting by tone needs an AI model, and this bot has none set up.',
+    );
+  });
+
+  it('offers no reading in the menu that asks about a post', async () => {
+    const cmd = parseCommand('block whoever is in the replies', {
+      embedUri: 'at://did:plc:author/app.bsky.feed.post/3abc',
+    });
+    const lookUp = async (did) => ({
+      did,
+      handle: 'poster.test',
+      band: 'UNKNOWN',
+    });
+    const withModel = await runCommand(cmd, {}, { canWrite: true, lookUp });
+    expect(withModel.options.map((o) => o.command)).toEqual([
+      'list add did:plc:author',
+      'read @poster.test',
+    ]);
+    models.on = false;
+    const without = await runCommand(cmd, {}, { canWrite: true, lookUp });
+    expect(without.options.map((o) => o.command)).toEqual([
+      'list add did:plc:author',
+    ]);
+  });
 });
 
 describe('an approval the parser refused', () => {
