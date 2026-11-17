@@ -120,7 +120,7 @@ describe('help', () => {
     // Help returns before the writeAgent guard on purpose: asking what the
     // bot does should work when nothing else does.
     const out = await runCommand(cmd, null, { canWrite: true });
-    expect(out.text).toContain('WHAT THE NETWORK IS SAYING');
+    expect(out.text).toContain('what the network is saying');
     expect(out.text).toContain('pulse');
   });
 

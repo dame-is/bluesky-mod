@@ -136,7 +136,7 @@ undo that
 
 A message starting with `!` takes the classic path for that one message (`!block @x`, `!help`). A message starting with `^` skips straight to the escalation model (see Models).
 
-**What it gives up, on purpose.** Classic's rule that a command never reaches the model. Here the model infers targets ("whoever wrote this", "the hostile ones") and decides when to ask. Prompt rules steer it: ask before adding more than about 25 accounts unless you set that scope, act only on what you pointed at.
+**What it gives up, on purpose.** Classic's rule that a command never reaches the model. Here the model infers targets ("whoever wrote this", "the hostile ones") and decides when to ask. Prompt rules steer it: naming a group ("likers", "all", "the hostile ones") is asking for all of it, it asks first only when your words don't say which accounts, and it acts only on what you pointed at.
 
 **What it keeps, in code:**
 

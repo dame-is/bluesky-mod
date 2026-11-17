@@ -363,7 +363,7 @@ describe('the post card', () => {
     let { chat, sent } = chatWith([shared('m1', '')]);
     await pass(chat);
     expect(sent[0]).toContain(
-      'Reply with: author · likers · unknowns · everyone',
+      'reply with: author · likers · unknowns · everyone',
     );
 
     ({ chat, sent } = chatWith([msg('m2', 'likers')]));
@@ -395,7 +395,7 @@ describe('the post card', () => {
     });
     let { chat, sent } = chatWith([shared('m1', '')]);
     await pass(chat);
-    expect(sent[0]).toContain('Reply with: likers · unknowns · everyone');
+    expect(sent[0]).toContain('reply with: likers · unknowns · everyone');
     const generate = vi.fn();
     ({ chat, sent } = chatWith([msg('m2', 'likers and author')]));
     await pass(chat, { generate });

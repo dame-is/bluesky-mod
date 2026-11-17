@@ -88,6 +88,7 @@ import {
   parseOpeners,
   worthAcking,
 } from '../lib/phrases.js';
+import { when } from '../lib/stack.js';
 import { select, upsert } from './db.js';
 import { applyCommand } from './listWrite.js';
 import { runTriage, reviewTriage, CONCURRENCY } from './triage.js';
@@ -106,6 +107,7 @@ import {
   HELD_BANDS,
   historyFor,
   shortCode,
+  handlesFor,
 } from './bulkPlan.js';
 import { loadAgentConfig, clampLimits } from './agentConfig.js';
 import { operate, fallbackText } from './operator.js';
@@ -349,7 +351,7 @@ function renderChoices(options) {
 /** A reply with its menu, as sent: the text, then the numbered options. */
 function withMenu(text, options) {
   return options?.length
-    ? `${text}\n\nACTIONS:\n${renderChoices(options)}`
+    ? `${text}\n\nreply with a number:\n${renderChoices(options)}`
     : text;
 }
 
@@ -479,9 +481,21 @@ const oneQuotable = (text) =>
     .replace(/\s+/g, ' ')
     .replace(/["“”]/g, "'");
 
-/** One row of a label review: the band, then a stranger's words. */
-const quoteRow = (band, quote) =>
-  `${band} - "${oneQuotable(quote).slice(0, 160)}"`;
+/**
+ * How a reply names an account it has a handle for, or its DID: a handle
+ * holds no space, quote or line break, so it cannot pass for anything else.
+ */
+const whoIs = (did, profiles) => {
+  const handle = profiles?.get(did)?.handle;
+  return handle && handle !== 'handle.invalid' ? `@${handle}` : did;
+};
+
+/**
+ * One entry of a label review: who and their band, then their words on a
+ * row of their own.
+ */
+const quoteRow = (who, band, quote) =>
+  `${who} · ${String(band).toLowerCase()}\n"${oneQuotable(quote).slice(0, 160)}"`;
 
 /**
  * quoteRow's output, in the bot's own messages read back as history. The
@@ -489,14 +503,15 @@ const quoteRow = (band, quote) =>
  * the match early or write a row of their own.
  */
 const QUOTE_ROW =
-  /^(PROTECTED|CONNECTED|PERIPHERAL|NOTABLE|UNKNOWN) - "([^"\n]*)"$/gm;
+  /^((?:@|did:)[^\s"]+) · (protected|connected|peripheral|notable|unknown)\n"([^"\n]*)"$/gm;
 
 /**
- * A `history` row with a plan note, in the bot's own messages read back as
- * history. The note holds no double quote (oneQuotable), so it runs to the
- * row's last character.
+ * A `history` entry with a plan note, in the bot's own messages read back as
+ * history: the entry's row, then the note on its own. The note holds no
+ * double quote (oneQuotable), so it runs to the row's last character.
  */
-const NOTE_ROW = /^(.+ · [0-9a-f]{8}(?: \(undone\))?, ")([^"\n]*)"$/gm;
+const NOTE_ROW =
+  /^((?:added|removed|asked again, already on the list) · [^\n]* · plan [0-9a-f]{8}[^\n]*\n")([^"\n]*)"$/gm;
 
 /**
  * The agent's reason inside a note, found as noteText in operator.js finds
@@ -515,7 +530,7 @@ export function fenceStrangers(text) {
   return String(text ?? '')
     .replace(
       QUOTE_ROW,
-      (_, band, quote) => `${band} - ${untrusted('quote', quote)}`,
+      (_, who, band, quote) => `${who} · ${band}\n${untrusted('quote', quote)}`,
     )
     .replace(
       NOTE_ROW,
@@ -682,21 +697,25 @@ export async function runCommand(
     // A plan's note holds the words that asked for each change, which can be
     // what the owner would tell nobody else, so a sender who may not write
     // sees what was done and not why.
+    // Each entry names its account, unless the history is one account's.
+    const profiles = did ? null : await handlesFor(h.rows.map((r) => r.did));
     const lines = h.rows.map((r) => {
-      const when = new Date(r.acted_at).toLocaleString();
       const verb =
         r.action === 'list_remove'
           ? 'removed'
           : r.already_listed
             ? 'asked again, already on the list'
             : 'added';
-      const note =
-        canWrite && r.plan?.note ? `, "${oneQuotable(r.plan.note)}"` : '';
       const undone = r.undone_at ? ' (undone)' : '';
-      return `${when} · ${verb} · ${r.band} · ${r.approved_via ?? '?'} · ${r.code}${undone}${note}`;
+      const row = `${verb} · ${String(r.band).toLowerCase()} · ${r.approved_via ?? '?'} · plan ${r.code}${undone} · ${when(r.acted_at)}`;
+      const note =
+        canWrite && r.plan?.note ? `"${oneQuotable(r.plan.note)}"` : null;
+      return [did ? null : whoIs(r.did, profiles), row, note]
+        .filter(Boolean)
+        .join('\n');
     });
     return say(
-      `${h.total} actions on record, most recent first:\n\n${lines.join('\n')}`,
+      `${h.total} ${h.total === 1 ? 'change' : 'changes'} on record, newest first:\n\n${lines.join('\n\n')}`,
     );
   }
 
@@ -878,7 +897,10 @@ export async function runCommand(
       // single, so a quote cannot close its row and write one that looks
       // like the bot's. Read back as history, each row's quote is fenced
       // (fenceStrangers).
-      const lines = out.rows.map((r) => quoteRow(r.band, r.triage_quote));
+      const profiles = await handlesFor(out.rows.map((r) => r.did));
+      const lines = out.rows.map((r) =>
+        quoteRow(whoIs(r.did, profiles), r.band, r.triage_quote),
+      );
       // Hundreds of quotes do not get read in a DM. This is a spot check on
       // the labelling before a bulk action, and the header says so.
       const head =

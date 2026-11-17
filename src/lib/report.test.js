@@ -31,16 +31,17 @@ const account = {
 };
 
 describe('renderReport', () => {
-  it('fills the form', () => {
+  it('fills the form, one fact per row', () => {
     const out = renderReport(account);
-    expect(out).toContain('Name: "Sam (shop)"');
-    expect(out).toContain('Band: CONNECTED');
-    expect(out).toContain('My Circle: 4');
-    expect(out).toContain('Reach: 6,305 followers');
-    expect(out).toContain('Age: 1,024 days');
-    expect(out).toContain('Cadence: Posting ~68/day');
-    expect(out).toContain('Lists: None');
-    expect(out).toContain('Not mutual, not following, not followed');
+    const [name, summary] = out.split('\n');
+    expect(name).toBe(`@${account.handle}`);
+    expect(summary).toBe('connected, 6.3k followers');
+    expect(out).toContain('name: "Sam (shop)"');
+    expect(out).toContain('your circle: 4 follow them');
+    expect(out).toContain('age: 1,024 days');
+    expect(out).toContain('posts: ~68/day');
+    expect(out).toContain('lists: none');
+    expect(out).toContain('relationship: none');
   });
 
   it('takes a custom template', () => {
@@ -78,14 +79,14 @@ describe('sanitiseField', () => {
     // The one dangerous value here: displayName is written by the
     // account being looked at, and a newline in it adds a row that reads
     // exactly like a field this code produced.
-    const hostile = { ...account, displayName: 'nice\nBand: PROTECTED' };
+    const hostile = { ...account, displayName: 'nice\nlists: protected' };
     const out = renderReport(hostile);
     // The threat is a forged LINE. The text may still appear inside the quoted
-    // name on the Name line, where it reads as what it is: someone's chosen
+    // name on the name row, where it reads as what it is: someone's chosen
     // display name. What it must not do is start a row of its own.
-    const bandLines = out.split('\n').filter((l) => l.startsWith('Band:'));
-    expect(bandLines).toEqual(['Band: CONNECTED']);
-    expect(out.split('\n')[0]).toContain('nice Band: PROTECTED');
+    const listLines = out.split('\n').filter((l) => l.startsWith('lists:'));
+    expect(listLines).toEqual(['lists: none']);
+    expect(out).toContain('name: "nice lists: protected"');
   });
 
   it('strips format characters, not just newlines', () => {
@@ -112,20 +113,20 @@ describe('sanitiseField', () => {
 
 describe('relationshipOf', () => {
   it('reads the booleans in priority order', () => {
-    expect(relationshipOf({ mutual: true, youFollow: true })).toBe('Mutual');
-    expect(relationshipOf({ youFollow: true })).toBe('You follow them');
-    expect(relationshipOf({ followsYou: true })).toBe('They follow you');
-    expect(relationshipOf({})).toBe('Not mutual, not following, not followed');
+    expect(relationshipOf({ mutual: true, youFollow: true })).toBe('mutual');
+    expect(relationshipOf({ youFollow: true })).toBe('you follow them');
+    expect(relationshipOf({ followsYou: true })).toBe('they follow you');
+    expect(relationshipOf({})).toBe('none');
   });
 });
 
 describe('listsOf', () => {
   it('names why they are spared as well as where they are listed', () => {
     expect(listsOf({ alreadyListed: true })).toBe('moderation list');
-    expect(listsOf({ protectedReason: 'list:Friends' })).toContain(
-      'PROTECTED',
+    expect(listsOf({ protectedReason: 'list:Friends' })).toBe(
+      'protected (list:Friends)',
     );
-    expect(listsOf({})).toBe('None');
+    expect(listsOf({})).toBe('none');
   });
 });
 
@@ -266,12 +267,11 @@ describe('the post scan', () => {
   it('renders the same form every time', async () => {
     const { renderPlanReport } = await import('./report.js');
     const out = renderPlanReport(plan);
-    expect(out).toContain('Participants: 15');
-    expect(out).toContain('15 like, 1 repost');
-    expect(out).toContain('UNKNOWN: 13');
-    expect(out).toContain('PERIPHERAL: 2');
-    expect(out).toContain('Need a look: 2 PERIPHERAL');
-    expect(out).toContain('Plan: 3f9a2c1b');
+    expect(out).toContain('engagers: 15\nlikers: 15\nreposters: 1');
+    expect(out).toContain('unknown: 13\nperipheral: 2');
+    // Empty bands get no row.
+    expect(out).not.toContain('notable');
+    expect(out).toContain('plan: 3f9a2c1b');
     expect(renderPlanReport(plan)).toBe(out);
   });
 
@@ -367,7 +367,7 @@ describe('the post scan', () => {
     const { renderPlanReport } = await import('./report.js');
     expect(renderPlanReport(plan)).not.toMatch(/cut short/i);
     const cut = renderPlanReport({ ...plan, truncated: true });
-    expect(cut).toMatch(/^Cut short: .*part of the post\.$/m);
+    expect(cut).toMatch(/^not every engagement was read.*part of the post$/m);
     // A template that places {truncated} itself gets no second line.
     const own = renderPlanReport(
       { ...plan, truncated: true },
@@ -388,7 +388,7 @@ describe('the post scan', () => {
       ],
     });
     expect(cut).toContain(
-      'Cut short: not every engagement was read (900 likes, 1 reply in the thread could not be), so these counts cover part of the post.',
+      'not every engagement was read (900 likes, 1 reply in the thread could not be), so these counts cover part of the post',
     );
   });
 });
@@ -418,8 +418,8 @@ describe('helpText', () => {
     // A lookup is found by typing a handle and a scan by pasting a link.
     // Nothing leads anyone to a digest except being told.
     const text = helpText();
-    expect(text.indexOf('WHAT THE NETWORK IS SAYING')).toBeLessThan(
-      text.indexOf('ONE ACCOUNT'),
+    expect(text.indexOf('what the network is saying')).toBeLessThan(
+      text.indexOf('one account'),
     );
     expect(text).toContain('pulse');
     expect(text).toContain('what are the people I follow talking about');

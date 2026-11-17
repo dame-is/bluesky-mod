@@ -11,18 +11,23 @@
 // a field this code produced. So every substituted value is flattened to one
 // line and capped before it is used.
 
-/** What a lookup looks like unless the owner changes it. */
+import { accountLine, rows, stack } from './stack.js';
+
+/**
+ * What a lookup looks like unless the owner changes it: the account, a
+ * summary line, then one fact per row, for a narrow chat bubble.
+ */
 export const DEFAULT_REPORT_TEMPLATE = [
-  'Name: "{displayName}"',
-  'Handle: @{handle}',
-  'Band: {band}',
-  'Distance: {distance}',
-  'Relationship: {relationship}',
-  'My Circle: {vouches}',
-  'Reach: {followers} followers',
-  'Age: {ageDays} days',
-  'Cadence: Posting ~{postsPerDay}/day',
-  'Lists: {lists}',
+  '@{handle}',
+  '{summary}',
+  '',
+  'name: "{displayName}"',
+  'your circle: {vouches} follow them',
+  'relationship: {relationship}',
+  'distance: {distance}',
+  'age: {ageDays} days',
+  'posts: ~{postsPerDay}/day',
+  'lists: {lists}',
 ].join('\n');
 
 /** What an empty field shows. */
@@ -53,19 +58,19 @@ export function sanitiseField(value, { max = 64 } = {}) {
 export function relationshipOf(a) {
   // First, because it settles the rest: someone who blocks you cannot reply to
   // or quote you while the block stands.
-  if (a.blocksYou) return 'They block you';
-  if (a.mutual) return 'Mutual';
-  if (a.youFollow) return 'You follow them';
-  if (a.followsYou) return 'They follow you';
-  return 'Not mutual, not following, not followed';
+  if (a.blocksYou) return 'they block you';
+  if (a.mutual) return 'mutual';
+  if (a.youFollow) return 'you follow them';
+  if (a.followsYou) return 'they follow you';
+  return 'none';
 }
 
 /** Which of the owner's lists already hold them. */
 export function listsOf(a) {
   const on = [];
   if (a.alreadyListed) on.push('moderation list');
-  if (a.protectedReason) on.push(`PROTECTED (${a.protectedReason})`);
-  return on.length ? on.join(', ') : 'None';
+  if (a.protectedReason) on.push(`protected (${a.protectedReason})`);
+  return on.length ? on.join(', ') : 'none';
 }
 
 /** Every variable a template may use. */
@@ -74,6 +79,7 @@ function variablesFor(account) {
     typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString() : EMPTY;
   return {
     handle: account.handle || account.did,
+    summary: accountLine(account),
     did: account.did,
     displayName: account.displayName || '',
     band: account.band,
@@ -125,7 +131,7 @@ export function renderReport(account, { template } = {}) {
  */
 export function helpText({ canWrite = true, hasModel = true } = {}) {
   const network = [
-    'WHAT THE NETWORK IS SAYING',
+    'what the network is saying',
     '  pulse                     what your circle is talking about, last 24h',
     '  pulse 3d                  same, over three days (or 72, or 168)',
     '  pulse amplified           only what they reposted, and who passed it on',
@@ -138,19 +144,19 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
   ];
   const reads = [
     ...(hasModel ? network : []),
-    'ONE ACCOUNT',
+    'one account',
     '  @handle                   band, vouches, reach, tenure',
     ...(hasModel
       ? ['  read @handle              what they actually post about']
       : []),
     '  history @handle           every decision recorded about them',
     '',
-    'ONE POST',
+    'one post',
     '  <paste a link>            score everyone who engaged with it',
   ];
   const writes = [
     '',
-    'ACTING',
+    'changing the list',
     '  add likers <post>         harvest, score, propose a batch',
     '  review <code>             the accounts in it that need a look',
     '  approve <code> UNKNOWN    add that band only',
@@ -211,23 +217,25 @@ export function actionsFor(account, { hasModel = true } = {}) {
   return out;
 }
 
-/** What a post scan looks like unless the owner changes it. */
+/**
+ * A post-scan template for the config file's `postReport`. The scan report
+ * itself is laid out by code (stackedPlan), which leaves out empty rows, a
+ * thing a template with no conditionals cannot do.
+ */
 export const DEFAULT_PLAN_TEMPLATE = [
-  'Post by @{author} ({authorBand})',
-  '{uri}',
+  'post by @{author}',
+  '{authorSummary}',
   '',
-  'Participants: {participants}',
-  'Engagements: {engagements}',
+  'engagers: {participants}',
   '',
-  'PROTECTED: {PROTECTED}',
-  'CONNECTED: {CONNECTED}',
-  'PERIPHERAL: {PERIPHERAL}',
-  'NOTABLE: {NOTABLE}',
-  'UNKNOWN: {UNKNOWN}',
+  'unknown: {UNKNOWN}',
+  'peripheral: {PERIPHERAL}',
+  'notable: {NOTABLE}',
+  'connected: {CONNECTED}',
+  'protected: {PROTECTED}',
   '',
-  'Need a look: {needsLook}',
-  'Plan: {code}',
-  'If you add all: {cost}',
+  'plan: {code}',
+  'adding all: {cost}',
 ].join('\n');
 
 /**
@@ -290,6 +298,7 @@ function planVariablesFor(plan) {
     authorBand: plan.author?.band || 'UNSCORED',
     authorVouches: plan.author?.vouches ?? 0,
     authorFollowers: plan.author?.followers ?? null,
+    authorSummary: plan.author ? accountLine(plan.author) : '',
     participants: plan.total,
     engagements: engagements || EMPTY,
     needsLook: needsLook || 'none',
@@ -309,10 +318,50 @@ function planVariablesFor(plan) {
  * {truncated} itself.
  */
 export function renderPlanReport(plan, { template } = {}) {
-  const used = template || DEFAULT_PLAN_TEMPLATE;
-  const body = fill(used, DEFAULT_PLAN_TEMPLATE, planVariablesFor(plan), 120);
-  if (!plan.truncated || String(used).includes('{truncated}')) return body;
+  if (!template) return stackedPlan(plan);
+  const body = fill(template, DEFAULT_PLAN_TEMPLATE, planVariablesFor(plan), 120);
+  if (!plan.truncated || String(template).includes('{truncated}')) return body;
   return `${body}\n\nCut short: ${cutShort(plan)}.`;
+}
+
+/**
+ * The scan report as code lays it out: the author, who engaged and how, by
+ * band, what is already done, then the plan and what adding everyone costs.
+ * Every value is a count or written by code, apart from the author's handle,
+ * which cannot hold a space or a line break.
+ */
+function stackedPlan(plan) {
+  const e = plan.engagements || {};
+  const b = plan.byBand || {};
+  const a = plan.author;
+  return stack(
+    a
+      ? [`post by @${a.handle || a.did}`, accountLine(a)]
+          .filter(Boolean)
+          .join('\n')
+      : 'post',
+    rows([
+      ['engagers', plan.total],
+      ['likers', e.like],
+      ['reposters', e.repost],
+      ['quoters', e.quote],
+      ['repliers', Math.max(e.reply || 0, e.threadReply || 0)],
+    ]),
+    plan.truncated ? cutShort(plan) : null,
+    rows(
+      ['unknown', 'peripheral', 'notable', 'connected', 'protected'].map(
+        (k) => [k, b[k.toUpperCase()]],
+      ),
+    ),
+    rows([
+      ['already on list', plan.alreadyListed],
+      ['block you', plan.blocksYou],
+    ]),
+    rows([
+      ['plan', plan.code],
+      ['adding all', plan.cost],
+    ]),
+  );
 }
 
 /**

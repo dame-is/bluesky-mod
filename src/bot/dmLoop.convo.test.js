@@ -439,7 +439,7 @@ describe('before the first snapshot', () => {
     const res = await pass(chat, { getIo });
     expect(res.answered).toBe(3);
     const texts = sent.map((s) => s.text);
-    expect(texts.some((t) => t.includes('WHAT THE NETWORK IS SAYING'))).toBe(
+    expect(texts.some((t) => t.includes('what the network is saying'))).toBe(
       true,
     );
     expect(texts).toContain(`That failed: ${NOT_BUILT}`.slice(0, 213));
@@ -851,7 +851,7 @@ describe("strangers' words in the bot's own messages", () => {
   const REVIEW = [
     '1 read as hostile and not yet on the list. Here are 1, most connected first, as a spot check.',
     '',
-    `UNKNOWN - "${QUOTE}"`,
+    `did:plc:someone · unknown\n"${QUOTE}"`,
   ].join('\n');
 
   /** Every message the model was handed, as text. */
@@ -883,7 +883,7 @@ describe("strangers' words in the bot's own messages", () => {
       await pass(chat, { mode, generate });
       const assistant = shown(generate).find((t) => t.includes(QUOTE));
       expect(assistant).toContain(
-        `UNKNOWN - <untrusted source="quote">\n${QUOTE}\n</untrusted>`,
+        `did:plc:someone · unknown\n<untrusted source="quote">\n${QUOTE}\n</untrusted>`,
       );
       expect(assistant).not.toContain(`"${QUOTE}"`);
     });

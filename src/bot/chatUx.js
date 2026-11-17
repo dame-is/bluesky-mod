@@ -18,6 +18,7 @@
 //   words (author, likers, unknowns, everyone, hostile) instead of numbers.
 
 import { unreadText } from '../lib/report.js';
+import { accountLine, rows, stack } from '../lib/stack.js';
 import { select, upsert } from './db.js';
 
 export const REACTION = { working: '👀', done: '✅', failed: '❌' };
@@ -206,81 +207,74 @@ export function summaryText({ items, firstAt, lastAt }) {
 
 // --- the post card -----------------------------------------------------------
 
-const nf = (n) => Number(n || 0).toLocaleString('en-US');
-const plural = (n, one, many) => `${nf(n)} ${n === 1 ? one : many}`;
-
 /** The card words shown under the card: ones that do something. */
 const shownKeys = (choices) =>
   choices.filter((o) => o.command && !o.hidden).map((o) => o.key);
 
 /**
- * What a bare post gets instead of the agent or a numbered menu.
+ * What a bare post gets instead of the agent or a numbered menu, stacked for
+ * a narrow bubble (stack.js): the author, who engaged, by band, what is
+ * already done, then the words it answers to.
  *
  * Counts only; no handles but the author's, so nothing a stranger wrote can
  * shape it. Built from proposePlan's return.
  */
 export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
   const a = plan.author;
-  const lines = [];
-  if (a) {
-    const facts = [a.band];
-    if (a.followers != null) facts.push(`${nf(a.followers)} followers`);
-    if (a.blocksYou) facts.push('blocks you');
-    if (a.alreadyListed) facts.push('already on the list');
-    if (a.protectedReason) facts.push(`PROTECTED: ${a.protectedReason}`);
-    lines.push(`@${a.handle || a.did} (${facts.join(', ')}) wrote this.`);
-  }
+  const head = a
+    ? [`@${a.handle || a.did}`, accountLine(a)].filter(Boolean).join('\n')
+    : null;
   const e = plan.engagements || {};
   // A direct reply to a thread's first post links to it as both parent and
   // root, so it is counted under `reply` and `threadReply`. On a first post
   // every reply has it as root; on a post deeper in a thread none do. The
   // larger count is the number of replies either way.
   const replies = Math.max(e.reply || 0, e.threadReply || 0);
-  const parts = [
-    e.like && plural(e.like, 'like', 'likes'),
-    e.repost && plural(e.repost, 'repost', 'reposts'),
-    e.quote && plural(e.quote, 'quote', 'quotes'),
-    replies && plural(replies, 'reply', 'replies'),
-  ].filter(Boolean);
   // A card that leaves out "likers" because the likes could not be read
   // says why, and any cut harvest says the counts are partial.
   const missing = unreadText(plan.unread);
+  let body;
   if (plan.total) {
-    lines.push(
-      `${plural(plan.total, 'account', 'accounts')} engaged${parts.length ? `: ${parts.join(', ')}` : ''}.`,
-    );
-    if (missing) {
-      lines.push(
-        `Could not read ${missing}, so these counts cover part of the post. Send it again to retry.`,
-      );
-    } else if (plan.truncated) {
-      lines.push(
-        'Not every engagement was read, so these counts cover part of the post.',
-      );
-    }
     const b = plan.byBand || {};
-    const bands = ['UNKNOWN', 'PERIPHERAL', 'NOTABLE', 'CONNECTED', 'PROTECTED']
-      .filter((k) => b[k])
-      .map((k) => `${nf(b[k])} ${k.toLowerCase()}`);
-    if (bands.length) lines.push(`By band: ${bands.join(', ')}.`);
-    const known = [
-      plan.alreadyListed && `${nf(plan.alreadyListed)} already on the list`,
-      plan.blocksYou && `${nf(plan.blocksYou)} already block you`,
-    ].filter(Boolean);
-    if (known.length) lines.push(`${known.join(', ')}.`);
+    body = [
+      rows([
+        ['engagers', plan.total],
+        ['likers', e.like],
+        ['reposters', e.repost],
+        ['quoters', e.quote],
+        ['repliers', replies],
+      ]),
+      missing
+        ? `couldn't read: ${missing}\nthese counts cover part of the post; send it again to retry`
+        : plan.truncated
+          ? 'not every engagement was read, so these counts cover part of the post'
+          : null,
+      rows(
+        ['unknown', 'peripheral', 'notable', 'connected', 'protected'].map(
+          (k) => [k, b[k.toUpperCase()]],
+        ),
+      ),
+      rows([
+        ['already on list', plan.alreadyListed],
+        ['block you', plan.blocksYou],
+      ]),
+    ];
   } else if (missing) {
-    lines.push(`Could not read ${missing}. Send it again to retry.`);
+    body = [`couldn't read: ${missing}\nsend it again to retry`];
   } else if (plan.truncated) {
     // Nothing failed outright. The cut is a cap, which a retry meets again,
     // or a source that failed part way, which the harvest does not tell
     // apart; the partial-read line above gives no retry advice either.
-    lines.push('Nobody found so far, and not every engagement was read.');
+    body = ['nobody found so far, and not every engagement was read'];
   } else {
-    lines.push('Nobody has engaged with it yet.');
+    body = ['nobody has engaged with it yet'];
   }
   const keys = shownKeys(choices);
-  if (keys.length) lines.push('', `Reply with: ${keys.join(' · ')}`);
-  return lines.join('\n');
+  return stack(
+    head,
+    ...body,
+    keys.length ? `reply with: ${keys.join(' · ')}` : null,
+  );
 }
 
 /**

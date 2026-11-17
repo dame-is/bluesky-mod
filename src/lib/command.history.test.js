@@ -35,7 +35,7 @@ describe('history with a name', () => {
     for (const text of ['history alice', 'history of someone']) {
       const out = await runCommand(parseCommand(text), agent, {});
       expect(out.text, text).toMatch(/^I could not read "/);
-      expect(out.text, text).not.toMatch(/actions? on record/);
+      expect(out.text, text).not.toMatch(/changes? on record/);
     }
   });
 
@@ -51,11 +51,11 @@ describe('history with a name', () => {
       agent,
       {},
     );
-    expect(theirs.text).toMatch(/^1 actions? on record/);
+    expect(theirs.text).toMatch(/^1 changes? on record/);
   });
 
   it('still shows the whole record when no name is given', async () => {
     const out = await runCommand(parseCommand('history'), agent, {});
-    expect(out.text).toMatch(/^1 actions? on record/);
+    expect(out.text).toMatch(/^1 changes? on record/);
   });
 });

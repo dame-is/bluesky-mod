@@ -51,22 +51,33 @@ const offered = (plan) =>
     .map((o) => o.key);
 
 describe('the post card', () => {
-  it('fits on a phone and answers to words', () => {
-    const text = renderCard(PLAN);
-    expect(text).toContain(
-      '@poster.example.social (UNKNOWN, 1,200 followers, blocks you) wrote this.',
+  it('stacks into short rows for a phone, and answers to words', () => {
+    expect(renderCard(PLAN)).toBe(
+      [
+        '@poster.example.social',
+        'unknown, 1.2k followers, blocks you',
+        '',
+        'engagers: 34',
+        'likers: 12',
+        'reposters: 3',
+        'quoters: 5',
+        'repliers: 14',
+        '',
+        'unknown: 28',
+        'peripheral: 4',
+        'connected: 1',
+        'protected: 1',
+        '',
+        'already on list: 5',
+        'block you: 3',
+        '',
+        'reply with: author · likers · unknowns · everyone · hostile',
+      ].join('\n'),
     );
-    expect(text).toContain(
-      '34 accounts engaged: 12 likes, 3 reposts, 5 quotes, 14 replies.',
-    );
-    expect(text).toContain(
-      'By band: 28 unknown, 4 peripheral, 1 connected, 1 protected.',
-    );
-    expect(text).toContain('5 already on the list, 3 already block you.');
-    expect(text).toContain(
-      'Reply with: author · likers · unknowns · everyone · hostile',
-    );
-    expect(text.length).toBeLessThan(400);
+    // No line wider than a phone bubble shows.
+    for (const line of renderCard(PLAN).split('\n')) {
+      expect(line.length).toBeLessThan(60);
+    }
   });
 
   it('says what it could not read, or that the read was cut short', () => {
@@ -81,10 +92,10 @@ describe('the post card', () => {
         ],
       }),
     ).toContain(
-      'Could not read 900 likes, 1 other engagement, so these counts cover part of the post. Send it again to retry.',
+      "couldn't read: 900 likes, 1 other engagement\nthese counts cover part of the post; send it again to retry",
     );
     expect(renderCard({ ...PLAN, truncated: true, unread: [] })).toContain(
-      'Not every engagement was read, so these counts cover part of the post.',
+      'not every engagement was read, so these counts cover part of the post',
     );
   });
 
@@ -95,13 +106,13 @@ describe('the post card', () => {
       truncated: true,
       unread: [{ kind: 'like', count: 900 }],
     });
-    expect(unread).toContain('Could not read 900 likes. Send it again to retry.');
-    expect(unread).not.toContain('Nobody has engaged');
+    expect(unread).toContain("couldn't read: 900 likes\nsend it again to retry");
+    expect(unread).not.toContain('nobody has engaged');
     const cut = renderCard({ ...empty, truncated: true, unread: [] });
-    expect(cut).toContain('Nobody found so far, and not every engagement was read.');
+    expect(cut).toContain('nobody found so far, and not every engagement was read');
     expect(cut).not.toContain('retry');
-    expect(cut).not.toContain('Nobody has engaged');
-    expect(renderCard(empty)).toContain('Nobody has engaged with it yet.');
+    expect(cut).not.toContain('nobody has engaged');
+    expect(renderCard(empty)).toContain('nobody has engaged with it yet');
   });
 
   it('counts a direct reply once', () => {
@@ -110,7 +121,7 @@ describe('the post card', () => {
       ...PLAN,
       engagements: { reply: 3, threadReply: 5 },
     });
-    expect(text).toContain('34 accounts engaged: 5 replies.');
+    expect(text).toContain('engagers: 34\nrepliers: 5\n');
   });
 
   it('offers only what would do something', () => {
@@ -124,7 +135,7 @@ describe('the post card', () => {
     // The author is already listed, nobody wrote anything, and "everyone"
     // would be the same as "unknowns".
     expect(offered(quiet)).toEqual(['likers', 'unknowns']);
-    expect(renderCard(quiet)).toContain('Reply with: likers · unknowns');
+    expect(renderCard(quiet)).toContain('reply with: likers · unknowns');
     // The rest are still understood: the reason it is not done, or the same
     // command under another word.
     const extra = Object.fromEntries(
@@ -143,7 +154,7 @@ describe('the post card', () => {
     expect(cardChoices(PLAN).find((o) => o.key === 'everyone').command).toBe(
       'approve 1c2d3e4f UNKNOWN,PERIPHERAL,CONNECTED',
     );
-    expect(renderCard(PLAN, { choices: [] })).not.toContain('Reply with');
+    expect(renderCard(PLAN, { choices: [] })).not.toContain('reply with');
   });
 
   it("writes the author by DID, and names them by handle while it verifies", () => {
