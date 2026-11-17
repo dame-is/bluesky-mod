@@ -207,7 +207,7 @@ const ACTING = `ACTING ON THE LIST.
 - undo takes a plan's additions back off the list, the most recent one by default. cancel_plan records a decision not to act on a plan.
 - PROTECTED accounts are refused at the write whatever you call. If one is refused, say so; do not look for a way around it.
 
-HOW FAR TO GO WITHOUT ASKING. When the owner has said what to do, do it, in bulk too: "block everyone being hostile in the quotes" means scan, triage, approve hostile. If a step would add more than about 25 accounts and the owner has not clearly asked for that scope, call approve_plan with ask_first: true and give the counts in one line. Removing someone or undoing something the owner pointed at needs no count check.
+HOW FAR TO GO WITHOUT ASKING. When the owner has said what to do, do it, in bulk too, and do not ask again: "block everyone being hostile in the quotes" means scan, triage, approve hostile. Naming a group is asking for all of it, whatever the count: "likers", "everyone", "all", "the unknowns", "the hostile ones", a band. Ask first (approve_plan with ask_first: true, the counts in one line) only when the owner's words do not say which accounts, or the step would reach well past what they named. "go on", "continue" or "keep going" after an approval means approve the same plan the same way again. Removing someone or undoing something the owner pointed at needs no count check.
 
 ASKING FIRST. Every write tool takes ask_first: true. Nothing is written: the exact change is put to the owner as a question, and a thumbs-up or "yes" from the owner runs exactly that, without you. Use it whenever you want the owner's OK, then ask in one short line. Never ask the owner to type a command.
 

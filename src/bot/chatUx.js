@@ -209,6 +209,10 @@ export function summaryText({ items, firstAt, lastAt }) {
 const nf = (n) => Number(n || 0).toLocaleString('en-US');
 const plural = (n, one, many) => `${nf(n)} ${n === 1 ? one : many}`;
 
+/** The card words shown under the card: ones that do something. */
+const shownKeys = (choices) =>
+  choices.filter((o) => o.command && !o.hidden).map((o) => o.key);
+
 /**
  * What a bare post gets instead of the agent or a numbered menu.
  *
@@ -274,17 +278,25 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
   } else {
     lines.push('Nobody has engaged with it yet.');
   }
-  const keys = choices.map((o) => o.key);
+  const keys = shownKeys(choices);
   if (keys.length) lines.push('', `Reply with: ${keys.join(' · ')}`);
   return lines.join('\n');
 }
 
 /**
  * The words the card answers to, each with the classic command it runs.
- * Only words that would do something: no "likers" on a post nobody liked.
+ *
+ * Only words that would do something are shown: no "likers" on a post nobody
+ * liked. The others are still understood, after the shown ones so a number
+ * still means the same option: one that cannot run carries `unavailable`,
+ * the reason it is not done, and "everyone" on a post where everyone left is
+ * UNKNOWN is `hidden` and runs what "unknowns" runs. So "likers and author",
+ * with the author already listed, adds the likers and says why the author was
+ * left, instead of being read as something the card does not know.
  */
 export function cardChoices(plan) {
   const out = [];
+  const extra = [];
   const a = plan.author;
   // Counts of who an approval could still ADD: an engager already on the
   // list is no reason to offer "everyone".
@@ -303,12 +315,26 @@ export function cardChoices(plan) {
       label: `Add the author ${name}`,
       command: `list add ${a.did}`,
     });
+  } else if (a) {
+    extra.push({
+      key: 'author',
+      unavailable: a.protectedReason
+        ? `protected (${a.protectedReason}), so not added`
+        : 'already on the list',
+    });
   }
   if (e.like) {
     out.push({
       key: 'likers',
       label: 'Add everyone who liked it',
       command: `approve ${plan.code} likers`,
+    });
+  } else {
+    extra.push({
+      key: 'likers',
+      unavailable: plan.engagements?.like
+        ? 'every liker is already on the list'
+        : 'nobody has liked it',
     });
   }
   if (b.UNKNOWN) {
@@ -327,6 +353,15 @@ export function cardChoices(plan) {
       label: 'Add everyone, every band but PROTECTED',
       command: `approve ${plan.code} ${bands.join(',')}`,
     });
+  } else if (b.UNKNOWN) {
+    extra.push({
+      key: 'everyone',
+      label: `Add the ${b.UNKNOWN} UNKNOWN accounts`,
+      command: `approve ${plan.code} UNKNOWN`,
+      hidden: true,
+    });
+  } else {
+    extra.push({ key: 'everyone', unavailable: 'nobody left to add' });
   }
   if (plan.withText) {
     out.push({
@@ -334,6 +369,11 @@ export function cardChoices(plan) {
       label: 'Read the replies and quotes, add the hostile ones',
       command: `hostile ${plan.code}`,
     });
+  } else {
+    extra.push({
+      key: 'hostile',
+      unavailable: 'no replies or quotes with words to read',
+    });
   }
-  return out;
+  return [...out, ...extra];
 }

@@ -1764,10 +1764,21 @@ async function withoutModel({
       if (keys) {
         const picked = keys.map((k) => offered.find((o) => o.key === k));
         await clearChoices(convoId);
-        const out = await runPending(
-          { commands: picked.map((o) => o.command) },
-          ctx,
-        );
+        // A word that names something already done, or nothing to do, gets
+        // its reason; the rest run, each command once.
+        const notes = picked
+          .filter((o) => !o.command)
+          .map((o) => `${o.key}: ${o.unavailable}`);
+        const commands = [
+          ...new Set(picked.filter((o) => o.command).map((o) => o.command)),
+        ];
+        if (!commands.length) {
+          await send(notes.join('\n'));
+          log('Answered a card', { keys: keys.join(','), ran: 0 });
+          return { convoId, card: keys.join(','), outcome: null };
+        }
+        const out = await runPending({ commands }, ctx);
+        if (notes.length) out.text = `${notes.join('\n')}\n\n${out.text}`;
         const outcome = pendingOutcome(out);
         await sendRun(send, convoId, out, { log });
         log('Answered a card', { keys: keys.join(','), ok: !out.failed });

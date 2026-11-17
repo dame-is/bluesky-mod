@@ -44,6 +44,12 @@ const PLAN = {
   },
 };
 
+/** The card words shown, the ones that run something. */
+const offered = (plan) =>
+  cardChoices(plan)
+    .filter((o) => o.command && !o.hidden)
+    .map((o) => o.key);
+
 describe('the post card', () => {
   it('fits on a phone and answers to words', () => {
     const text = renderCard(PLAN);
@@ -117,10 +123,20 @@ describe('the post card', () => {
     };
     // The author is already listed, nobody wrote anything, and "everyone"
     // would be the same as "unknowns".
-    expect(cardChoices(quiet).map((o) => o.key)).toEqual([
-      'likers',
-      'unknowns',
-    ]);
+    expect(offered(quiet)).toEqual(['likers', 'unknowns']);
+    expect(renderCard(quiet)).toContain('Reply with: likers · unknowns');
+    // The rest are still understood: the reason it is not done, or the same
+    // command under another word.
+    const extra = Object.fromEntries(
+      cardChoices(quiet)
+        .filter((o) => !o.command || o.hidden)
+        .map((o) => [o.key, o.unavailable ?? o.command]),
+    );
+    expect(extra).toEqual({
+      author: 'already on the list',
+      everyone: 'approve 1c2d3e4f UNKNOWN',
+      hostile: 'no replies or quotes with words to read',
+    });
     expect(cardChoices(PLAN).find((o) => o.key === 'likers').command).toBe(
       'approve 1c2d3e4f likers',
     );
@@ -151,7 +167,11 @@ describe('the post card', () => {
       ...PLAN,
       author: { ...PLAN.author, protectedReason: 'you follow them' },
     };
-    expect(cardChoices(p).map((o) => o.key)).not.toContain('author');
+    expect(offered(p)).not.toContain('author');
+    expect(cardChoices(p).find((o) => o.key === 'author')).toEqual({
+      key: 'author',
+      unavailable: 'protected (you follow them), so not added',
+    });
   });
 });
 
@@ -271,10 +291,7 @@ describe('a card on a post mostly dealt with already', () => {
     };
     // All but one CONNECTED account are on the list: no likers, no unknowns,
     // and "everyone" means that one account.
-    expect(cardChoices(plan).map((o) => o.key)).toEqual([
-      'everyone',
-      'hostile',
-    ]);
+    expect(offered(plan)).toEqual(['everyone', 'hostile']);
     expect(cardChoices(plan)[0].command).toBe('approve 1c2d3e4f CONNECTED');
   });
 });

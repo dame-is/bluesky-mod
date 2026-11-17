@@ -384,6 +384,40 @@ describe('the post card', () => {
     expect(sent[0]).toMatch(/Added 12/);
   });
 
+  it('runs the words it can, and says why it left the others', async () => {
+    // The screenshot case: the author is already listed, so "author" is not
+    // shown, and "likers and author" still adds the likers without a model.
+    plans.proposePlan.mockResolvedValue({
+      ...plan,
+      author: { ...plan.author, alreadyListed: true },
+    });
+    let { chat, sent } = chatWith([shared('m1', '')]);
+    await pass(chat);
+    expect(sent[0]).toContain('Reply with: likers · unknowns · everyone');
+    const generate = vi.fn();
+    ({ chat, sent } = chatWith([msg('m2', 'likers and author')]));
+    await pass(chat, { generate });
+    expect(generate).not.toHaveBeenCalled();
+    expect(plans.applyPlan).toHaveBeenCalledTimes(1);
+    expect(sent[0]).toMatch(/^author: already on the list\n\nAdded 12/);
+  });
+
+  it('takes "all" when every account left is UNKNOWN', async () => {
+    plans.proposePlan.mockResolvedValue({
+      ...plan,
+      byBand: { UNKNOWN: 7 },
+      engagements: { like: 6 },
+    });
+    let { chat, sent } = chatWith([shared('m1', '')]);
+    await pass(chat);
+    expect(sent[0]).not.toContain('everyone');
+    const generate = vi.fn();
+    ({ chat, sent } = chatWith([msg('m2', 'all')]));
+    await pass(chat, { generate });
+    expect(generate).not.toHaveBeenCalled();
+    expect(plans.applyPlan.mock.calls[0][2]).toEqual(['UNKNOWN']);
+  });
+
   it('blocks the author instead, when that is what a bare post means', async () => {
     config.value = { barePost: 'author' };
     const { chat } = chatWith([shared('m1', '')]);
