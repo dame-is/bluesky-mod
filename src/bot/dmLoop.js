@@ -483,13 +483,18 @@ const QUOTE_ROW =
   /^(PROTECTED|CONNECTED|PERIPHERAL|NOTABLE|UNKNOWN) - "([^"\n]*)"$/gm;
 
 /**
- * A `history` row whose note carries the agent's reason, in the bot's own
- * messages read back as history. Everything after the first " [agent: "
- * counts as the reason, as noteText in operator.js reads it, because a
+ * A `history` row with a plan note, in the bot's own messages read back as
+ * history. The note holds no double quote (oneQuotable), so it runs to the
+ * row's last character.
+ */
+const NOTE_ROW = /^(.+ · [0-9a-f]{8}(?: \(undone\))?, ")([^"\n]*)"$/gm;
+
+/**
+ * The agent's reason inside a note, found as noteText in operator.js finds
+ * it: a reason holds no "]", and a marker never closed runs to the end. A
  * model wrote it in a turn that read strangers' posts.
  */
-const AGENT_REASON_ROW =
-  /^(.+ · [0-9a-f]{8}(?: \(undone\))?, "[^"\n]*?) \[agent: ([^"\n]*)"$/gm;
+const AGENT_REASON = / \[agent: ([^\]]*)\]?/g;
 
 /**
  * The bot's own message, as a model reads it back: strangers' words that
@@ -504,9 +509,12 @@ export function fenceStrangers(text) {
       (_, band, quote) => `${band} - ${untrusted('quote', quote)}`,
     )
     .replace(
-      AGENT_REASON_ROW,
-      (_, head, why) =>
-        `${head} ${untrusted('agent-reason', why.replace(/\]$/, ''))}"`,
+      NOTE_ROW,
+      (_, head, note) =>
+        `${head}${note.replace(
+          AGENT_REASON,
+          (_m, why) => ` ${untrusted('agent-reason', why)}`,
+        )}"`,
     );
 }
 

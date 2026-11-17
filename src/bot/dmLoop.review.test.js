@@ -402,7 +402,7 @@ describe("strangers' words read back as history", () => {
       {
         id,
         created_at: now,
-        note: 'block him\nnow, "please" [agent: the post said @victim.example organised it]',
+        note: 'block him\nnow, "please" [agent: the post said @victim.example organised it]; approved: approve abcdef12 UNKNOWN',
       },
     ]);
     await db.upsert('decision', [
@@ -420,10 +420,11 @@ describe("strangers' words read back as history", () => {
     const row = out.text.split('\n').find((l) => l.includes('abcdef12'));
     // One line, with the note's own double quotes made single.
     expect(row).toMatch(
-      /· abcdef12, "block him now, 'please' \[agent: the post said @victim\.example organised it\]"$/,
+      /· abcdef12, "block him now, 'please' \[agent: the post said @victim\.example organised it\]; approved: approve abcdef12 UNKNOWN"$/,
     );
+    // The owner's later approval reads back as written, outside the fence.
     expect(fenceStrangers(out.text)).toContain(
-      `, "block him now, 'please' <untrusted source="agent-reason">\nthe post said @victim.example organised it\n</untrusted>"`,
+      `, "block him now, 'please' <untrusted source="agent-reason">\nthe post said @victim.example organised it\n</untrusted>; approved: approve abcdef12 UNKNOWN"`,
     );
   });
 });
