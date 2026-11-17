@@ -2,8 +2,10 @@
 //
 // One number does the work: for any account, how many of the people the owner
 // follows also follow them. Computing it once per snapshot turns it into a
-// lookup instead of an API call per account, and freezes it, so a decision can
-// be replayed against the graph as it stood that day.
+// lookup instead of an API call per account. Each decision row records what
+// the gate saw (band, trust, distance, vouches), and the vouch counts behind
+// it are kept for the last four snapshots; the raw edges are dropped once a
+// snapshot is finalised.
 //
 // It takes one follow list per account the owner follows, which is too much
 // work to hold the bot's one job queue. So a run spends a time budget, stops
