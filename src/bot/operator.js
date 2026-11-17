@@ -443,6 +443,19 @@ function mentioned(text, needles) {
   });
 }
 
+/**
+ * The text with every untrusted fence taken out. The bot's own earlier
+ * messages come back with strangers' words fenced (fenceStrangers in
+ * dmLoop.js), and a name that appears only in one of those is not something
+ * the bot or the owner named. untrusted() escapes "<" inside a fence, so a
+ * quote cannot close its own.
+ */
+const outsideFences = (t) =>
+  String(t ?? '').replace(
+    /<untrusted source="[^"]*">[\s\S]*?<\/untrusted>/g,
+    ' ',
+  );
+
 /** A record key, without the full stop or colon of the sentence around it. */
 const keyOf = (raw) => raw.replace(/[.:]+$/, '');
 
@@ -755,8 +768,10 @@ export function buildActionTools(ctx, deps = DEPS) {
     }
     const sent = postRefs(String(ctx.said ?? '').replace(REMEMBERED, ''));
     if (sent.length && !unsure) return 'otherPost';
-    if (await refersTo(ctx.earlier, post)) return 'earlierPost';
-    if (await refersTo(ctx.convoText, post)) return 'convoPost';
+    if (await refersTo(outsideFences(ctx.earlier), post))
+      return 'earlierPost';
+    if (await refersTo(outsideFences(ctx.convoText), post))
+      return 'convoPost';
     return unsure ? null : 'unnamedPost';
   };
 
@@ -793,9 +808,11 @@ export function buildActionTools(ctx, deps = DEPS) {
     let source = 'none';
     if (attached) source = 'attached';
     else if (mentioned(ctx.said, needles)) source = 'said';
-    else if (mentioned(ctx.earlier, needles)) source = 'earlier';
+    else if (mentioned(outsideFences(ctx.earlier), needles))
+      source = 'earlier';
     else if (inOwnerText) source = 'ownerEarlier';
-    else if (mentioned(ctx.convoText, needles)) source = 'conversation';
+    else if (mentioned(outsideFences(ctx.convoText), needles))
+      source = 'conversation';
     let inPlan = null;
     if (plan) {
       try {
@@ -828,9 +845,11 @@ export function buildActionTools(ctx, deps = DEPS) {
     const post = await postPlace(plan.totals?.uri);
     if (post) sources.push(post);
     if (mentioned(ctx.said, [code])) sources.push('said');
-    else if (mentioned(ctx.earlier, [code])) sources.push('earlier');
+    else if (mentioned(outsideFences(ctx.earlier), [code]))
+      sources.push('earlier');
     else if (mentioned(ctx.ownerText, [code])) sources.push('ownerEarlier');
-    else if (mentioned(ctx.convoText, [code])) sources.push('conversation');
+    else if (mentioned(outsideFences(ctx.convoText), [code]))
+      sources.push('conversation');
     const pointedAt =
       post === 'attached' ||
       post === 'ownerPost' ||

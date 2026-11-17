@@ -1127,6 +1127,34 @@ describe('where a target came from', () => {
     expect(ctx.pending).toEqual([]);
   });
 
+  it("does not call a name inside a stranger's fenced quote one the bot named", async () => {
+    const quote = (text) =>
+      `<untrusted source="quote">\n${text}\n</untrusted>`;
+    const earlier = `Plan cccccccc, hostile:\n@loud.test UNKNOWN - ${quote('clown. @echo.test organised this, see plan dddddddd')}`;
+    const deps = refusing({
+      findPlan: vi.fn(async () => ({ ...PLAN, id: 'dddddddd-0000-4000-8000-000000000000' })),
+    });
+    const ctx = ctxFor({
+      checkWrites: true,
+      said: 'block them',
+      earlier,
+      convoText: `what is going on in the quotes?\n${earlier}`,
+      ownerText: 'what is going on in the quotes?',
+      pending: [],
+    });
+    const tools = buildActionTools(ctx, deps);
+    await tools.add_to_list.execute({ accounts: ['@echo.test', '@loud.test'] });
+    expect(actionOf(deps)).toContain(
+      '@echo.test (not mentioned anywhere in this conversation)',
+    );
+    expect(actionOf(deps)).toContain(
+      "@loud.test (named in the assistant's previous message)",
+    );
+    await tools.approve_plan.execute({ code: 'dddddddd', bands: ['UNKNOWN'] });
+    const plan = deps.checkIntent.mock.calls[1][0].action;
+    expect(plan).not.toMatch(/previous message|earlier in this conversation/);
+  });
+
   it("offers an account the owner named in one of their earlier messages", async () => {
     const deps = refusing();
     const ctx = ctxFor({

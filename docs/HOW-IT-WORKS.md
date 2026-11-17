@@ -121,7 +121,7 @@ The only version of "act only on my commands" that survives that is one where th
 
 A shared post is treated like a typed handle: you put the record in the message, and its author is read out of the URI by code. Wording that might mean somebody else ("block whoever is in the replies") comes back naming the author and asking, rather than acting on a guess.
 
-Attacker-controlled strings (handles, display names, bios, post text) are fenced in `<untrusted>` tags before any model sees them, and the bot never puts a link or mention facet on text it didn't build. A mention would notify the person being discussed.
+Attacker-controlled strings (handles, display names, bios, post text) are fenced in `<untrusted>` tags before any model sees them in a tool result. The bot's own earlier DMs come back to the model as its own words. In them, code fences the quotes a label review prints and the agent's reasons in `history`, and the write check counts a name found only inside those fences as not mentioned. A handle or display name in a lookup report, and anything a model wrote, come back as written. The bot never puts a link or mention facet on text it didn't build. A mention would notify the person being discussed.
 
 ## Agent mode
 
