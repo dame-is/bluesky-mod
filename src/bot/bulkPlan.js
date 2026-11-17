@@ -407,7 +407,7 @@ export async function applyPlan(
 
   const again = `approve ${shortCode(plan.id)} ${[...wanted, ...(kinds || [])].join(',')}`;
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, rateLimited, already, vetoed, note } =
+  const { added, recorded, failed, rateLimited, already, vetoed, note } =
     await writeRows(agent, plan, slice, {
       uri,
       bot,
@@ -431,27 +431,31 @@ export async function applyPlan(
   const live = await liveCount(plan);
 
   if (rateLimited) {
-    const left = pending.length - added - already - vetoed;
+    const left = pending.length - added - recorded - already - vetoed;
     return {
       ok: true,
       added,
+      recorded,
       already,
       remaining: left,
       live,
-      message: `Added ${added}. Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
+      message: `Added ${added}.${recordedNote(recorded)} Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
     };
   }
 
-  const remaining = pending.length - added - already - failed - vetoed;
+  const remaining =
+    pending.length - added - recorded - already - failed - vetoed;
   return {
     ok: true,
     added,
+    recorded,
     failed,
     already,
     remaining,
     live,
     message:
       `Added ${added} to the list${failed ? `, ${failed} failed` : ''}.` +
+      recordedNote(recorded) +
       alreadyNote(already) +
       vetoNote(vetoed + refused) +
       note +
@@ -459,6 +463,16 @@ export async function applyPlan(
         ? ` ${remaining} left. Send "${again}" again to continue.`
         : ''),
   };
+}
+
+/**
+ * " Recorded 50 that an earlier approval wrote." when an approval found an
+ * earlier one's batch on the list and recorded it (see writeRows), nothing
+ * otherwise. Kept apart from "Added", so that two receipts never count one
+ * account twice.
+ */
+function recordedNote(n) {
+  return n ? ` Recorded ${n} that an earlier approval wrote.` : '';
 }
 
 /** " 3 were already on it." when some were, nothing when none were. */
@@ -575,11 +589,15 @@ const unmarked = (plan, r) => ({
  * list, and an undo takes the mark off. A stamp that fails twice stops the
  * run, since every batch after it would go unrecorded too.
  *
- * `note` is a sentence for the reply when the run stopped early for a reason
- * other than the rate limit.
+ * `added` counts the accounts this call wrote. `recorded` counts the ones an
+ * earlier call sent that this one found on the list and stamped, kept out of
+ * `added` so that two receipts never count one account twice. `note` is a
+ * sentence for the reply when the run stopped early for a reason other than
+ * the rate limit.
  */
 async function writeRows(agent, plan, rows, { uri, bot, via }) {
   let added = 0;
+  let recorded = 0;
   let failed = 0;
   let note = '';
   const veto = await protectedAmong(rows.map((r) => r.did));
@@ -601,7 +619,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
   }
   if (landed.length) {
     await upsert('decision', await stampRows(plan, landed, via));
-    added += landed.length;
+    recorded = landed.length;
   }
   const already = others.length;
   for (let i = 0; i < fresh.length && !stopping; i += BATCH) {
@@ -655,7 +673,15 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       // A rate limit means stop, not retry. The remaining budget is gone and
       // approving again in an hour is the correct backoff.
       if (RATE_LIMIT.test(String(err?.message || err))) {
-        return { added, failed, rateLimited: true, already, vetoed, note };
+        return {
+          added,
+          recorded,
+          failed,
+          rateLimited: true,
+          already,
+          vetoed,
+          note,
+        };
       }
       continue;
     }
@@ -687,7 +713,15 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
       break;
     }
   }
-  return { added, failed, rateLimited: false, already, vetoed, note };
+  return {
+    added,
+    recorded,
+    failed,
+    rateLimited: false,
+    already,
+    vetoed,
+    note,
+  };
 }
 
 /**
@@ -780,7 +814,7 @@ export async function applyPlanToTriage(
     ...(asOf ? [`asof=${asOf}`] : []),
   ].join(' ');
   const slice = pending.slice(0, PER_APPROVAL);
-  const { added, failed, rateLimited, already, vetoed, note } =
+  const { added, recorded, failed, rateLimited, already, vetoed, note } =
     await writeRows(agent, plan, slice, {
       uri,
       bot,
@@ -795,27 +829,31 @@ export async function applyPlanToTriage(
   // The batch the limit stopped is still pending, so it is not taken off
   // what is left.
   if (rateLimited) {
-    const left = pending.length - added - already - vetoed;
+    const left = pending.length - added - recorded - already - vetoed;
     return {
       ok: true,
       added,
+      recorded,
       already,
       remaining: left,
       live,
-      message: `Added ${added} that a model read as ${label}. Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
+      message: `Added ${added} that a model read as ${label}.${recordedNote(recorded)} Hit the write rate limit. Send "${again}" again in an hour for the remaining ${left}.`,
     };
   }
 
-  const remaining = pending.length - added - already - failed - vetoed;
+  const remaining =
+    pending.length - added - recorded - already - failed - vetoed;
   return {
     ok: true,
     added,
+    recorded,
     failed,
     already,
     remaining,
     live,
     message:
       `Added ${added} that a model read as ${label}${failed ? `, ${failed} failed` : ''}.` +
+      recordedNote(recorded) +
       alreadyNote(already) +
       vetoNote(vetoed + refused) +
       note +
@@ -1055,7 +1093,7 @@ export async function applyPlanToActors(
   const named = [...resolved.values()];
   const banned = named.filter((r) => r.band === 'PROTECTED').length;
   const toWrite = named.filter((r) => r.band !== 'PROTECTED' && !r.acted_at);
-  const { added, failed, rateLimited, already, vetoed, note } =
+  const { added, recorded, failed, rateLimited, already, vetoed, note } =
     await writeRows(agent, plan, toWrite, {
       uri,
       bot,
@@ -1068,12 +1106,12 @@ export async function applyPlanToActors(
 
   // As for a band approval: the batch the limit stopped is still pending.
   const remaining = rateLimited
-    ? toWrite.length - added - already - vetoed
+    ? toWrite.length - added - recorded - already - vetoed
     : 0;
   const parts = [
     rateLimited
-      ? `Added ${added} by name. Hit the write rate limit. Send "approve ${shortCode(plan.id)} ${actors.join(' ')}" again in an hour for the remaining ${remaining}.`
-      : `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${alreadyNote(already)}${note}`,
+      ? `Added ${added} by name.${recordedNote(recorded)} Hit the write rate limit. Send "approve ${shortCode(plan.id)} ${actors.join(' ')}" again in an hour for the remaining ${remaining}.`
+      : `Added ${added} by name${failed ? `, ${failed} failed` : ''}.${recordedNote(recorded)}${alreadyNote(already)}${note}`,
   ];
   if (banned + vetoed) parts.push(`${banned + vetoed} refused: PROTECTED.`);
   if (unknown.length) parts.push(`Not in this plan: ${unknown.join(', ')}.`);
@@ -1085,6 +1123,7 @@ export async function applyPlanToActors(
   return {
     ok: true,
     added,
+    recorded,
     already,
     remaining,
     message: parts.join(' '),

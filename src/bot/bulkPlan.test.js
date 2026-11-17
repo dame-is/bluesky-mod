@@ -366,7 +366,12 @@ describe('approve', () => {
     expect(repo.size).toBe(2);
 
     const again = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
-    expect(again).toMatchObject({ added: 2, already: 0 });
+    // Recorded, not added: this call wrote nothing, and the earlier one
+    // already reported them.
+    expect(again).toMatchObject({ added: 0, recorded: 2, already: 0 });
+    expect(again.message).toBe(
+      'Added 0 to the list. Recorded 2 that an earlier approval wrote.',
+    );
     // Not written a second time.
     expect(repo.size).toBe(2);
     expect(row(PLAN_A, 'did:plc:a')).toMatchObject({
@@ -412,7 +417,9 @@ describe('approve', () => {
     const again = await applyPlan(agent, db.plan[0], ['UNKNOWN']);
 
     expect(agent.com.atproto.repo.listRecords).toHaveBeenCalled();
-    expect(again).toMatchObject({ added: 2, already: 0 });
+    // did:plc:a is recorded from Constellation's answer; did:plc:c, which it
+    // has not indexed, is sent again.
+    expect(again).toMatchObject({ added: 1, recorded: 1, already: 0 });
     expect([...repo.values()].filter((d) => d === 'did:plc:a')).toHaveLength(1);
   });
 
@@ -431,7 +438,7 @@ describe('approve', () => {
     expect(row(PLAN_A, 'did:plc:a').undone_at).toBeTruthy();
   });
 
-  it('counts a batch it wrote but could not record as added, stops there, and records it on the next approval', async () => {
+  it('counts a batch it wrote but could not record as added, stops there, and records it on the next approval without counting it again', async () => {
     heldCopy();
     db.decision = Array.from({ length: 60 }, (_, i) =>
       scanned(PLAN_A, `did:plc:u${String(i).padStart(2, '0')}`, 'UNKNOWN'),
@@ -448,7 +455,16 @@ describe('approve', () => {
 
     db.failStamp = null;
     const again = await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
-    expect(again).toMatchObject({ added: 60, already: 0, remaining: 0 });
+    // The two receipts add up to the 60 accounts, not 110.
+    expect(again).toMatchObject({
+      added: 10,
+      recorded: 50,
+      already: 0,
+      remaining: 0,
+    });
+    expect(again.message).toBe(
+      'Added 10 to the list. Recorded 50 that an earlier approval wrote.',
+    );
     expect(repo.size).toBe(60);
     expect(db.decision.every((r) => r.acted_at)).toBe(true);
 
@@ -1188,6 +1204,25 @@ describe('a rate limit', () => {
     expect(out).toMatchObject({ added: 0, remaining: 2 });
     expect(out.message).toBe(
       'Added 0 that a model read as hostile. Hit the write rate limit. Send "approve 1c2d3e4f hostile" again in an hour for the remaining 2.',
+    );
+  });
+
+  it('does not count a batch it records from an earlier approval as left to add', async () => {
+    heldCopy();
+    db.decision = [
+      { ...scanned(PLAN_A, 'did:plc:h1', 'UNKNOWN'), triage: 'hostile' },
+      { ...scanned(PLAN_A, 'did:plc:h2', 'UNKNOWN'), triage: 'hostile' },
+      { ...scanned(PLAN_A, 'did:plc:h3', 'UNKNOWN'), triage: 'hostile' },
+    ];
+    // An earlier approval sent did:plc:h1 and lost the reply.
+    await applyPlanToActors(losesReply(bot()), db.plan[0], ['did:plc:h1']);
+    expect(repo.size).toBe(1);
+
+    const out = await applyPlanToTriage(limited(), db.plan[0], 'hostile');
+
+    expect(out).toMatchObject({ added: 0, recorded: 1, remaining: 2 });
+    expect(out.message).toBe(
+      'Added 0 that a model read as hostile. Recorded 1 that an earlier approval wrote. Hit the write rate limit. Send "approve 1c2d3e4f hostile" again in an hour for the remaining 2.',
     );
   });
 
