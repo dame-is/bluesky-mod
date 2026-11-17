@@ -284,6 +284,8 @@ describe('what undo and cancel say they do', () => {
         band: 'UNKNOWN',
         action: 'list_remove',
         acted_at: new Date(Date.now() + 1000).toISOString(),
+        // The next change after the approval's, as listWrite numbers it.
+        acted_seq: 2,
       },
     ]);
     const out = await run('undo');

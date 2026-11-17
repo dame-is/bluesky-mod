@@ -67,6 +67,9 @@ create table if not exists decision (
   vouches integer,
   action text,
   acted_at text,
+  -- The order changes reached the list in, which a clock stepped back
+  -- cannot reorder as it can acted_at. One number per write.
+  acted_seq integer,
   undone_at text,
   undo_reason text,
   approved_via text,

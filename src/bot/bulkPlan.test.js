@@ -49,15 +49,22 @@ function matches(row, { eq = {}, where = {} } = {}) {
 function query(table, opts = {}) {
   db.reads.push({ table, opts });
   let rows = (db[table] || []).filter((r) => matches(r, opts));
-  const [col, dir] = String(opts.order || '')
-    .split(',')[0]
-    .split('.');
-  if (col) {
-    rows = [...rows].sort((a, b) =>
-      dir === 'desc'
-        ? String(b[col]).localeCompare(String(a[col]))
-        : String(a[col]).localeCompare(String(b[col])),
-    );
+  // Every term in turn, a missing value highest, as db.js orders null
+  // (desc nulls first, asc nulls last).
+  const terms = String(opts.order || '')
+    .split(',')
+    .filter(Boolean)
+    .map((t) => t.split('.'));
+  const cmp = (x, y) =>
+    x == null ? (y == null ? 0 : 1) : y == null ? -1 : x < y ? -1 : x > y ? 1 : 0;
+  if (terms.length) {
+    rows = [...rows].sort((a, b) => {
+      for (const [col, dir] of terms) {
+        const c = cmp(a[col], b[col]) * (dir === 'desc' ? -1 : 1);
+        if (c) return c;
+      }
+      return 0;
+    });
   }
   return opts.limit ? rows.slice(0, opts.limit) : rows;
 }
@@ -110,6 +117,8 @@ vi.mock('./graphFacts.js', () => graph);
 const veto = { unreadable: false };
 vi.mock('./listWrite.js', () => ({
   listUri: () => LIST,
+  nextActedSeq: async () =>
+    Math.max(0, ...db.decision.map((r) => r.acted_seq ?? 0)) + 1,
   ownerOf: (uri) => /^at:\/\/(did:[^/]+)\//.exec(String(uri ?? ''))?.[1] ?? null,
   // A row marked `live` is a follow made since the last snapshot: only the
   // AppView knows it, so it is found only when follows are asked for.
@@ -684,7 +693,31 @@ describe('undo last', () => {
     ];
     expect((await lastChange()).plan.id).toBe(PLAN_A);
     const read = db.reads.find((r) => r.table === 'decision');
-    expect(read.opts).toMatchObject({ limit: 1, order: 'acted_at.desc' });
+    expect(read.opts).toMatchObject({
+      limit: 1,
+      order: 'acted_seq.desc,acted_at.desc',
+    });
+  });
+
+  it('goes by the order changes were made in, not by a clock that stepped back', async () => {
+    // Plan B's add came second, written while the clock read an hour early.
+    db.decision = [
+      added(PLAN_A, 'did:plc:a', '2026-10-01T12:00:00Z', { acted_seq: 1 }),
+      added(PLAN_B, 'did:plc:b', '2026-10-01T11:00:00Z', { acted_seq: 2 }),
+    ];
+    expect((await lastChange()).plan.id).toBe(PLAN_B);
+  });
+
+  it('numbers each batch it records, one number per write', async () => {
+    db.decision = [
+      added(PLAN_B, 'did:plc:old', '2026-10-01T09:00:00Z', { acted_seq: 4 }),
+      scanned(PLAN_A, 'did:plc:u1', 'UNKNOWN'),
+      scanned(PLAN_A, 'did:plc:u2', 'UNKNOWN'),
+    ];
+    await applyPlan(bot(), db.plan[0], ['UNKNOWN']);
+    expect(row(PLAN_A, 'did:plc:u1').acted_seq).toBe(5);
+    expect(row(PLAN_A, 'did:plc:u2').acted_seq).toBe(5);
+    expect((await lastChange()).plan.id).toBe(PLAN_A);
   });
 
   it('answers null when nothing is live', async () => {

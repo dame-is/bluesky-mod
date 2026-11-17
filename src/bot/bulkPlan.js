@@ -38,7 +38,12 @@ import {
 import { KINDS } from '../lib/command.js';
 import { select, selectAll, upsert, update, count } from './db.js';
 import { loadReference } from './reference.js';
-import { listUri, ownerOf, protectedAmong } from './listWrite.js';
+import {
+  listUri,
+  ownerOf,
+  protectedAmong,
+  nextActedSeq,
+} from './listWrite.js';
 import { evidenceUriFor } from './triage.js';
 import { closeAdds } from './closeAdds.js';
 import {
@@ -523,7 +528,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
     ).catch(() => {});
   }
   if (landed.length) {
-    await upsert('decision', stampRows(plan, landed, via));
+    await upsert('decision', await stampRows(plan, landed, via));
     added += landed.length;
   }
   const already = others.length;
@@ -580,7 +585,7 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
     );
     added += batch.length;
     try {
-      await upsert('decision', stampRows(plan, batch, via));
+      await upsert('decision', await stampRows(plan, batch, via));
     } catch (err) {
       note = ` ${batch.length} of them could not be recorded (${brief(err)}), so I stopped there. The same approval sent again records them.`;
       break;
@@ -591,17 +596,20 @@ async function writeRows(agent, plan, rows, { uri, bot, via }) {
 
 /**
  * Decision rows saying these accounts were added by this plan, stamped with
- * the current time. Without `via`, each row keeps the one it was marked with
+ * the current time and the next number in the order of changes (see
+ * nextActedSeq). Without `via`, each row keeps the one it was marked with
  * when it was sent.
  */
-function stampRows(plan, rows, via = null) {
+async function stampRows(plan, rows, via = null) {
   const now = new Date().toISOString();
+  const seq = await nextActedSeq();
   return rows.map((r) => ({
     plan_id: plan.id,
     did: r.did,
     band: r.band,
     action: 'list_add',
     acted_at: now,
+    acted_seq: seq,
     ...(via ? { approved_via: via } : {}),
   }));
 }
@@ -1010,7 +1018,8 @@ export async function lastChange() {
       acted_at: 'not.is.null',
       undone_at: 'is.null',
     },
-    order: 'acted_at.desc',
+    // By the order the changes were made in, which the clock cannot reorder.
+    order: 'acted_seq.desc,acted_at.desc',
     limit: 1,
   });
   const last = rows?.[0];
@@ -1201,7 +1210,7 @@ export async function undoPlan(
   });
   const landed = open.filter((r) => !r.acted_at && byDid.has(r.did));
   if (landed.length) {
-    await upsert('decision', stampRows(plan, landed));
+    await upsert('decision', await stampRows(plan, landed));
   }
   // An unconfirmed add not found on the list is left as it is: a later
   // approval writes it.

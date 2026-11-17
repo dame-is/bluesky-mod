@@ -349,6 +349,23 @@ export async function applyCommand(
 }
 
 /**
+ * The next number in the order changes reached the list. A bare "undo" reads
+ * the newest change by it rather than by acted_at, which a clock stepped back
+ * would put out of order. One process writes, through one job queue, so
+ * reading the highest is enough.
+ */
+export async function nextActedSeq() {
+  const [top] =
+    (await select('decision', {
+      select: 'acted_seq',
+      where: { acted_seq: 'not.is.null' },
+      order: 'acted_seq.desc',
+      limit: 1,
+    })) || [];
+  return (top?.acted_seq ?? 0) + 1;
+}
+
+/**
  * Record the write where "why am I on your list" is answered.
  *
  * A command is a plan of one, approved at the moment it was typed, so it goes
@@ -376,6 +393,7 @@ async function log(
   const now = new Date().toISOString();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
+      const seq = await nextActedSeq();
       await upsert('plan', [
         {
           id: planId,
@@ -392,6 +410,7 @@ async function log(
           band: band || 'UNSCORED',
           action,
           acted_at: now,
+          acted_seq: seq,
           approved_via: via,
           ...(already ? { already_listed: true } : {}),
         },
