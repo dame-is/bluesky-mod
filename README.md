@@ -16,7 +16,7 @@ With no AI model at all:
 
 - **Block and unblock by DM.** "block" with a shared post, a pasted link or a typed `@handle`. One account, no model involved, about a second.
 - **Scan a post.** `add likers <post>` (or `reposters`, `repliers`, `quoters`, `everyone`) collects who engaged, scores them, and proposes a batch. Nothing is added until you `approve <code> UNKNOWN` (or another band, or named accounts). `undo` takes a batch back off.
-- **A veto on people you know.** Accounts you follow, and members of curation lists you made, are PROTECTED. No path in the code can add them, including your own typed command.
+- **A veto on people you know.** Accounts you follow, and members of curation lists you made as of the last snapshot, are PROTECTED. No path in the code can add them, including your own typed command.
 - **A weekly re-score.** The bot re-scores everyone on the list and DMs you only when someone on it is no longer a stranger, or has left Bluesky.
 - **A decision log.** Every add and removal is recorded with your literal words, so "why is this person on the list" always has an answer, and `history @handle` shows it.
 
@@ -97,7 +97,7 @@ On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepse
 
 One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls. It holds other people's posts where a batch was sorted by tone. Treat the file as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
 
-The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off).
+The bot sends post text and handles to whichever model provider you configure, and the analyst's network lookups go to the Atmosphere MCP server at aturi.to (set `ATMOSPHERE=false` to turn that off). A post the analyst reads can try to steer those lookups. Lookups by URL or host are refused, but looking up a handle still reaches the host it names.
 
 ## Settings
 
