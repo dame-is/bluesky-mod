@@ -189,6 +189,21 @@ describe('with no model set up', () => {
   });
 });
 
+describe('asking about a post whose author cannot be looked up', () => {
+  it('says the lookup failed rather than that there is no author', async () => {
+    const cmd = parseCommand('block whoever is in the replies', {
+      embedUri: 'at://did:plc:author/app.bsky.feed.post/3abc',
+    });
+    const lookUp = async () => {
+      throw new Error('could not read profiles from Bluesky (HTTP 429)');
+    };
+    const out = await runCommand(cmd, {}, { canWrite: true, lookUp });
+    expect(out.text).toBe(
+      'That lookup failed: could not read profiles from Bluesky (HTTP 429)',
+    );
+  });
+});
+
 describe('an approval the parser refused', () => {
   it('says which word it could not place, and adds nobody', async () => {
     const write = { com: { atproto: { repo: {} } } };

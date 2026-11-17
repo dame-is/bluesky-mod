@@ -793,7 +793,16 @@ export async function runCommand(
   // post, so a handle that changes hands before the answer cannot redirect
   // them.
   if (cmd.fromPost && cmd.confirm) {
-    const found = lookUp ? await lookUp(cmd.actor).catch(() => null) : null;
+    // A lookup that failed (the AppView did not answer) is said as that, not
+    // as an author who does not exist.
+    let found = null;
+    try {
+      found = lookUp ? await lookUp(cmd.actor) : null;
+    } catch (err) {
+      return say(
+        `That lookup failed: ${String(err?.message || err).slice(0, 200)}`,
+      );
+    }
     if (!found) {
       return say('I could not resolve the author of that post.');
     }
