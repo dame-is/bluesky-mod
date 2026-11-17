@@ -579,8 +579,8 @@ export async function runCommand(
   // `undo` lands here only when handed a token meant as a code that is not
   // one: the answer names the token instead of undoing a plan nobody named.
   if (cmd.needsTarget) {
-    // An approval the parser could not read one way: its sentence names the
-    // word or the mix it refused.
+    // A command the parser could not read one way, an approval or a history
+    // name: its sentence says what it refused.
     if (cmd.refusal) return say(cmd.refusal);
     if (cmd.action === 'plan') {
       return say(nudge('post'));
