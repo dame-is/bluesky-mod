@@ -1378,7 +1378,6 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   const plan = await findPlan(code);
   if (!plan) return { text: `No plan with code ${code}.`, outcome: 'failed' };
   let out = null;
-  let failedReads = 0;
   // A round that labels nothing is failing, and another would fail the same.
   for (let round = 0; round < 3; round += 1) {
     out = await runTriage(plan, {
@@ -1388,9 +1387,12 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
       perCall: 1,
       perRun: HOSTILE_PER_ROUND,
     });
-    failedReads += failedReadsOf(out);
     if (!out.remaining || !out.labelled) break;
   }
+  // From the last round only. A round reads the lowest unlabelled posts, so
+  // it reads again every post the round before could not, and its count and
+  // reason are the posts still unread after all of them.
+  const failedReads = failedReadsOf(out);
   const added = await applyPlanToTriage(writeAgent, plan, 'hostile', {
     reason: `hostile ${code}`,
   });

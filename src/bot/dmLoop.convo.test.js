@@ -630,6 +630,53 @@ describe('a triage whose reads fail', () => {
       triage.runTriage = null;
     }
   });
+
+  /** A "yes" to a card's "hostile", with runTriage giving these rounds. */
+  async function hostileRounds(rounds) {
+    const left = rounds.map((r) => ({ ...failing(), ...r }));
+    triage.runTriage = async () => left.shift();
+    try {
+      const { chat, sent } = chatWith([msg('m1', 'yes')]);
+      await savePending('c1', {
+        commands: ['hostile 1c2d3e4f'],
+        describe: 'read the replies and add the hostile ones',
+        messageIds: ['x'],
+      });
+      await pass(chat);
+      expect(left).toEqual([]);
+      return sent.at(-1).text;
+    } finally {
+      triage.runTriage = null;
+    }
+  }
+
+  it('says nothing failed when a later round of "hostile" read what failed', async () => {
+    const text = await hostileRounds([
+      { labelled: 10, failed: 2, error: 'gateway 429', remaining: 8 },
+      { labelled: 8, failed: 0, error: null, remaining: 0 },
+    ]);
+    expect(text).not.toContain('could not be read');
+  });
+
+  it('counts a post the second model fails on every round once', async () => {
+    const text = await hostileRounds([
+      {
+        labelled: 7,
+        failed: 0,
+        secondWave: { failed: 5 },
+        error: 'model not found',
+        remaining: 5,
+      },
+      {
+        labelled: 0,
+        failed: 0,
+        secondWave: { failed: 5 },
+        error: 'model not found',
+        remaining: 5,
+      },
+    ]);
+    expect(text).toContain(' 5 could not be read: model not found.');
+  });
 });
 
 describe('"hostile" on a card', () => {
