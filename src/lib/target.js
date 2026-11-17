@@ -12,6 +12,7 @@
 
 import { APPVIEW } from '../constants.js';
 import { fetchWithTimeout } from './atproto.js';
+import { resolveMiniDoc } from './slingshot.js';
 
 /** `/profile/<actor>/post/<rkey>`, on any host, with or without trailing junk. */
 const WEB_POST = /\/profile\/([^/?#]+)\/post\/([^/?#]+)/;
@@ -51,6 +52,11 @@ export async function resolveHandle(
   { fetchImpl = fetchWithTimeout, signal, appview = APPVIEW } = {},
 ) {
   const url = `${appview}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`;
+  // When the AppView is down, Slingshot answers from its own copy, checked
+  // against the DID document both ways. Only then: "no such handle" from the
+  // AppView is an answer, and asking elsewhere could only contradict it.
+  const elsewhere = async () =>
+    (await resolveMiniDoc(handle, { signal }).catch(() => null))?.did ?? null;
   let res;
   try {
     res = await fetchImpl(url, {
@@ -58,13 +64,18 @@ export async function resolveHandle(
       signal,
     });
   } catch (cause) {
+    const did = signal?.aborted ? null : await elsewhere();
+    if (did) return did;
     throw new TargetError(`could not reach the AppView to resolve ${handle}`, {
       cause,
     });
   }
   if (!res.ok) {
+    const missing = res.status === 400 || res.status === 404;
+    const did = missing ? null : await elsewhere();
+    if (did) return did;
     throw new TargetError(
-      res.status === 400 || res.status === 404
+      missing
         ? `no account found for handle ${handle}`
         : `the AppView could not resolve ${handle} (HTTP ${res.status})`,
     );

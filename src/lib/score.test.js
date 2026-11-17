@@ -248,6 +248,51 @@ describe('createScorer against the AppView', () => {
     expect(scores.get(GONE).missing).toBe(true);
   });
 
+  it('reads a big scan a few batches at a time, and scores every account', async () => {
+    const dids = Array.from({ length: 400 }, (_, i) => `did:plc:many${String(i).padStart(4, '0')}`);
+    let live = 0;
+    let peak = 0;
+    const fetchImpl = vi.fn(async (url) => {
+      live += 1;
+      peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, 2));
+      live -= 1;
+      const u = new URL(url);
+      if (u.pathname.endsWith('getProfiles')) {
+        const profiles = u.searchParams.getAll('actors').map((did) => ({
+          did,
+          handle: `${did.slice(-4)}.test`,
+          followersCount: 10,
+        }));
+        return { ok: true, json: async () => ({ profiles }) };
+      }
+      const relationships = u.searchParams
+        .getAll('others')
+        .map((did) => ({ did, following: false, followedBy: false }));
+      return { ok: true, json: async () => ({ relationships }) };
+    });
+    const scores = await scorerWith(fetchImpl).score(dids);
+    expect(scores.size).toBe(400);
+    expect([...scores.values()].every((s) => !s.missing && s.band === 'UNKNOWN')).toBe(true);
+    // 16 profile batches and 14 relationship batches, never all at once.
+    expect(fetchImpl).toHaveBeenCalledTimes(30);
+    expect(peak).toBeGreaterThan(2);
+    expect(peak).toBeLessThanOrEqual(12);
+  });
+
+  it('scores nothing when one batch of many cannot be read', async () => {
+    const dids = Array.from({ length: 100 }, (_, i) => `did:plc:fail${String(i).padStart(4, '0')}`);
+    const fetchImpl = vi.fn(async (url) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('getProfiles') && u.searchParams.getAll('actors').includes('did:plc:fail0060')) {
+        return { ok: false, status: 400, json: async () => ({}) };
+      }
+      const key = u.pathname.endsWith('getProfiles') ? 'profiles' : 'relationships';
+      return { ok: true, json: async () => ({ [key]: [] }) };
+    });
+    await expect(scorerWith(fetchImpl).score(dids)).rejects.toThrow(/nothing was scored/);
+  });
+
   it('asks again after a rate limit or a server error', async () => {
     const fetchImpl = appview({
       profiles: [429, 503],

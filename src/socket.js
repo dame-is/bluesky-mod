@@ -19,6 +19,8 @@ import { logger } from './logger.js';
  * @param {(msg: object) => any} opts.onMessage  each parsed frame
  * @param {() => object} [opts.describe]     log fields for a connect
  * @param {() => any} [opts.onOpen]          each time a connection opens
+ * @param {() => any} [opts.onDown]          each time one stops: closed by
+ *   the server, recycled for liveness, or replaced
  * @returns {{ close(): void, reconnect(): void }}
  *   `reconnect` drops the connection and opens a new one at once, for a
  *   caller whose filter has changed.
@@ -29,6 +31,7 @@ export function connectSocket({
   onMessage,
   describe = () => ({}),
   onOpen = () => {},
+  onDown = () => {},
 }) {
   let ws = null;
   let backoff = config.reconnectBaseMs;
@@ -37,6 +40,14 @@ export function connectSocket({
   let closedByUs = false;
   /** Marks the live socket retired, so its late events are ignored. */
   let retireCurrent = () => {};
+
+  function down() {
+    try {
+      onDown();
+    } catch (err) {
+      logger.error('Down handler error', { stream: name, err });
+    }
+  }
 
   function teardown() {
     if (cycle) clearTimeout(cycle);
@@ -87,6 +98,7 @@ export function connectSocket({
     // socket's timer or pass on a stale event.
     let retired = false;
     retireCurrent = () => {
+      if (!retired) down();
       retired = true;
     };
 
@@ -95,6 +107,7 @@ export function connectSocket({
     cycle = setTimeout(() => {
       if (retired) return;
       retired = true;
+      down();
       logger.debug(`Cycling the ${name} connection for liveness`);
       teardown();
       retry();
@@ -135,6 +148,7 @@ export function connectSocket({
     sock.addEventListener('close', () => {
       if (retired) return;
       retired = true;
+      down();
       if (cycle) clearTimeout(cycle);
       cycle = null;
       if (closedByUs) return;

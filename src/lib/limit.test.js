@@ -29,6 +29,18 @@ describe('mapLimit', () => {
     expect(started).toEqual([1, 2]);
   });
 
+  it('starts nothing once the signal has fired, even in the first tick', async () => {
+    const controller = new AbortController();
+    const started = [];
+    await expect(
+      mapLimit([1, 2, 3, 4], 4, async (n) => {
+        started.push(n);
+        controller.abort(new Error('late'));
+      }, { signal: controller.signal }),
+    ).rejects.toThrow('late');
+    expect(started).toEqual([1]);
+  });
+
   it('handles an empty list', async () => {
     expect(await mapLimit([], 4, async () => 1)).toEqual([]);
   });

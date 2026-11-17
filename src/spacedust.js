@@ -87,8 +87,9 @@ export function spacedustUrl({
  * @param {() => string[]} [opts.subjects]
  * @param {(msg: object) => any} opts.onLink  each frame, as Spacedust sends it:
  *   { kind: 'link', link: { operation, source, source_record, subject } }
- * @param {() => any} [opts.onOpen]  each time a connection opens: what came
- *   before it may be missing
+ * @param {(subjects: string[]) => any} [opts.onOpen]  each time a connection
+ *   opens, with the records it asked for
+ * @param {() => any} [opts.onDown]  each time one stops
  * @returns {{ close(): void, refresh(): void }}
  */
 export function connectSpacedust({
@@ -96,6 +97,7 @@ export function connectSpacedust({
   subjects = () => [],
   onLink,
   onOpen = () => {},
+  onDown = () => {},
 }) {
   let asked = [];
   const sock = connectSocket({
@@ -105,7 +107,8 @@ export function connectSpacedust({
       return spacedustUrl({ subjectDids, subjects: asked });
     },
     onMessage: onLink,
-    onOpen,
+    onOpen: () => onOpen(asked),
+    onDown,
     describe: () => ({
       host: config.spacedustHost,
       dids: subjectDids.join(','),

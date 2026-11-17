@@ -11,21 +11,25 @@ export const APPVIEW_CONCURRENCY = 6;
 /**
  * `fn` over every item, at most `limit` at a time, results in input order.
  * The first rejection rejects the whole call, as Promise.all does, and no
- * further items are started after it.
+ * further items are started after it. Nor after `signal` fires: an item is
+ * never started once the caller has given up, even in the same tick as the
+ * first ones.
  *
  * @template T, R
  * @param {T[]} items
  * @param {number} limit
  * @param {(item: T, index: number) => Promise<R>} fn
+ * @param {{ signal?: AbortSignal }} [opts]
  * @returns {Promise<R[]>}
  */
-export async function mapLimit(items, limit, fn) {
+export async function mapLimit(items, limit, fn, { signal } = {}) {
   const out = new Array(items.length);
   let next = 0;
   let failed = false;
   const lanes = Math.max(1, Math.min(limit, items.length));
   async function lane() {
     while (!failed && next < items.length) {
+      signal?.throwIfAborted();
       const i = next;
       next += 1;
       try {

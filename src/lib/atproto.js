@@ -2,6 +2,7 @@
 // fetch with a ceiling, and a DID's PDS read from its DID document.
 
 import { PLC_DIRECTORY } from '../constants.js';
+import { resolveMiniDoc } from './slingshot.js';
 
 // A single request must never wedge a loop that waits on it, so every request
 // carries a 15s abort. A caller's own signal is kept as well, but it only
@@ -53,7 +54,16 @@ async function fetchJson(url, init) {
  * did:web document may write the id in full (`did:web:host#atproto_pds`).
  */
 export async function resolvePds(did) {
-  const doc = await getDidDocument(did);
+  let doc;
+  try {
+    doc = await getDidDocument(did);
+  } catch (err) {
+    // The directory is down or slow. Slingshot keeps a verified copy of the
+    // PDS for most accounts; without one, the directory's error stands.
+    const mini = await resolveMiniDoc(did);
+    if (mini?.pds) return mini.pds;
+    throw err;
+  }
   const services = Array.isArray(doc?.service) ? doc.service : [];
   const pds = services.find(
     (s) => typeof s?.id === 'string' && s.id.endsWith('#atproto_pds'),

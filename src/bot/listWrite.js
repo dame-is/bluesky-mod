@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
+import { mapLimit, chunks, APPVIEW_CONCURRENCY } from '../lib/limit.js';
 import { resolveActor } from '../lib/target.js';
 import { select, upsert } from './db.js';
 import { rkeysForWrite, noteListed, noteUnlisted } from './graphFacts.js';
@@ -97,11 +98,10 @@ async function fromTable(dids) {
  */
 async function followedNow(dids) {
   const out = new Set();
-  for (let i = 0; i < dids.length; i += REL_BATCH) {
-    const q = dids
-      .slice(i, i + REL_BATCH)
-      .map((d) => `others=${encodeURIComponent(d)}`)
-      .join('&');
+  // A few batches at once: an approval of 500 asks 17 of them before it
+  // writes anything. Any batch that cannot be read refuses the whole write.
+  await mapLimit(chunks(dids, REL_BATCH), APPVIEW_CONCURRENCY, async (batch) => {
+    const q = batch.map((d) => `others=${encodeURIComponent(d)}`).join('&');
     let body = null;
     try {
       const res = await fetchWithTimeout(
@@ -118,7 +118,7 @@ async function followedNow(dids) {
     for (const r of body.relationships) {
       if (r?.did && r.following) out.add(r.did);
     }
-  }
+  });
   return out;
 }
 

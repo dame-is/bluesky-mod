@@ -118,3 +118,54 @@ describe('createActivity', () => {
     expect(seen).toEqual(['did:plc:a1']);
   });
 });
+
+describe('coverage', () => {
+  const OTHER = 'at://did:plc:someone/app.bsky.feed.post/3kwatched';
+
+  it('covers nothing until the stream first opens, when made for the bot', () => {
+    let t = 0;
+    const a = createActivity({ now: () => t, coveredFromStart: false, ownerDid: OWNER });
+    t = 60 * 60_000;
+    expect(a.coversMs()).toBe(0);
+    expect(a.coveredSince(POST)).toBeNull();
+    a.opened([]);
+    t += 10 * 60_000;
+    expect(a.coversMs()).toBe(10 * 60_000);
+    expect(a.coveredSince(POST)).toBe(60 * 60_000);
+  });
+
+  it('holds through a reconnect inside the tolerance, and starts again after a longer one', () => {
+    let t = 0;
+    const a = createActivity({ now: () => t, coveredFromStart: false, ownerDid: OWNER });
+    a.opened([]);
+    t = 15 * 60_000;
+    a.closed();
+    t += 2_000;
+    a.opened([]);
+    expect(a.coversMs()).toBe(15 * 60_000 + 2_000);
+    a.closed();
+    t += 5 * 60_000;
+    // Still down past the tolerance: nothing can be vouched for.
+    expect(a.coversMs()).toBe(0);
+    a.opened([]);
+    t += 1_000;
+    expect(a.coversMs()).toBe(1_000);
+  });
+
+  it("covers someone else's post only from the connection that asked for it", () => {
+    let t = 0;
+    const a = createActivity({ now: () => t, coveredFromStart: false, ownerDid: OWNER });
+    a.opened([]);
+    t = 10 * 60_000;
+    expect(a.coveredSince(OTHER)).toBeNull();
+    a.closed();
+    t += 1_000;
+    a.opened([OTHER]);
+    expect(a.coveredSince(OTHER)).toBe(t);
+    // The owner's posts kept their longer cover through the quick reconnect.
+    expect(a.coveredSince(POST)).toBe(0);
+    // Dropped from the subscription, it is no longer covered.
+    a.opened([]);
+    expect(a.coveredSince(OTHER)).toBeNull();
+  });
+});

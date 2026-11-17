@@ -23,6 +23,7 @@ import {
   flattenSources,
 } from './constellation.js';
 import { isDid } from './target.js';
+import { mapLimit } from './limit.js';
 
 /** Constellation pages at 100; anything larger is silently clamped. */
 const PAGE = 100;
@@ -48,6 +49,14 @@ const MAX_PAGES = 60;
  * source past it is not read, and the harvest says it is not everyone.
  */
 const MAX_OTHER_SOURCES = 10;
+
+/**
+ * Sources paged at once. Each source's pages follow a cursor and must be read
+ * in turn, so a post's likes are the long pole; reading the replies, quotes
+ * and reposts beside them rather than after takes their time off the total.
+ * Kept small, because the public instance is shared.
+ */
+const SOURCE_CONCURRENCY = 3;
 
 /**
  * Map a Constellation source onto an engagement kind.
@@ -187,13 +196,20 @@ export async function harvestPost(uri, opts = {}) {
   let records = 0;
 
   let done = 0;
-  for (const src of live) {
-    const kind = engagementKind(src);
+  onProgress?.({ done, total: live.length, source: live[0]?.source ?? null });
+  const drained = await mapLimit(live, SOURCE_CONCURRENCY, async (src) => {
+    const out = await drainSource(uri, src.source, { signal, maxPages });
+    done += 1;
     onProgress?.({ done, total: live.length, source: src.source });
-    const { rows, truncated, failed } = await drainSource(uri, src.source, {
-      signal,
-      maxPages,
-    });
+    return out;
+  });
+  // Not handed the signal: an aborted harvest returns what it had, each source
+  // cut short and marked, as a read of one source after another did.
+  // Folded in the order the sources were listed, so participants come out the
+  // same however the reads finished.
+  live.forEach((src, i) => {
+    const kind = engagementKind(src);
+    const { rows, truncated, failed } = drained[i];
     for (const row of rows) {
       // A DID comes from whoever wrote the backlinked record, by way of the
       // index. One that is not DID syntax is nobody to block, and kept, it
@@ -215,8 +231,7 @@ export async function harvestPost(uri, opts = {}) {
     }
     sources.push({ ...src, kind, truncated, failed });
     if (failed) unread(kind, src.count);
-    done += 1;
-  }
+  });
   onProgress?.({ done, total: live.length, source: null });
 
   const participants = [...byDid.values()].map((p) => ({

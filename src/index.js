@@ -46,6 +46,7 @@ import { setOwnerHandle } from './constants.js';
 import { logger } from './logger.js';
 import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
+import { watchedUris } from './bot/watch.js';
 import { isAuthError, createReconnector } from './session.js';
 import { acquireLease, acquireDbLease, HEARTBEAT_MS } from './lease.js';
 import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
@@ -429,7 +430,8 @@ function scheduleWatching() {
           model: (await loadAgentConfig())?.model || model,
           everyMs: config.watchEveryMs,
           log: (msg, fields) => logger.info(msg, fields),
-        }),
+          activity: config.stream ? activity : null,
+        }).finally(() => dust?.refresh()),
       );
     }, config.watchEveryMs);
     if (watchTimer.unref) watchTimer.unref();
@@ -442,6 +444,7 @@ function scheduleWatching() {
           chat,
           convoFor: () => ownerConvo(chat),
           log: (msg, fields) => logger.info(msg, fields),
+          activity: config.stream ? activity : null,
         }),
       );
     }, config.alertEveryMs);
@@ -652,9 +655,12 @@ async function start() {
   if (config.stream) {
     dust = connectSpacedust({
       subjectDids: [config.ownerDid],
+      subjects: watchedUris,
       onLink: (msg) => activity.record(msg),
-      // No replay: what was said while the socket was down is not known.
-      onOpen: () => activity.gap(),
+      // No replay: what was said while the socket was down is not known, so
+      // the tracker counts its window from when the stream came back.
+      onOpen: (subjects) => activity.opened(subjects),
+      onDown: () => activity.closed(),
     });
   }
 

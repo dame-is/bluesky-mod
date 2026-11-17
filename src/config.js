@@ -219,10 +219,18 @@ export const config = {
    * quotes and replies, which gets a DM offering to watch it. MOD_ALERTS=false
    * stops it; MOD_ALERT_THRESHOLD (default 15 in an hour) sets what counts.
    */
+  //
+  // With the stream on, a check reads memory rather than the AppView, so it
+  // runs every two minutes instead of ten; the AppView is polled only while
+  // the stream has not covered the last hour.
   alertEveryMs:
     !readFlag('MOD_ALERTS', true) || !modelsEnabled()
       ? 0
-      : delay('MOD_ALERT_EVERY_MS', 10 * 60_000, { min: 60_000 }),
+      : delay(
+          'MOD_ALERT_EVERY_MS',
+          readFlag('MOD_STREAM', true) ? 2 * 60_000 : 10 * 60_000,
+          { min: 60_000 },
+        ),
 
   /**
    * How long a network digest may spend reading author feeds. When it runs

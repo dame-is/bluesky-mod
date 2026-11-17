@@ -96,6 +96,7 @@ export async function tickWatches({
   everyMs = WATCH_EVERY_MS,
   log = () => {},
   now = Date.now(),
+  activity = null,
 }) {
   const asking = new Map();
   const busy = async (convoId) => {
@@ -135,6 +136,7 @@ export async function tickWatches({
           generate: generateText,
           model,
           log,
+          activity,
         },
         { now },
       );
@@ -177,10 +179,11 @@ export async function tickAlerts({
   convoFor,
   log = () => {},
   now = Date.now(),
+  activity = null,
 }) {
   const convoId = await convoFor();
   if (!convoId || (await readPending(convoId, { now }))) return 0;
-  const alerts = await ownPostAlerts({ now });
+  const alerts = await ownPostAlerts({ now, activity });
   let sent = 0;
   for (const a of alerts) {
     try {
@@ -190,6 +193,7 @@ export async function tickAlerts({
       log('Offered a watch on a post taking off', {
         uri: a.uri,
         growth: a.growth,
+        from: activity?.coversMs() >= 3_600_000 ? 'stream' : 'poll',
       });
       break;
     } catch (err) {

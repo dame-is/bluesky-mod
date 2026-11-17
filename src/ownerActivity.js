@@ -22,6 +22,15 @@ export const KEEP_MS = 6 * 3_600_000;
 /** The most interactions held, so a vast pile-on cannot grow the heap without end. */
 export const MAX_EVENTS = 50_000;
 
+/**
+ * How long the stream may be down and still count as unbroken. The socket is
+ * recycled every quarter hour for liveness (socket.js) and comes back within
+ * a second or two; Spacedust also holds each link 21 seconds before sending
+ * it, so a short reconnect loses almost nothing. A longer outage starts the
+ * window again.
+ */
+export const GAP_TOLERANCE_MS = 30_000;
+
 /** When one record links several ways, the kind it counts as. */
 const PRIORITY = ['quote', 'reply', 'threadReply', 'mention'];
 
@@ -60,17 +69,32 @@ export function parseLink(msg) {
  * @param {() => number} [opts.now]
  * @param {number} [opts.keepMs]
  * @param {number} [opts.max]
+ * @param {boolean} [opts.coveredFromStart] count the window as whole from
+ *   creation. The bot's own starts uncovered, and is covered from the first
+ *   time the stream opens (`opened`).
+ * @param {string|null} [opts.ownerDid] whose posts the stream always covers;
+ *   anyone else's are covered from the connection that asked for them
  */
 export function createActivity({
   now = () => Date.now(),
   keepMs = KEEP_MS,
   max = MAX_EVENTS,
+  coveredFromStart = true,
+  ownerDid = null,
 } = {}) {
   /** record uri -> { kind, actor, record, posts:Set, at } in arrival order. */
   const byRecord = new Map();
-  let startedAt = now();
+  /** Since when the window is whole, or null for not at all. */
+  let startedAt = coveredFromStart ? now() : null;
+  /** When the stream stopped, while it is stopped. */
+  let downAt = null;
+  /** Records asked for by URI (a watched post), and since when each is covered. */
+  const subjectSince = new Map();
   let lastAt = null;
   const listeners = new Set();
+
+  /** Down past the tolerance: nothing before now can be vouched for. */
+  const broken = () => downAt !== null && now() - downAt > GAP_TOLERANCE_MS;
 
   function prune() {
     const cutoff = now() - keepMs;
@@ -78,7 +102,9 @@ export function createActivity({
       if (e.at >= cutoff && byRecord.size <= max) break;
       byRecord.delete(key);
       // What was dropped for room is no longer covered.
-      if (e.at >= cutoff) startedAt = Math.max(startedAt, e.at);
+      if (e.at >= cutoff && startedAt !== null) {
+        startedAt = Math.max(startedAt, e.at);
+      }
     }
   }
 
@@ -158,17 +184,58 @@ export function createActivity({
     },
 
     /**
-     * How far back the window is whole: since the stream (re)connected or the
-     * oldest dropped interaction, whichever is later. A consumer asking about
-     * an hour this does not cover falls back to a poll.
+     * How far back the window is whole: since the stream connected after its
+     * last real outage, or the oldest interaction dropped for room, whichever
+     * is later. 0 while the stream has never opened or has been down past
+     * the tolerance. A consumer asking about more than this falls back to a
+     * poll.
      */
     coversMs() {
+      if (startedAt === null || broken()) return 0;
       return now() - startedAt;
+    },
+
+    /**
+     * Since when interactions with this post have all been seen, or null.
+     * The owner's posts are covered as long as the stream is; a watched post
+     * of someone else's from the first connection that asked for it.
+     */
+    coveredSince(uri) {
+      if (startedAt === null || broken()) return null;
+      if (ownerDid && repoOf(uri) === ownerDid) return startedAt;
+      const since = subjectSince.get(uri);
+      return since === undefined ? null : Math.max(since, startedAt);
+    },
+
+    /**
+     * A connection opened, asking for these records by URI. After an outage
+     * past the tolerance, or the first time, the window starts again.
+     */
+    opened(subjects = []) {
+      const t = now();
+      if (startedAt === null || broken()) {
+        startedAt = t;
+        subjectSince.clear();
+      }
+      downAt = null;
+      const asked = new Set(subjects);
+      for (const uri of subjectSince.keys()) {
+        if (!asked.has(uri)) subjectSince.delete(uri);
+      }
+      for (const uri of asked) {
+        if (!subjectSince.has(uri)) subjectSince.set(uri, t);
+      }
+    },
+
+    /** The connection stopped. Coverage holds through a short reconnect. */
+    closed() {
+      if (downAt === null) downAt = now();
     },
 
     /** A gap in the stream: what came before it may be missing. */
     gap() {
       startedAt = now();
+      subjectSince.clear();
     },
 
     /** When the newest interaction arrived, or null. */
@@ -189,4 +256,7 @@ export function createActivity({
  * the alerts, watches and the shield. Empty, and covering nothing, while the
  * stream is off (MOD_STREAM=false).
  */
-export const activity = createActivity();
+export const activity = createActivity({
+  coveredFromStart: false,
+  ownerDid: process.env.MOD_OWNER_DID || null,
+});

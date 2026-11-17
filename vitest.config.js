@@ -15,6 +15,12 @@ export default defineConfig({
       AI_GATEWAY_API_KEY: 'test-key-not-real',
       // A second model, so the escalation paths are exercised.
       MOD_ESCALATION_MODEL: 'test/escalation',
+      // Slingshot reads with the global fetch, which the module mocks do not
+      // cover. Its own tests pass the base URL they want.
+      SLINGSHOT_URL: 'off',
+      // No stream: index.js is never started by a test, but nothing should
+      // think one is running.
+      MOD_STREAM: 'false',
     },
   },
 });

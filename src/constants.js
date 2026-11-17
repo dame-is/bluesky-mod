@@ -20,6 +20,16 @@ export const CONSTELLATION_URL = (
 ).replace(/\/$/, '');
 
 /**
+ * Record and identity cache (microcosm), used where the AppView or the PLC
+ * directory comes up short (lib/slingshot.js). "off" turns it off.
+ */
+export const SLINGSHOT_URL = (() => {
+  const raw = String(process.env.SLINGSHOT_URL ?? '').trim();
+  if (raw.toLowerCase() === 'off') return '';
+  return (raw || 'https://slingshot.microcosm.blue').replace(/\/$/, '');
+})();
+
+/**
  * The owner's handle, for prompts and messages. Read from the DID at startup
  * (setOwnerHandle), because a handle can change and the DID cannot.
  */
