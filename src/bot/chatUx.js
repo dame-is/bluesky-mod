@@ -77,8 +77,9 @@ export async function settle(chat, convoId, messageId, outcome) {
  * sentence the owner was shown.
  *
  * `background` marks a question nobody was talking to the bot about: a watch
- * digest or an alert, sent on a timer. There is one question per convo, so
- * those must never replace one asked in conversation. See questionOpen.
+ * digest or an alert, sent on a timer. There is one question per convo, and
+ * the timed loops ask only while none is open, so theirs never replaces
+ * another (see say in watching.js).
  */
 export async function savePending(
   convoId,
@@ -115,19 +116,6 @@ export async function readPending(convoId, { now = Date.now() } = {}) {
   const age = now - Date.parse(p.created_at);
   if (!(age >= -5 * 60_000 && age <= PENDING_TTL_MS)) return null;
   return p;
-}
-
-/**
- * Is a question from the conversation still waiting for the owner's answer?
- *
- * The timed loops ask this before saying anything that asks something. There
- * is one question per convo, so a digest that stored its own would make a
- * "yes" run the digest's approve instead of what the owner was asked, and a 👍
- * on the original question would match nothing.
- */
-export async function questionOpen(convoId, { now = Date.now() } = {}) {
-  const p = await readPending(convoId, { now });
-  return Boolean(p && !p.background);
 }
 
 export async function clearPending(convoId) {

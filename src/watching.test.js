@@ -116,15 +116,19 @@ describe('a timed message that asks something', () => {
     });
   });
 
-  it('replaces an earlier timed question', async () => {
+  it('keeps an earlier timed question, and offers no 👍 of its own', async () => {
+    // A 👍 on the first message has to keep doing what its line said.
     await say(chat(), 'convo1', {
       ...DIGEST,
       pending: ['approve aaaa1111 hostile'],
     });
-    await say(chat(), 'convo1', DIGEST);
-    expect((await readPending('convo1')).commands).toEqual([
-      'approve 1c2d3e4f hostile',
-    ]);
+    const c = chat();
+    await say(c, 'convo1', DIGEST);
+    expect(c.sent[0]).toBe(DIGEST.text);
+    expect(await readPending('convo1')).toMatchObject({
+      commands: ['approve aaaa1111 hostile'],
+      message_ids: ['m1'],
+    });
   });
 });
 
@@ -272,6 +276,55 @@ describe('the loops wait for an answer', () => {
     const c = chat();
     expect(await tickAlerts({ chat: c, convoFor: async () => null })).toBe(0);
     expect(watch.ownPostAlerts).not.toHaveBeenCalled();
+  });
+
+  it('holds a second digest for the same convo until the first is answered', async () => {
+    const a = { id: 'a', convo_id: 'convo1', uri: 'at://a' };
+    const b = { id: 'b', convo_id: 'convo1', uri: 'at://b' };
+    watch.liveWatches.mockResolvedValueOnce([a, b]);
+    watch.digestFor
+      .mockResolvedValueOnce({ ...DIGEST, pending: ['approve aaaa1111 hostile'] })
+      .mockResolvedValueOnce({ ...DIGEST, pending: ['approve bbbb2222 hostile'] });
+    const c = chat();
+    await tickWatches({
+      chat: c,
+      agent: {},
+      reference: async () => ({ io: { score: () => {} } }),
+      model: 'm',
+    });
+    expect(c.sent).toHaveLength(1);
+    expect(c.sent[0]).toMatch(/👍 or "yes" to:/);
+    expect(watch.digestSent).toHaveBeenCalledTimes(1);
+    expect(watch.digestSent).toHaveBeenCalledWith(a, expect.anything());
+    expect(await readPending('convo1')).toMatchObject({
+      commands: ['approve aaaa1111 hostile'],
+      message_ids: ['m1'],
+    });
+  });
+
+  it('offers one alert at a time', async () => {
+    watch.ownPostAlerts.mockResolvedValueOnce([
+      { uri: 'at://p1', growth: 20 },
+      { uri: 'at://p2', growth: 30 },
+    ]);
+    const c = chat();
+    expect(await tickAlerts({ chat: c, convoFor: async () => 'convo1' })).toBe(
+      1,
+    );
+    expect(c.sent).toHaveLength(1);
+    expect(watch.alertSent).toHaveBeenCalledTimes(1);
+    expect((await readPending('convo1')).commands).toEqual(['watch at://p1']);
+  });
+
+  it('holds an alert while a digest question is open', async () => {
+    await say(chat(), 'convo1', DIGEST);
+    watch.ownPostAlerts.mockResolvedValueOnce([{ uri: 'at://p', growth: 20 }]);
+    const c = chat();
+    expect(await tickAlerts({ chat: c, convoFor: async () => 'convo1' })).toBe(
+      0,
+    );
+    expect(c.sent).toEqual([]);
+    expect(watch.alertSent).not.toHaveBeenCalled();
   });
 
   it('sends an alert when nothing is waiting', async () => {
