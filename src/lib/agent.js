@@ -1,8 +1,8 @@
 // The analyst: it reads the scoring gate's output and explains it in a
 // sentence the owner can act on. It decides nothing. Bands come from score.js
 // and the follow graph, and nothing here can move an account between them,
-// which keeps the decision log replayable. A model's verdict in that log could
-// not be reproduced later.
+// so every band in the decision log comes from a fixed rule. A model's
+// verdict in that log could not be checked against anything later.
 //
 // This model reads text written by the people it analyses: handles, display
 // names, bios, posts. Injection strings aimed at scrapers and other bots are

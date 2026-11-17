@@ -39,10 +39,10 @@ export const KINDS = {
  * toxicity invites a precision nobody has, and the only line that carries
  * weight is between attacking a person and attacking an argument.
  *
- * NOT BANDS. A band comes from the follow graph and is reproducible against a
- * snapshot; these come from a model reading text and are reproducible by
- * nobody. They are kept apart everywhere: different column, different approval,
- * a different `approved_via` in the log.
+ * NOT BANDS. A band comes from the follow graph by a fixed rule; these come
+ * from a model reading text and are reproducible by nobody. They are kept
+ * apart everywhere: different column, different approval, a different
+ * `approved_via` in the log.
  */
 export const LABELS = ['hostile', 'arguing', 'neutral'];
 

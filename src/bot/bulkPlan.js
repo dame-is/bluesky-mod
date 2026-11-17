@@ -757,10 +757,10 @@ const within = (r, { bands = null, asOf = null } = {}) =>
 /**
  * Add the accounts a content triage gave this label.
  *
- * Recorded as `approved_via: triage:<label>`, never as a band. A band is
- * reproducible from the snapshot; this is a model reading that nobody can
- * reproduce, so the log says which one it was. `bands` and `asOf` narrow it
- * (see within). `reason` is kept in the plan's note (see noteWithReason).
+ * Recorded as `approved_via: triage:<label>`, never as a band. A band comes
+ * from the follow graph by a fixed rule; this is a model reading that nobody
+ * can reproduce, so the log says which one it was. `bands` and `asOf` narrow
+ * it (see within). `reason` is kept in the plan's note (see noteWithReason).
  */
 export async function applyPlanToTriage(
   agent,

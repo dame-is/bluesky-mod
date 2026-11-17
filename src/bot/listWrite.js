@@ -235,9 +235,9 @@ export async function applyCommand(
     };
   }
 
-  // Scored before the write, so the log records what the gate saw rather than
-  // UNSCORED, and the decision can be replayed. Best effort: a scoring failure
-  // must not stop the owner acting.
+  // Scored before the write, so the log records the band the gate gave rather
+  // than UNSCORED. Best effort: a scoring failure must not stop the owner
+  // acting.
   //
   // In parallel with the veto (the table and one AppView request) and the
   // membership check. The membership check is one Constellation request

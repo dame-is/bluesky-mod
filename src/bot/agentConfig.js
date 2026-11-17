@@ -8,8 +8,9 @@
 // `style` replaces the voice block and `guidance` is appended after the rules
 // as standing instructions. Neither can remove what the bands mean, the
 // untrusted-input handling or the length budgets. Those come earlier in the
-// same prompt and stay in version control, because they keep the decision log
-// replayable and the reply well-formed (systemPromptFor in src/lib/agent.js).
+// same prompt and stay in version control, because they keep each band in
+// the decision log meaning one thing and the reply well-formed
+// (systemPromptFor in src/lib/agent.js).
 //
 // A file that stops parsing, or cannot be read, keeps the last good copy. A
 // broken edit should not drop the bot back to its defaults mid-conversation,

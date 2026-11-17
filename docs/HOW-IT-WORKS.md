@@ -42,7 +42,7 @@ At the write it also asks the AppView whether you follow the account at that mom
 
 ### The snapshot
 
-Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. Each decision row records what the gate saw (band, trust, distance and vouches), and the vouch counts behind it are kept for the last four snapshots.
+Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. A plan's decision rows record what the gate saw (band, trust, distance and vouches), and a single block or unblock records the band. The vouch counts behind them are kept for the last four snapshots.
 
 Known limits:
 
@@ -181,7 +181,7 @@ This is still a bulk sweep, with a model's reading in place of the follow graph.
 
 A card's `hostile` and an auto watch add without anyone reading the quotes first, so there each post gets a model call of its own and can sway no label but its own. A card's `hostile` reads up to 36 posts and says how many it left for `triage <code>`.
 
-**A label is not a band, anywhere.** Bands come from the follow graph and are reproducible. A model's verdict is reproducible by nobody, so it lives in its own column and is approved by its own command.
+**A label is not a band, anywhere.** Bands come from the follow graph by a fixed rule. A model's verdict is reproducible by nobody, so it lives in its own column and is approved by its own command.
 
 ## Public mentions
 
@@ -207,7 +207,7 @@ An optional `config/bot.json` (see `config/bot.example.json`):
 | `limits` | `maxTurns`, `maxSteps`, `historyHours`, `reviewRows`, each clamped to a range |
 | `barePost` | `card` or `author`, agent mode only |
 
-Nothing in the file can change what the bands mean, how untrusted text is handled, or the message length budgets. Those stay in code, because they are what keep the decision log replayable and the replies valid.
+Nothing in the file can change what the bands mean, how untrusted text is handled, or the message length budgets. Those stay in code, so a band in the decision log means the same thing whenever it was written, and the replies stay valid.
 
 Mount it read-only, as `compose.yaml` does, so that whoever takes over the bot process cannot also rewrite the instructions it runs under.
 

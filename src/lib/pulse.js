@@ -4,7 +4,7 @@
 // part of. This module answers it for a slice they chose: the accounts they
 // follow, a custom feed, or a list. It fetches, windows and selects. What the
 // posts mean is left to the analyst, and who anyone is stays in score.js,
-// where it can be replayed.
+// where it is decided by rule.
 //
 // The circle is read by fanning out over public author feeds rather than
 // calling getTimeline, which answers as the viewer and so would need the
