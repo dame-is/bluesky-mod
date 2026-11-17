@@ -18,14 +18,19 @@ import crypto from 'node:crypto';
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
+import { mapLimit, chunks, APPVIEW_CONCURRENCY } from '../lib/limit.js';
 import { resolveActor } from '../lib/target.js';
 import { select, upsert } from './db.js';
 import { rkeysForWrite, noteListed, noteUnlisted } from './graphFacts.js';
 import { closeAdds } from './closeAdds.js';
+import { listScope } from './planList.js';
+import { listName } from './lists.js';
+import { multiListOn } from '../lib/listChoice.js';
 
 /**
- * Which list a command acts on: MOD_LIST_URI, a list the moderator account
- * owns. There is no default; config.js refuses to start without it.
+ * The primary list: MOD_LIST_URI, a list the moderator account owns. The only
+ * list with multi-list mode off; with it on, list 1 of several, and the one a
+ * plan made before the mode existed went to (planList.js).
  */
 export function listUri() {
   return process.env.MOD_LIST_URI || '';
@@ -97,11 +102,10 @@ async function fromTable(dids) {
  */
 async function followedNow(dids) {
   const out = new Set();
-  for (let i = 0; i < dids.length; i += REL_BATCH) {
-    const q = dids
-      .slice(i, i + REL_BATCH)
-      .map((d) => `others=${encodeURIComponent(d)}`)
-      .join('&');
+  // A few batches at once: an approval of 500 asks 17 of them before it
+  // writes anything. Any batch that cannot be read refuses the whole write.
+  await mapLimit(chunks(dids, REL_BATCH), APPVIEW_CONCURRENCY, async (batch) => {
+    const q = batch.map((d) => `others=${encodeURIComponent(d)}`).join('&');
     let body = null;
     try {
       const res = await fetchWithTimeout(
@@ -118,7 +122,7 @@ async function followedNow(dids) {
     for (const r of body.relationships) {
       if (r?.did && r.following) out.add(r.did);
     }
-  }
+  });
   return out;
 }
 
@@ -177,6 +181,9 @@ export async function protectedAmong(dids, { follows = true } = {}) {
  *   typed verb; 'agent' is agent mode acting on what they wrote in words. Both
  *   are their say-so, and the log still has to tell them apart: one is their
  *   literal target and the other is a model's reading of their sentence.
+ * @param {string} [opts.list]  the list to write to, in multi-list mode; the
+ *   primary list otherwise. Checked here like the primary: only a list in the
+ *   bot's own repo is ever written.
  * @returns {Promise<{ ok: boolean, message: string, did?: string,
  *   changed?: boolean, already?: boolean, vetoed?: string, account?: object,
  *   logged?: boolean }>}
@@ -190,22 +197,25 @@ export async function applyCommand(
   agent,
   action,
   actor,
-  { raw = '', band = null, lookUp = null, via = 'command' } = {},
+  { raw = '', band = null, lookUp = null, via = 'command', list = null } = {},
 ) {
   // Anything else would fall through to the removal below.
   if (action !== 'list_add' && action !== 'list_remove') {
     throw new Error(`applyCommand: unknown action ${action}`);
   }
-  const uri = listUri();
+  const uri = list || listUri();
   const bot = agent.session?.did;
+  // How a reply names the list: "the list" with one, its name with several.
+  const where = multiListOn() ? listName(uri) : 'the list';
 
   // config.js checks this at start. Checked again here because a permission
   // failure from the PDS would say nothing useful.
   if (ownerOf(uri) !== bot) {
     return {
       ok: false,
-      message:
-        'MOD_LIST_URI is not a list this account owns, so I cannot write to it.',
+      message: list
+        ? 'That list is not one this account owns, so I cannot write to it.'
+        : 'MOD_LIST_URI is not a list this account owns, so I cannot write to it.',
     };
   }
 
@@ -274,6 +284,7 @@ export async function applyCommand(
       // them on first leaves them where the owner's own words put them.
       const logged = await log(did, 'list_add', raw, scored, via, {
         already: true,
+        list: uri,
       });
       return {
         ok: true,
@@ -282,7 +293,7 @@ export async function applyCommand(
         changed: false,
         account,
         logged,
-        message: `${actor} was already on the list.`,
+        message: `${actor} was already on ${where}.`,
       };
     }
     const created = await agent.com.atproto.repo.createRecord({
@@ -302,16 +313,17 @@ export async function applyCommand(
         .split('/')
         .pop(),
     );
-    const logged = await log(did, 'list_add', raw, scored, via);
+    const logged = await log(did, 'list_add', raw, scored, via, { list: uri });
     return {
       ok: true,
       did,
       changed: true,
       account,
       logged,
+      list: uri,
       message: logged
-        ? `Added ${actor} to the list.`
-        : `Added ${actor} to the list, but I could not record it, so undo and history will not find it. "unblock ${actor}" takes it back.`,
+        ? `Added ${actor} to ${where}.`
+        : `Added ${actor} to ${where}, but I could not record it, so undo and history will not find it. "unblock ${actor}" takes it back.`,
     };
   }
 
@@ -320,7 +332,7 @@ export async function applyCommand(
       ok: false,
       did,
       account,
-      message: `I could not check whether ${actor} is on the list, so I changed nothing.`,
+      message: `I could not check whether ${actor} is on ${where}, so I changed nothing.`,
     };
   }
   if (!rkeys.length) {
@@ -330,7 +342,7 @@ export async function applyCommand(
       already: true,
       changed: false,
       account,
-      message: `${actor} was not on the list.`,
+      message: `${actor} was not on ${where}.`,
     };
   }
   // Every copy: an account two plans both added has two listitems.
@@ -352,17 +364,22 @@ export async function applyCommand(
   // Close the decisions that put them on, or "undo last" keeps choosing the
   // plan that added them. Best effort, like the log below: the listitems are
   // already gone, and that is what the owner asked for.
-  await closeAdds(did, raw || 'unblocked').catch(() => {});
-  const logged = await log(did, 'list_remove', raw, scored, via);
+  await closeAdds(did, raw || 'unblocked', { list: listScope(uri) }).catch(
+    () => {},
+  );
+  const logged = await log(did, 'list_remove', raw, scored, via, {
+    list: uri,
+  });
   return {
     ok: true,
     did,
     changed: true,
     account,
     logged,
+    list: uri,
     message: logged
-      ? `Removed ${actor} from the list.`
-      : `Removed ${actor} from the list, but I could not record it, so history will not show it.`,
+      ? `Removed ${actor} from ${where}.`
+      : `Removed ${actor} from ${where}, but I could not record it, so history will not show it.`,
   };
 }
 
@@ -405,7 +422,7 @@ async function log(
   raw,
   band,
   via = 'command',
-  { already = false } = {},
+  { already = false, list = null } = {},
 ) {
   const planId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -419,6 +436,11 @@ async function log(
           approved_at: now,
           approved_bands: [via],
           note: raw,
+          // Which list, in multi-list mode, so undo and history know. Left
+          // out with one list, where null already means MOD_LIST_URI.
+          ...(list && (multiListOn() || list !== listUri())
+            ? { list_uri: list }
+            : {}),
         },
       ]);
       await upsert('decision', [

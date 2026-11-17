@@ -11,6 +11,7 @@
 // a field this code produced. So every substituted value is flattened to one
 // line and capped before it is used.
 
+import { multiListOn } from './listChoice.js';
 import { accountLine, rows, stack } from './stack.js';
 
 /**
@@ -164,11 +165,42 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
     '  unblock @handle           take them back off',
     '  undo                      take back the last change when it was an add',
   ];
+  // The owner's own posts. Only the owner may run these; the shield says so
+  // to a writer who tries.
+  const shield = [
+    '',
+    'your own posts',
+    '  shield                    what is on, and what I have limited',
+    '  close replies <post>      only people you follow and mention can reply',
+    '  no quotes <post>          turn quote posts off (open / enable undo them)',
+    '  shields up / shields down lock every recent post, then put it all back',
+    '  guard <post>              close replies or quotes by itself if strangers pile on',
+    '  (send one of your posts alone for everything I can do with it)',
+  ];
+  // Multi-list mode only: with one list there is nothing to choose.
+  const lists = [
+    '',
+    'your lists',
+    '  lists                     your lists, numbered',
+    '  new list <name>           make another moderation list',
+    '  block @handle to spam     name the list, by name or number',
+    '  A block or approval that names none asks "Which list?"; answer 1, 2, 3.',
+  ];
   const tail = [
     '',
     'Replies that end in a numbered menu take a number instead of retyping.',
   ];
-  return [...reads, ...(canWrite ? writes : []), ...tail].join('\n');
+  const listing = multiListOn()
+    ? canWrite
+      ? lists
+      : lists.slice(0, 3)
+    : [];
+  return [
+    ...reads,
+    ...(canWrite ? [...writes, ...shield] : []),
+    ...listing,
+    ...tail,
+  ].join('\n');
 }
 
 /**

@@ -41,6 +41,7 @@ import {
   shortCode,
 } from './bulkPlan.js';
 import { runTriage, evidenceUriFor } from './triage.js';
+import { multiListOn } from '../lib/listChoice.js';
 
 /** How often a watched post is read again. */
 export const WATCH_EVERY_MS = 5 * 60_000;
@@ -48,6 +49,19 @@ export const WATCH_EVERY_MS = 5 * 60_000;
 const DIGEST_EVERY_MS = 60 * 60_000;
 /** Engagement worth reading on a watched post. */
 const READ_KINDS = ['quote', 'reply', 'threadReply'];
+/**
+ * The longest a watch goes without reading its post from Constellation, even
+ * when the stream says nothing new arrived. The stream has no replay and can
+ * drop a link without anyone noticing; this bounds what such a drop costs.
+ */
+export const FULL_READ_EVERY_MS = 30 * 60_000;
+
+/**
+ * Posts being watched, as last read, that the stream must ask about by URI:
+ * everyone's but the owner's, whose posts it follows already by their DID.
+ */
+let watching = [];
+export const watchedUris = () => watching;
 
 const hoursLeft = (w, now) =>
   Math.max(0, Math.round((Date.parse(w.until) - now) / 3_600_000));
@@ -60,13 +74,41 @@ export async function liveWatches({ now = Date.now() } = {}) {
     is: { stopped_at: 'null' },
     order: 'created_at.desc',
   });
-  return (rows || []).filter((w) => Date.parse(w.until) > now);
+  const live = (rows || []).filter((w) => Date.parse(w.until) > now);
+  watching = [
+    ...new Set(live.map((w) => w.uri).filter((u) => ownerOf(u) !== OWNER_DID)),
+  ];
+  return live;
+}
+
+/**
+ * Nothing new on this post since the watch last read it, by the stream's
+ * account, and the last full read recent enough to trust that. Only when the
+ * stream has covered the post without a break since then: a gap, or a post
+ * the stream did not ask about yet, means reading it.
+ */
+export function quietSinceLastRead(watch, activity, { now = Date.now() } = {}) {
+  if (!activity) return false;
+  const last = Date.parse(watch.last_checked_at ?? '');
+  const full = Date.parse(watch.stats?.lastReadAt ?? '');
+  if (!Number.isFinite(last) || !Number.isFinite(full)) return false;
+  if (now - full >= FULL_READ_EVERY_MS) return false;
+  const since = activity.coveredSince(watch.uri);
+  if (since === null || since > last) return false;
+  return (
+    activity.events({ post: watch.uri, kinds: READ_KINDS, sinceMs: now - last })
+      .length === 0
+  );
 }
 
 /**
  * Start watching, or extend and re-mode a watch already running on that post.
  * `code` is the watch's own plan, which holds what the watch adds, so undo
  * and cancel take it. `plan` is the baseline scan on a new watch.
+ *
+ * `list` is where a watch that blocks as it goes adds, in multi-list mode:
+ * its plan is bound to it from the start. A running watch whose plan is
+ * bound already keeps its list; `list` on the result says which it is.
  *
  * @returns {Promise<{ watch, plan, code: string|null, extended: boolean }>}
  */
@@ -77,6 +119,7 @@ export async function startWatch({
   auto = false,
   now = Date.now(),
   signal,
+  list = null,
 }) {
   const resolved = await resolveTarget(target);
   // A watch reads a post's quotes and replies. A list's members or a feed's
@@ -92,11 +135,16 @@ export async function startWatch({
   if (running) {
     await update('watch', { eq: { id: running.id } }, { until, mode });
     const plan = running.plan_id ? await findPlanById(running.plan_id) : null;
+    if (plan && list && !plan.list_uri) {
+      await update('plan', { eq: { id: plan.id } }, { list_uri: list });
+      plan.list_uri = list;
+    }
     return {
       watch: { ...running, until, mode },
       plan,
       code: running.plan_id ? shortCode(running.plan_id) : null,
       extended: true,
+      list: plan?.list_uri || list,
     };
   }
   // The baseline: everyone so far, scored, with what they wrote, as a scan
@@ -117,6 +165,7 @@ export async function startWatch({
       approved_bands: null,
       totals: { uri: resolved.uri, kind: 'watch' },
       note: `watch of ${resolved.uri}`,
+      ...(list ? { list_uri: list } : {}),
     },
   ]);
   const watch = {
@@ -143,12 +192,13 @@ export async function startWatch({
     plan,
     code: shortCode(planId),
     extended: false,
+    list,
   };
 }
 
 async function findPlanById(id) {
   const rows = await select('plan', {
-    select: 'id,created_at,approved_at,approved_bands,totals,note',
+    select: 'id,created_at,approved_at,approved_bands,totals,note,list_uri',
     eq: { id },
     limit: 1,
   });
@@ -192,19 +242,27 @@ export function watchesText(watches, { now = Date.now() } = {}) {
  * Read a watched post again: new quote-posters and repliers join the plan with
  * what they wrote, the triage reads them, and an auto watch adds the hostile.
  *
- * @param {object} deps { score(dids) -> Map, writeAgent, generate, model, log }
- * @returns {Promise<{ fresh: number, hostile: number, added: number, held: number }>}
+ * When the stream says nothing new has arrived (quietSinceLastRead), the
+ * post is not read from Constellation this time; what is still waiting for a
+ * model from earlier checks is read as usual.
+ *
+ * @param {object} deps { score(dids) -> Map, writeAgent, generate, model, log,
+ *   activity } where `activity` is the stream's tracker, or null for none
+ * @returns {Promise<{ fresh: number, hostile: number, added: number, held: number, skipped: boolean }>}
  */
 export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
-  const { score, writeAgent, generate, model, log = () => {} } = deps;
+  const { score, writeAgent, generate, model, log = () => {}, activity = null } = deps;
   const plan = await findPlanById(watch.plan_id);
-  if (!plan) return { fresh: 0, hostile: 0, added: 0, held: 0 };
+  if (!plan) return { fresh: 0, hostile: 0, added: 0, held: 0, skipped: false };
   const stats = watch.stats || {};
 
-  const harvest = await harvestPost(watch.uri, {
-    only: READ_KINDS,
-    maxPages: 20,
-  });
+  const skipped = quietSinceLastRead(watch, activity, { now });
+  const harvest = skipped
+    ? { participants: [] }
+    : await harvestPost(watch.uri, {
+        only: READ_KINDS,
+        maxPages: 20,
+      });
   // Known: on the watch's plan already, or in the baseline scan.
   const known = new Set();
   for (const id of [plan.id, stats.baselinePlan].filter(Boolean)) {
@@ -241,7 +299,9 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
         action: null,
         evidence_uri: evidenceUriFor(r),
         engaged: Object.keys(r.engagements || {}),
-        already_listed: Boolean(r.alreadyListed),
+        // As a scan stores them: with several lists the write checks the
+        // watch's own list (bulkPlan.js proposePlan).
+        already_listed: multiListOn() ? false : Boolean(r.alreadyListed),
         blocks_me: Boolean(r.blocksYou),
       })),
     );
@@ -317,6 +377,8 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     held,
     heldAsOf,
     unread,
+    lastReadAt: skipped ? stats.lastReadAt : new Date(now).toISOString(),
+    readsSkipped: (stats.readsSkipped || 0) + (skipped ? 1 : 0),
   };
   await update(
     'watch',
@@ -330,8 +392,9 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
     hostile,
     added,
     held,
+    ...(skipped ? { read: 'skipped: nothing new on the stream' } : {}),
   });
-  return { fresh: newcomers.length, hostile, added, held };
+  return { fresh: newcomers.length, hostile, added, held, skipped };
 }
 
 /**
@@ -469,7 +532,45 @@ const BASELINE_MS = 60 * 60_000;
 const RECENT_MS = 48 * 3_600_000;
 
 /**
+ * The owner's posts that drew `threshold` quotes and replies in the last hour,
+ * counted from the stream: one per record, however many ways it links.
+ * Alerted at most once every six hours per post, and never for a post being
+ * watched. Null when the stream has not covered the whole hour, for the
+ * caller to poll instead.
+ *
+ * @returns {Promise<null | Array<{ uri: string, growth: number, count: number }>>}
+ */
+export async function streamAlerts(
+  activity,
+  { now = Date.now(), threshold = ALERT_THRESHOLD } = {},
+) {
+  if (!activity || activity.coversMs() < BASELINE_MS) return null;
+  const counts = [...activity.byPost({ sinceMs: BASELINE_MS, kinds: READ_KINDS })]
+    .filter(([uri, p]) => ownerOf(uri) === OWNER_DID && p.records.length >= threshold)
+    .map(([uri, p]) => ({ uri, growth: p.records.length, count: p.records.length }));
+  if (!counts.length) return [];
+  const uris = counts.map((c) => c.uri);
+  const rows =
+    (await select('post_alert', {
+      select: 'uri,alerted_at',
+      where: { uri: { in: uris } },
+    }).catch(() => [])) || [];
+  const alertedAt = new Map(rows.map((r) => [r.uri, r.alerted_at]));
+  const watched = new Set((await liveWatches({ now })).map((w) => w.uri));
+  return counts
+    .filter((c) => {
+      const at = alertedAt.get(c.uri);
+      const quietSince = at ? now - Date.parse(at) >= ALERT_AGAIN_MS : true;
+      return quietSince && !watched.has(c.uri);
+    })
+    .sort((a, b) => b.growth - a.growth);
+}
+
+/**
  * The owner's recent posts that are suddenly drawing quotes and replies.
+ *
+ * Read from the stream when it has covered the last hour (streamAlerts), and
+ * otherwise by polling the AppView as below.
  *
  * Each post's count is kept with when it was taken. A count at least an hour
  * old becomes the new baseline; growth past the threshold since a baseline
@@ -483,7 +584,10 @@ export async function ownPostAlerts({
   fetchImpl = fetchWithTimeout,
   now = Date.now(),
   threshold = ALERT_THRESHOLD,
+  activity = null,
 } = {}) {
+  const streamed = await streamAlerts(activity, { now, threshold });
+  if (streamed) return streamed;
   const res = await fetchImpl(
     `${APPVIEW}/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(OWNER_DID)}&limit=30&filter=posts_no_replies`,
   );
@@ -554,7 +658,7 @@ export async function alertSent({ uri }, { now = Date.now() } = {}) {
 /** The message for one alert, and what a 👍 does. */
 export function alertText({ uri, growth }) {
   return {
-    text: `Your post ${postWebUrl(uri) || uri} picked up ${growth} quotes and replies in the last hour.`,
+    text: `Your post ${postWebUrl(uri) || uri} picked up ${growth} ${growth === 1 ? 'quote or reply' : 'quotes and replies'} in the last hour.`,
     pending: [`watch ${uri}`],
     describe: 'watch it for 24 hours and hold anything hostile for your OK',
     links: [postWebUrl(uri)],

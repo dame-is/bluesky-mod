@@ -20,6 +20,7 @@
 
 import { APPVIEW } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
+import { mapLimit, chunks, APPVIEW_CONCURRENCY } from '../lib/limit.js';
 import { untrusted, MODEL_TIMEOUT_MS } from '../lib/agent.js';
 // In command.js because the parser needs it, and nothing under src/lib/ may
 // import the database.
@@ -59,26 +60,26 @@ export function evidenceUriFor(row) {
 }
 
 /**
- * Post text by URI, 25 at a time.
+ * Post text by URI, 25 at a time, a few batches at once.
  *
  * Reports which URIs the AppView answered about (`asked`), which posts it
  * returned (`returned`), and which of those had text. A post it answered
- * about and did not return will never arrive; one whose whole request failed
- * might be there next time. `parents` maps a reply to the post it answers.
+ * about and did not return will never arrive from it; one whose whole request
+ * failed might be there next time. `parents` maps a reply to the post it
+ * answers.
  */
 async function textsFor(uris) {
   const texts = new Map();
   const asked = new Set();
   const returned = new Set();
   const parents = new Map();
-  for (let i = 0; i < uris.length; i += POSTS_PER_CALL) {
-    const slice = uris.slice(i, i + POSTS_PER_CALL);
+  await mapLimit(chunks(uris, POSTS_PER_CALL), APPVIEW_CONCURRENCY, async (slice) => {
     const q = slice.map((u) => `uris=${encodeURIComponent(u)}`).join('&');
     try {
       const res = await fetchWithTimeout(
         `${APPVIEW}/xrpc/app.bsky.feed.getPosts?${q}`,
       );
-      if (!res.ok) continue;
+      if (!res.ok) return;
       const body = await res.json();
       for (const u of slice) asked.add(u);
       for (const post of body?.posts || []) {
@@ -91,7 +92,7 @@ async function textsFor(uris) {
     } catch {
       // The request failed, so these stay pending and get another go.
     }
-  }
+  });
   return { texts, asked, returned, parents };
 }
 

@@ -13,6 +13,7 @@
 // cleared, so those plans can add them again.
 
 import { selectAll, update, upsert } from './db.js';
+import { rowsOnList } from './planList.js';
 
 /** DIDs per read, to keep each statement's `in (...)` list short. */
 const CHUNK = 50;
@@ -25,20 +26,30 @@ const CHUNK = 50;
  * holds them there. Without it the accounts are off the list, every plan's
  * add is closed, and the `already_listed` marks are cleared.
  *
+ * With `list`, only adds made by plans on that list are closed, and only
+ * their marks cleared: in multi-list mode someone taken off one list is still
+ * on the others, and the adds that put them there still stand (planList.js
+ * listScope says when to pass it).
+ *
  * @param {string|string[]} dids
  * @param {string} reason  why they came off, in the words of whoever asked
  * @param {object} [opts]
  * @param {string} [opts.plan]  close only this plan's rows
+ * @param {string|null} [opts.list]  close only adds on this list
  * @returns {Promise<number>} how many decision rows were closed
  */
-export async function closeAdds(dids, reason, { plan = null } = {}) {
+export async function closeAdds(
+  dids,
+  reason,
+  { plan = null, list = null } = {},
+) {
   const wanted = [...new Set([dids].flat().filter(Boolean))];
   const now = new Date().toISOString();
   let closed = 0;
   for (let i = 0; i < wanted.length; i += CHUNK) {
     const chunk = wanted.slice(i, i + CHUNK);
     const inChunk = { in: chunk };
-    const live = await selectAll('decision', {
+    const found = await selectAll('decision', {
       select: 'plan_id,did,band,acted_at',
       eq: { action: 'list_add', ...(plan ? { plan_id: plan } : {}) },
       where: {
@@ -48,7 +59,37 @@ export async function closeAdds(dids, reason, { plan = null } = {}) {
       },
       order: 'plan_id.asc,did.asc',
     });
-    if (!plan) {
+    const live = await rowsOnList(found, list);
+    if (!plan && list) {
+      // Only the marks of plans on this list: a plan bound to another list
+      // marked them because they are on that one, which they still are.
+      const marked = await rowsOnList(
+        await selectAll('decision', {
+          select: 'plan_id,did',
+          where: {
+            did: inChunk,
+            already_listed: 'is.true',
+            acted_at: 'is.null',
+          },
+          order: 'plan_id.asc,did.asc',
+        }),
+        list,
+      );
+      if (marked.length) {
+        await update(
+          'decision',
+          {
+            where: {
+              did: inChunk,
+              plan_id: { in: [...new Set(marked.map((r) => r.plan_id))] },
+              already_listed: 'is.true',
+              acted_at: 'is.null',
+            },
+          },
+          { already_listed: false },
+        );
+      }
+    } else if (!plan) {
       await update(
         'decision',
         {

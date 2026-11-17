@@ -34,6 +34,9 @@ const {
   watchesText,
 } = await import('./watch.js');
 
+const { createActivity } = await import('../ownerActivity.js');
+const { LINK_SOURCES } = await import('../spacedust.js');
+
 const HOUR = 3_600_000;
 const URI = `at://${OWNER_DID}/app.bsky.feed.post/3abc`;
 
@@ -183,5 +186,63 @@ describe("alerts on the owner's own posts", () => {
       now: 1000 + 20 * 60_000,
     });
     expect(alerts).toEqual([{ uri: URI, growth: 30, count: 30 }]);
+  });
+});
+
+describe('alerts from the stream', () => {
+  const linkTo = (subject, n, source = LINK_SOURCES.reply) => ({
+    kind: 'link',
+    link: {
+      operation: 'create',
+      source,
+      source_record: `at://did:plc:who${n}/app.bsky.feed.post/r${n}`,
+      subject,
+    },
+  });
+  const OTHER = 'at://did:plc:someoneelse/app.bsky.feed.post/3xyz';
+
+  /** A tracker that has been connected since t=0, at `t` now. */
+  function streamAt(t0 = 0) {
+    const clock = { t: t0 };
+    const a = createActivity({ now: () => clock.t, coveredFromStart: false, ownerDid: OWNER_DID });
+    a.opened([]);
+    return { a, clock };
+  }
+
+  it('alerts on the stream without polling, once the stream covers the hour', async () => {
+    const { a, clock } = streamAt();
+    const fetchImpl = vi.fn();
+    clock.t = 5 * 60_000;
+    for (let i = 0; i < 20; i += 1) a.record(linkTo(URI, i));
+    // Only five minutes covered: the poll is the answer, not the stream.
+    const early = await ownPostAlerts({ activity: a, fetchImpl: vi.fn(async () => ({ ok: false })), now: clock.t });
+    expect(early).toEqual([]);
+    clock.t = HOUR + 10 * 60_000;
+    for (let i = 20; i < 36; i += 1) a.record(linkTo(URI, i, LINK_SOURCES.quote));
+    const alerts = await ownPostAlerts({ activity: a, fetchImpl, now: clock.t });
+    // The 20 from five minutes after it connected are out of the last hour.
+    expect(alerts).toEqual([{ uri: URI, growth: 16, count: 16 }]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("counts only the owner's posts, below the threshold says nothing, and respects the six hours", async () => {
+    const { a, clock } = streamAt();
+    clock.t = 2 * HOUR;
+    for (let i = 0; i < 30; i += 1) a.record(linkTo(OTHER, i));
+    for (let i = 30; i < 40; i += 1) a.record(linkTo(URI, i));
+    expect(await ownPostAlerts({ activity: a, now: clock.t })).toEqual([]);
+    for (let i = 40; i < 50; i += 1) a.record(linkTo(URI, i));
+    const [alert] = await ownPostAlerts({ activity: a, now: clock.t });
+    expect(alert).toMatchObject({ uri: URI, growth: 20 });
+    await alertSent(alert, { now: clock.t });
+    expect(await ownPostAlerts({ activity: a, now: clock.t + 60_000 })).toEqual([]);
+  });
+
+  it('leaves a watched post alone', async () => {
+    const { a, clock } = streamAt();
+    clock.t = 2 * HOUR;
+    db.watch.push({ id: 'w', uri: URI, until: new Date(clock.t + HOUR).toISOString() });
+    for (let i = 0; i < 30; i += 1) a.record(linkTo(URI, i));
+    expect(await ownPostAlerts({ activity: a, now: clock.t })).toEqual([]);
   });
 });

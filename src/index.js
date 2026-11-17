@@ -10,6 +10,10 @@
 //   3. Jetstream, for the owner's own new follows and list items, so they are
 //      protected before the next snapshot (ownerGraph.js). This one writes a
 //      row and needs no queue.
+//   4. Spacedust, for replies, quotes and mentions aimed at the owner as they
+//      happen (spacedust.js). Held in memory (ownerActivity.js) for the
+//      alerts, watches and the shield to read; nothing is written from it
+//      directly.
 //
 // The bot never posts in public. Everything it says goes to a DM.
 //
@@ -31,6 +35,19 @@ import { botAgent, chatView } from './bot/botAgent.js';
 import { openDb, closeDb, usingPostgres, rpc } from './bot/db.js';
 import { snapshotStep, usableSnapshot, UNPROTECTED_LISTS } from './snapshot.js';
 import { connectJetstream } from './jetstream.js';
+import { connectSpacedust } from './spacedust.js';
+import { activity } from './ownerActivity.js';
+import { ownerAgent } from './ownerAgent.js';
+import { createGates } from './gates.js';
+import {
+  createClassifier,
+  createPostInfo,
+  shieldTick,
+  onOwnerPost,
+  SHIELD_EVERY_MS,
+} from './shield.js';
+import { setShieldDeps, sendNotice } from './bot/shieldDm.js';
+import { startWatch } from './bot/watch.js';
 import { loadState, setCursor } from './state.js';
 import { ownerGraphHandler, OWNER_GRAPH_COLLECTIONS } from './ownerGraph.js';
 import { installProvider, MODELS, modelsEnabled } from './models.js';
@@ -40,6 +57,8 @@ import { setOwnerHandle } from './constants.js';
 import { logger } from './logger.js';
 import { maybeRunDrift, ownerConvo } from './drift.js';
 import { tickWatches, tickAlerts } from './watching.js';
+import { watchedUris } from './bot/watch.js';
+import { postFacts, ownPostOptions } from './bot/ownPost.js';
 import { isAuthError, createReconnector } from './session.js';
 import { acquireLease, acquireDbLease, HEARTBEAT_MS } from './lease.js';
 import { ensureDmsOpen, findOrCreateList, listProblem } from './bootstrap.js';
@@ -215,6 +234,55 @@ async function settleBotAccount() {
     } catch (err) {
       logger.warn('Could not open the bot\'s DMs', { err: err.message });
     }
+  }
+}
+
+// --- the owner's session, for the shield's gates only ------------------------
+// Opt-in (MOD_OWNER_APP_PASSWORD). Used through gates.js and nothing else,
+// which writes only threadgates and postgates on the owner's own posts.
+let ownerSession = null;
+/** Why the owner's password cannot be used, once it has been refused. */
+let ownerRefused = null;
+
+async function connectOwner() {
+  let inUse = false;
+  const session = await ownerAgent({
+    ownerDid: config.ownerDid,
+    password: process.env.MOD_OWNER_APP_PASSWORD,
+    onExpired: () => {
+      if (inUse) ownerReconnector.reconnect('the owner session expired');
+    },
+  });
+  inUse = true;
+  ownerSession = session.agent;
+  return session;
+}
+
+const ownerReconnector = createReconnector({
+  connect: connectOwner,
+  log: (level, msg, fields) => logger[level](msg, { ...fields, session: 'owner' }),
+});
+
+/**
+ * The first owner login. A refusal (another account's password, or the
+ * account password itself) is final: the shield runs without gates and says
+ * why. Anything else is retried on the reconnector's back-off, and the gates
+ * report "not connected" meanwhile.
+ */
+async function connectOwnerAtBoot() {
+  try {
+    const s = await connectOwner();
+    logger.info('Owner session ready, for the shield\'s gates only', { via: s.via });
+  } catch (err) {
+    if (err?.refused) {
+      ownerRefused = String(err.message);
+      logger.error('Not using MOD_OWNER_APP_PASSWORD', { err: ownerRefused });
+      return;
+    }
+    logger.error('Could not log in as the owner for the shield; trying again', {
+      err: String(err?.message || err),
+    });
+    ownerReconnector.reconnect('boot');
   }
 }
 
@@ -450,7 +518,8 @@ function scheduleWatching() {
           model: (await loadAgentConfig())?.model || model,
           everyMs: config.watchEveryMs,
           log: (msg, fields) => logger.info(msg, fields),
-        }),
+          activity: config.stream ? activity : null,
+        }).finally(() => dust?.refresh()),
       );
     }, config.watchEveryMs);
     if (watchTimer.unref) watchTimer.unref();
@@ -463,11 +532,89 @@ function scheduleWatching() {
           chat,
           convoFor: () => ownerConvo(chat),
           log: (msg, fields) => logger.info(msg, fields),
+          activity: config.stream ? activity : null,
+          menuFor: async (uri) => ownPostOptions(await postFacts(uri, { deps: shieldDeps })),
         }),
       );
     }, config.alertEveryMs);
     if (alertTimer.unref) alertTimer.unref();
   }
+}
+
+// --- the shield ---------------------------------------------------------------
+let shieldTimer = null;
+let shieldQueued = false;
+let shieldDeps = null;
+
+function buildShield() {
+  const gates =
+    config.shield.canGate && !ownerRefused
+      ? createGates({ getAgent: () => ownerSession, ownerDid: config.ownerDid })
+      : null;
+  shieldDeps = {
+    cfg: config.shield,
+    gates,
+    gatesProblem: ownerRefused ? `Not using MOD_OWNER_APP_PASSWORD: ${ownerRefused}` : null,
+    activity,
+    // Bands from the same scorer as every scan. With no snapshot yet this
+    // throws, and nothing counts as a stranger.
+    outsideAmong: createClassifier({
+      score: async (dids) => (await reference()).io.score(dids),
+    }),
+    postInfo: createPostInfo({ gates }),
+    // Ask mode: the watch puts the hostile ones to the owner with a 👍.
+    startWatch:
+      config.watchEveryMs > 0
+        ? async (uri, convoId = null) =>
+            startWatch({
+              convoId: convoId || (await ownerConvo(chat)),
+              target: uri,
+              hours: 24,
+              auto: false,
+            })
+        : null,
+    notify: async (msg) => sendNotice(chat, await ownerConvo(chat), msg),
+    streaming: config.stream,
+    dryRun: config.dryRun,
+    log: (msg, fields) => logger.info(msg, fields),
+  };
+  setShieldDeps(shieldDeps);
+  if (!config.stream && (config.shield.mode !== 'off' || config.shield.attack.mode !== 'off')) {
+    logger.warn(
+      'MOD_STREAM is off, so the shield cannot count replies and quotes; only "shields up" and the commands work',
+    );
+  }
+}
+
+/**
+ * Every minute, through the job queue but without waiting for a quiet
+ * minute: a pile-on is exactly when the DMs are busy. One queued at a time.
+ * Cheap when nothing is happening: two reads of the store.
+ */
+function scheduleShield() {
+  shieldTimer = setInterval(() => {
+    if (shuttingDown || shieldQueued) return;
+    shieldQueued = true;
+    enqueue('shield', async () => {
+      try {
+        const { fired } = await shieldTick(shieldDeps);
+        if (fired.length) logger.info('Shield', { fired: fired.join(', ') });
+      } catch (err) {
+        // The owner's session failing is the owner's to reconnect, never the
+        // bot's, which is what the queue does with an auth error it is handed.
+        if (!err?.fromOwner) throw err;
+        if (isAuthError(err)) {
+          ownerReconnector.reconnect(`shield: ${String(err?.message || err)}`);
+        }
+        logger.error('Shield tick failed on the owner session', {
+          err: String(err?.message || err),
+        });
+      } finally {
+        shieldQueued = false;
+      }
+    });
+  }, SHIELD_EVERY_MS);
+  if (shieldTimer.unref) shieldTimer.unref();
 }
 
 // --- room on the data disk ---------------------------------------------------
@@ -534,6 +681,7 @@ function logStats() {
   logger.info('stats', {
     ...stats,
     reference: cached ? 'held' : 'released',
+    streamed: activity.size(),
     queued: pending,
     rss_mb: (process.memoryUsage().rss / 1048576).toFixed(1),
     heap_mb: (process.memoryUsage().heapUsed / 1048576).toFixed(1),
@@ -543,6 +691,7 @@ function logStats() {
 // --- start -------------------------------------------------------------------
 let statsTimer = null;
 let stream = null;
+let dust = null;
 let lease = null;
 
 /**
@@ -584,6 +733,8 @@ async function start() {
 
   const session = await connectAtBoot();
   await settleBotAccount();
+  if (config.shield.canGate) await connectOwnerAtBoot();
+  buildShield();
   try {
     const owner = await agent.app.bsky.actor.getProfile({ actor: config.ownerDid });
     setOwnerHandle(owner.data.handle);
@@ -647,6 +798,7 @@ async function start() {
   }
 
   scheduleSnapshot();
+  scheduleShield();
   scheduleDiskCheck();
   scheduleRetention();
 
@@ -661,12 +813,31 @@ async function start() {
   });
   stream = connectJetstream({
     dids: [config.ownerDid],
-    collections: OWNER_GRAPH_COLLECTIONS,
+    // The owner's posts too: in attack mode a new one is gated as it lands.
+    collections: [...OWNER_GRAPH_COLLECTIONS, 'app.bsky.feed.post'],
     onEvent: async (event) => {
       await protect(event);
+      await onOwnerPost(event, shieldDeps).catch((err) => {
+        if (err?.fromOwner && isAuthError(err)) {
+          ownerReconnector.reconnect('gating a new post');
+        }
+        logger.error('Could not gate a new post', { err: String(err?.message || err) });
+      });
       if (event?.time_us) setCursor(event.time_us);
     },
   });
+
+  if (config.stream) {
+    dust = connectSpacedust({
+      subjectDids: [config.ownerDid],
+      subjects: watchedUris,
+      onLink: (msg) => activity.record(msg),
+      // No replay: what was said while the socket was down is not known, so
+      // the tracker counts its window from when the stream came back.
+      onOpen: (subjects) => activity.opened(subjects),
+      onDown: () => activity.closed(),
+    });
+  }
 
   if (config.statsIntervalMs > 0) {
     statsTimer = setInterval(logStats, config.statsIntervalMs);
@@ -717,6 +888,9 @@ async function start() {
     escalation: ESCALATION_MODEL,
     watchEveryMs: config.watchEveryMs,
     alertEveryMs: config.alertEveryMs,
+    shield: config.shield.mode,
+    attack: config.shield.attack.mode,
+    gates: shieldDeps?.gates ? 'on' : ownerRefused ? 'refused' : 'off',
     logLevel: logger.level,
   });
 }
@@ -734,10 +908,12 @@ async function shutdown(signal) {
   if (snapshotTimer) clearInterval(snapshotTimer);
   if (watchTimer) clearInterval(watchTimer);
   if (alertTimer) clearInterval(alertTimer);
+  if (shieldTimer) clearInterval(shieldTimer);
   if (statsTimer) clearInterval(statsTimer);
   if (diskTimer) clearInterval(diskTimer);
   if (retentionTimer) clearTimeout(retentionTimer);
   stream?.close();
+  dust?.close();
   await panel?.close().catch(() => {});
   // Let an in-flight answer finish rather than leave half a reply posted.
   // Docker waits 10s by default before killing (compose.yaml sets 60s),

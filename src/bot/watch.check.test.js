@@ -83,7 +83,10 @@ vi.mock('./bulkPlan.js', async (importOriginal) => {
   };
 });
 
-const { checkWatch, digestFor, startWatch } = await import('./watch.js');
+const { checkWatch, digestFor, startWatch, quietSinceLastRead, FULL_READ_EVERY_MS } =
+  await import('./watch.js');
+const { createActivity } = await import('../ownerActivity.js');
+const { LINK_SOURCES } = await import('../spacedust.js');
 const { harvestPost } = await import('../lib/harvest.js');
 const { applyPlanToTriage, proposePlan } = await import('./bulkPlan.js');
 const { runTriage } = await import('./triage.js');
@@ -411,7 +414,7 @@ describe('starting a watch', () => {
     expect(db.decision.filter((r) => r.triage === 'hostile')).toHaveLength(2);
 
     const out = await checkWatch(watch, deps());
-    expect(out).toEqual({ fresh: 0, hostile: 0, added: 0, held: 0 });
+    expect(out).toEqual({ fresh: 0, hostile: 0, added: 0, held: 0, skipped: false });
     expect(db.decision.filter((r) => r.acted_at)).toEqual([]);
     expect(
       await digestFor(watch, { now: Date.now(), ending: true }),
@@ -438,5 +441,86 @@ describe('starting a watch', () => {
     ).rejects.toThrow('That took too long');
     expect(harvestPost.mock.calls[0][1]).toMatchObject({ signal });
     expect(db.watch).toEqual([]);
+  });
+});
+
+describe('skipping a read the stream says is not needed', () => {
+  const T0 = Date.parse('2026-11-17T12:00:00.000Z');
+  const stream = (clock) => {
+    const a = createActivity({ now: () => clock.t, coveredFromStart: false, ownerDid: 'did:plc:owner' });
+    a.opened([]);
+    return a;
+  };
+  const reply = (n) => ({
+    kind: 'link',
+    link: {
+      operation: 'create',
+      source: LINK_SOURCES.reply,
+      source_record: `at://did:plc:late${n}/app.bsky.feed.post/r${n}`,
+      subject: POST,
+    },
+  });
+
+  it('skips only with unbroken cover since the last read and a recent full read', () => {
+    const clock = { t: T0 };
+    const a = stream(clock);
+    clock.t = T0 + 10 * 60_000;
+    const w = {
+      uri: POST,
+      last_checked_at: new Date(T0 + 5 * 60_000).toISOString(),
+      stats: { lastReadAt: new Date(T0 + 5 * 60_000).toISOString() },
+    };
+    expect(quietSinceLastRead(w, a, { now: clock.t })).toBe(true);
+    // Something arrived since the last read.
+    a.record(reply(1));
+    expect(quietSinceLastRead(w, a, { now: clock.t })).toBe(false);
+  });
+
+  it('reads when there is no stream, no full read yet, or the last one is old', () => {
+    const clock = { t: T0 + 10 * 60_000 };
+    const a = stream({ t: T0 });
+    const base = { uri: POST, last_checked_at: new Date(T0 + 5 * 60_000).toISOString() };
+    expect(quietSinceLastRead({ ...base, stats: { lastReadAt: base.last_checked_at } }, null, { now: clock.t })).toBe(false);
+    expect(quietSinceLastRead({ ...base, stats: {} }, a, { now: clock.t })).toBe(false);
+    expect(
+      quietSinceLastRead(
+        { ...base, stats: { lastReadAt: new Date(clock.t - FULL_READ_EVERY_MS).toISOString() } },
+        a,
+        { now: clock.t },
+      ),
+    ).toBe(false);
+  });
+
+  it("reads someone else's post the stream has not been asking about", () => {
+    const clock = { t: T0 };
+    const a = stream(clock);
+    clock.t = T0 + 10 * 60_000;
+    const other = 'at://did:plc:stranger/app.bsky.feed.post/3zzz';
+    const w = {
+      uri: other,
+      last_checked_at: new Date(T0 + 5 * 60_000).toISOString(),
+      stats: { lastReadAt: new Date(T0 + 5 * 60_000).toISOString() },
+    };
+    expect(quietSinceLastRead(w, a, { now: clock.t })).toBe(false);
+  });
+
+  it('checks without harvesting when quiet, and still reads what waits for a model', async () => {
+    const clock = { t: T0 };
+    const a = stream(clock);
+    clock.t = T0 + 10 * 60_000;
+    const w = watchRow('ask', {
+      lastReadAt: new Date(T0 + 5 * 60_000).toISOString(),
+      unread: ['did:plc:carl'],
+    });
+    w.last_checked_at = new Date(T0 + 5 * 60_000).toISOString();
+    db.decision.push(earlierRow('carl'));
+    TEXT['at://did:plc:carl/app.bsky.feed.post/r-carl'] = 'get lost';
+    harvestPost.mockClear();
+    const out = await checkWatch(w, { ...deps(), activity: a }, { now: clock.t });
+    expect(harvestPost).not.toHaveBeenCalled();
+    expect(out.skipped).toBe(true);
+    expect(out.hostile).toBe(1);
+    expect(w.stats.readsSkipped).toBe(1);
+    expect(w.stats.lastReadAt).toBe(new Date(T0 + 5 * 60_000).toISOString());
   });
 });
