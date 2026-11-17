@@ -1118,6 +1118,20 @@ describe('memory and watch commands outside the agent', () => {
     expect(watch.liveWatches).toHaveBeenCalled();
     expect(generate).not.toHaveBeenCalled();
   });
+
+  for (const mode of ['classic', 'agent']) {
+    it(`${mode}: "stop watching" with a list attached asks to stop that list`, async () => {
+      const LIST = 'at://did:plc:listmaker/app.bsky.graph.list/3list';
+      const { chat, sent } = chatWith([
+        msg('m1', 'stop watching', { embed: LIST }),
+      ]);
+      await pass(chat, { mode });
+      // Not null, which would stop the newest watch. A list is never
+      // watched, so it matches none.
+      expect(watch.stopWatch).toHaveBeenCalledWith({ target: LIST });
+      expect(sent.at(-1).text).toBe('I was not watching that.');
+    });
+  }
 });
 
 describe('notes and who reads them', () => {

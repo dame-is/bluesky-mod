@@ -1577,7 +1577,13 @@ async function standingCommand({
     };
   }
 
-  const watching = parseWatchCommand(text, { embedUri, links: msgLinks });
+  // The shared record of any kind, not only a post: "stop watching" with a
+  // list or a feed attached then matches no watch, where dropping it would
+  // stop the newest one. "watch" still takes only a post.
+  const watching = parseWatchCommand(text, {
+    embedUri: sharedRecordUri(entry.message) || embedUri,
+    links: msgLinks,
+  });
   if (!watching) return null;
   if (watching.action === 'watches') {
     const live = await liveWatches();
