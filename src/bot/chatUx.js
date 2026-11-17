@@ -20,6 +20,7 @@
 import { unreadText } from '../lib/report.js';
 import { accountLine, rows, stack } from '../lib/stack.js';
 import { select, upsert } from './db.js';
+import { multiListOn } from '../lib/listChoice.js';
 
 export const REACTION = { working: '👀', done: '✅', failed: '❌' };
 /** Reactions on the bot's question that mean yes, and no. */
@@ -170,7 +171,10 @@ export function resetQuiet() {
 }
 
 const names = (items, max = 6) => {
-  const handles = items.map((i) => `@${i.handle}`);
+  // In multi-list mode each block names the list it went on.
+  const handles = items.map((i) =>
+    i.list ? `@${i.handle} (${i.list})` : `@${i.handle}`,
+  );
   return handles.length > max
     ? `${handles.slice(0, max).join(', ')} and ${handles.length - max} more`
     : handles.join(', ');
@@ -255,7 +259,7 @@ export function renderCard(plan, { choices = cardChoices(plan) } = {}) {
         ),
       ),
       rows([
-        ['already on list', plan.alreadyListed],
+        [multiListOn() ? 'on your lists' : 'already on list', plan.alreadyListed],
         ['block you', plan.blocksYou],
       ]),
     ];
@@ -301,7 +305,11 @@ export function cardChoices(plan) {
   // Written by DID: the card is answered up to 30 minutes later, and a handle
   // resolved then can belong to someone else. The handle names them only
   // while it verifies.
-  if (a && !a.protectedReason && !a.alreadyListed) {
+  // With several lists, an author on one of them may still be meant for
+  // another, so only PROTECTED takes "author" off the card; a block of
+  // someone already on the chosen list says so.
+  const listed = a?.alreadyListed && !multiListOn();
+  if (a && !a.protectedReason && !listed) {
     const name =
       a.handle && a.handle !== 'handle.invalid' ? `@${a.handle}` : a.did;
     out.push({

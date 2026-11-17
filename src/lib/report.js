@@ -11,6 +11,7 @@
 // a field this code produced. So every substituted value is flattened to one
 // line and capped before it is used.
 
+import { multiListOn } from './listChoice.js';
 import { accountLine, rows, stack } from './stack.js';
 
 /**
@@ -174,13 +175,30 @@ export function helpText({ canWrite = true, hasModel = true } = {}) {
     '  no quotes <post>          turn quote posts off (open / enable undo them)',
     '  shields up / shields down lock every recent post, then put it all back',
   ];
+  // Multi-list mode only: with one list there is nothing to choose.
+  const lists = [
+    '',
+    'your lists',
+    '  lists                     your lists, numbered',
+    '  new list <name>           make another moderation list',
+    '  block @handle to spam     name the list, by name or number',
+    '  A block or approval that names none asks "Which list?"; answer 1, 2, 3.',
+  ];
   const tail = [
     '',
     'Replies that end in a numbered menu take a number instead of retyping.',
   ];
-  return [...reads, ...(canWrite ? [...writes, ...shield] : []), ...tail].join(
-    '\n',
-  );
+  const listing = multiListOn()
+    ? canWrite
+      ? lists
+      : lists.slice(0, 3)
+    : [];
+  return [
+    ...reads,
+    ...(canWrite ? [...writes, ...shield] : []),
+    ...listing,
+    ...tail,
+  ].join('\n');
 }
 
 /**

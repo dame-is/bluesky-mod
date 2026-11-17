@@ -23,7 +23,13 @@ import { pulse } from '../lib/pulse.js';
 import { selectAll } from './db.js';
 import { usableSnapshot } from '../snapshot.js';
 import { listUri, ownerOf } from './listWrite.js';
-import { graphFacts, listedView, blockersView } from './graphFacts.js';
+import {
+  graphFacts,
+  listedView,
+  listedOnAnyView,
+  blockersView,
+} from './graphFacts.js';
+import { listUris, multiListOn } from './lists.js';
 
 /**
  * The newest finalised snapshot, as scorer-shaped lookups.
@@ -44,7 +50,9 @@ export async function loadReference() {
     );
   }
 
-  const list = listUri();
+  // In multi-list mode "already listed" is on any of the bot's lists: a scan
+  // or a lookup is made before anyone says which list it is for.
+  const lists = multiListOn() ? await listUris() : [listUri()];
   const [vouchRows, circleRows, protectedRows] = await Promise.all([
     selectAll('vouch', {
       select: 'did,vouches',
@@ -60,7 +68,7 @@ export async function loadReference() {
     // Who is already on the list and who already blocks the owner, loaded
     // beside the vouches and held for half an hour (graphFacts.js). A failure
     // leaves both unknown rather than empty and wrong.
-    graphFacts({ list }).catch(() => null),
+    ...lists.map((list) => graphFacts({ list }).catch(() => null)),
   ]);
 
   // A simple snapshot has no vouch counts, so following the owner is what
@@ -78,7 +86,8 @@ export async function loadReference() {
         vouchRows,
         circleDids: circleRows.map((r) => r.did),
         protectedRows,
-        listed: listedView(list),
+        listed:
+          lists.length === 1 ? listedView(lists[0]) : listedOnAnyView(lists),
         blockers: blockersView(),
       }),
       thresholds,

@@ -145,6 +145,14 @@ export const config = {
    */
   dmMode: normaliseMode(process.env.MOD_DM_MODE),
 
+  /**
+   * Multi-list mode: every moderation list in the bot's repo is a list a
+   * write can go to, and a block or an approval that names none asks "Which
+   * list?" with a numbered menu (src/bot/lists.js). Off, there is one list,
+   * MOD_LIST_URI, and nothing asks.
+   */
+  multiList: readFlag('MOD_MULTI_LIST', false),
+
   /** Which model provider (src/models.js). */
   provider: PROVIDER,
 

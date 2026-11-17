@@ -41,6 +41,7 @@ import {
   shortCode,
 } from './bulkPlan.js';
 import { runTriage, evidenceUriFor } from './triage.js';
+import { multiListOn } from '../lib/listChoice.js';
 
 /** How often a watched post is read again. */
 export const WATCH_EVERY_MS = 5 * 60_000;
@@ -105,6 +106,10 @@ export function quietSinceLastRead(watch, activity, { now = Date.now() } = {}) {
  * `code` is the watch's own plan, which holds what the watch adds, so undo
  * and cancel take it. `plan` is the baseline scan on a new watch.
  *
+ * `list` is where a watch that blocks as it goes adds, in multi-list mode:
+ * its plan is bound to it from the start. A running watch whose plan is
+ * bound already keeps its list; `list` on the result says which it is.
+ *
  * @returns {Promise<{ watch, plan, code: string|null, extended: boolean }>}
  */
 export async function startWatch({
@@ -114,6 +119,7 @@ export async function startWatch({
   auto = false,
   now = Date.now(),
   signal,
+  list = null,
 }) {
   const resolved = await resolveTarget(target);
   // A watch reads a post's quotes and replies. A list's members or a feed's
@@ -129,11 +135,16 @@ export async function startWatch({
   if (running) {
     await update('watch', { eq: { id: running.id } }, { until, mode });
     const plan = running.plan_id ? await findPlanById(running.plan_id) : null;
+    if (plan && list && !plan.list_uri) {
+      await update('plan', { eq: { id: plan.id } }, { list_uri: list });
+      plan.list_uri = list;
+    }
     return {
       watch: { ...running, until, mode },
       plan,
       code: running.plan_id ? shortCode(running.plan_id) : null,
       extended: true,
+      list: plan?.list_uri || list,
     };
   }
   // The baseline: everyone so far, scored, with what they wrote, as a scan
@@ -154,6 +165,7 @@ export async function startWatch({
       approved_bands: null,
       totals: { uri: resolved.uri, kind: 'watch' },
       note: `watch of ${resolved.uri}`,
+      ...(list ? { list_uri: list } : {}),
     },
   ]);
   const watch = {
@@ -180,12 +192,13 @@ export async function startWatch({
     plan,
     code: shortCode(planId),
     extended: false,
+    list,
   };
 }
 
 async function findPlanById(id) {
   const rows = await select('plan', {
-    select: 'id,created_at,approved_at,approved_bands,totals,note',
+    select: 'id,created_at,approved_at,approved_bands,totals,note,list_uri',
     eq: { id },
     limit: 1,
   });
@@ -286,7 +299,9 @@ export async function checkWatch(watch, deps, { now = Date.now() } = {}) {
         action: null,
         evidence_uri: evidenceUriFor(r),
         engaged: Object.keys(r.engagements || {}),
-        already_listed: Boolean(r.alreadyListed),
+        // As a scan stores them: with several lists the write checks the
+        // watch's own list (bulkPlan.js proposePlan).
+        already_listed: multiListOn() ? false : Boolean(r.alreadyListed),
         blocks_me: Boolean(r.blocksYou),
       })),
     );

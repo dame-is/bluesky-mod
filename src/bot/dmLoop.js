@@ -139,6 +139,25 @@ import {
   notesBlock,
 } from './memory.js';
 import { startWatch, stopWatch, liveWatches, watchesText } from './watch.js';
+import {
+  botLists,
+  listsText,
+  createList,
+  listName,
+  listMenu,
+  multiListOn,
+  resolveList,
+} from './lists.js';
+import {
+  pickList,
+  pickRemoval,
+  pickPlanList,
+  askListFor,
+  withNamedList,
+  listToken,
+  planList,
+} from './listPick.js';
+import { splitListChoice, withListToken } from '../lib/listChoice.js';
 
 export { normaliseMode };
 
@@ -327,13 +346,18 @@ async function rememberPost(convoId, uri) {
   ]).catch(() => {});
 }
 
-/** The command behind a numbered reply, if it is still live. */
-async function takeChoice(convoId, n) {
+/** The option behind a numbered reply, if it is still live. */
+async function takeOption(convoId, n) {
   const rows = await select('dm_choice', {
     select: 'options',
     eq: { convo_id: convoId },
   }).catch(() => []);
-  return liveOptions(rows?.[0])?.[n - 1]?.command ?? null;
+  return liveOptions(rows?.[0])?.[n - 1] ?? null;
+}
+
+/** The command behind a numbered reply, if it is still live. */
+async function takeChoice(convoId, n) {
+  return (await takeOption(convoId, n))?.command ?? null;
 }
 
 /** Render options as the numbered menu the owner picks from. */
@@ -550,6 +574,141 @@ const planOutcome = (out, moved) =>
  */
 const addedOrRecorded = (out) => (out?.added || 0) + (out?.recorded || 0);
 
+// --- multi-list mode -----------------------------------------------------------
+
+/** A command with the list the owner's words named carried onto it. */
+const namedListOn = (command, cmd) =>
+  multiListOn() && cmd?.list ? withListToken(command, cmd.list) : command;
+
+/**
+ * The list an earlier change went to, for a reply about it: its name, and the
+ * token that puts an option back on it. "the list" and nothing with one list.
+ */
+async function changeList(planId) {
+  if (!multiListOn() || !planId) return { name: 'the list', token: '' };
+  const plan = await findPlan(shortCode(planId)).catch(() => null);
+  const uri = planList(plan);
+  await botLists().catch(() => null);
+  return { name: listName(uri), token: ` ${listToken(uri)}` };
+}
+
+/**
+ * A block or an unblock in multi-list mode.
+ *
+ * A block names its list or is asked "Which list?", each option the same
+ * block by DID with the list on it, so the account answered for is the one
+ * asked about whoever holds the handle by then. An unblock looks for the
+ * account first: on one list it comes off that one, on several the owner
+ * picks, "every list" included. Everything past the choice is applyCommand,
+ * so the veto and the log are the ones a block always gets.
+ */
+async function listedWrite(cmd, writeAgent, { lookUp }) {
+  const say = (text, options = null, outcome = null) => ({
+    text,
+    options,
+    outcome,
+  });
+  const byDid = /^did:/.test(String(cmd.actor));
+  let did = byDid ? cmd.actor : null;
+  if (!did) {
+    try {
+      did = await resolveActor(cmd.actor);
+    } catch (err) {
+      return say(
+        `I could not resolve ${cmd.actor}: ${String(err?.message || err).replace(/\.$/, '')}.`,
+        null,
+        'failed',
+      );
+    }
+  }
+  // A name for the question and the receipt: the profile's handle, one cheap
+  // read, since the write scores the account itself.
+  const account = byDid
+    ? ((await handlesFor([did]).catch(() => new Map())).get(did) ?? null)
+    : null;
+  const who = byDid
+    ? nameOf(account, cmd.actor)
+    : `@${String(cmd.actor).replace(/^@/, '')}`;
+  const preface = cmd.fromPost ? `That post is by ${who}.\n\n` : '';
+  const named = (out) =>
+    byDid ? out.message.replaceAll(cmd.actor, who) : out.message;
+  const asked = (reply) => ({ ...reply, text: preface + reply.text });
+
+  if (cmd.action === 'list_add') {
+    const pick = await pickList(cmd.list, {
+      conflict: Boolean(cmd.listConflict),
+      question: `Which list for ${who}?`,
+      commandsFor: (l) => [`list add ${did} list:${l.rkey}`],
+    });
+    if (pick.reply) return asked(pick.reply);
+    const out = await applyCommand(writeAgent, 'list_add', cmd.actor, {
+      raw: cmd.raw,
+      lookUp,
+      list: pick.list.uri,
+    });
+    const at = byDid ? nameOf(account || out.account, cmd.actor) : who;
+    const after = out.ok
+      ? [
+          ...(out.changed && out.did
+            ? [
+                {
+                  label: 'Undo that',
+                  command: `list remove ${out.did} list:${pick.list.rkey}`,
+                },
+              ]
+            : []),
+          ...(modelsEnabled()
+            ? [{ label: `Read ${at}'s recent posts`, command: `read ${at}` }]
+            : []),
+        ]
+      : null;
+    const refused =
+      Boolean(out.vetoed) ||
+      [OWNER_DID, writeAgent.session?.did].includes(out.did);
+    const outcome = out.ok
+      ? out.changed || out.already
+        ? 'done'
+        : null
+      : refused
+        ? null
+        : 'failed';
+    return say(preface + named(out), after, outcome);
+  }
+
+  const pick = await pickRemoval(did, cmd.list, {
+    conflict: Boolean(cmd.listConflict),
+    who,
+    commandsFor: (l) => [`list remove ${did} list:${l.rkey}`],
+  });
+  if (pick.none) return say(`${preface}${who} is not on any of your lists.`);
+  if (pick.reply) return asked(pick.reply);
+  const lines = [];
+  const back = [];
+  let failed = false;
+  let changed = false;
+  for (const list of pick.lists) {
+    const out = await applyCommand(writeAgent, 'list_remove', cmd.actor, {
+      raw: cmd.raw,
+      lookUp,
+      list: list.uri,
+    });
+    lines.push(named(out));
+    failed ||= !out.ok;
+    changed ||= Boolean(out.changed);
+    if (out.changed && out.did) {
+      back.push({
+        label: `Put ${who} back on ${list.name}`,
+        command: `list add ${out.did} list:${list.rkey}`,
+      });
+    }
+  }
+  return say(
+    preface + lines.join('\n'),
+    back.length ? back.slice(0, 3) : null,
+    failed ? 'failed' : changed ? 'done' : null,
+  );
+}
+
 /**
  * Run one typed command and return what to say back.
  *
@@ -633,6 +792,9 @@ export async function runCommand(
     if (['approve', 'cancel', 'review', 'triage'].includes(cmd.action)) {
       return say(nudge('plan'));
     }
+    if (cmd.action === 'new_list') {
+      return say('Give the list a name: "new list Spam".');
+    }
     return say(nudge('actor'));
   }
   // Before the writeAgent guard: asking what the thing does needs no session,
@@ -649,6 +811,17 @@ export async function runCommand(
     );
   }
 
+  // The bot's lists, numbered as the "Which list?" menus number them. A read,
+  // so a read-only sender may see it.
+  if (cmd.action === 'lists') {
+    if (!multiListOn()) return say(MULTI_LIST_OFF);
+    const lists = await botLists({ refresh: true });
+    return say(
+      `Your lists:\n${listsText(lists)}\n\n` +
+        'Name one at the end of a block or an approval ("block @handle to 2", "approve <code> UNKNOWN to spam"), or answer "Which list?" with its number. "new list <name>" makes another.',
+    );
+  }
+
   if (!writeAgent) {
     return say(
       'Commands are not wired up on this path.',
@@ -657,9 +830,32 @@ export async function runCommand(
     );
   }
 
+  if (cmd.action === 'new_list') {
+    if (!multiListOn()) return say(MULTI_LIST_OFF);
+    const out = await createList(writeAgent, cmd.name);
+    return {
+      text: out.message,
+      options: null,
+      outcome: out.ok ? 'done' : null,
+      allow: out.link ? [out.link] : [],
+    };
+  }
+
   if (cmd.action === 'plan') {
     const plan = await proposePlan({ link: cmd.target, kind: cmd.kind });
-    const actions = planActions(plan, { hasModel: modelsEnabled() });
+    let actions = planActions(plan, { hasModel: modelsEnabled() });
+    // "add likers <post> to spam": the list goes on every option that writes,
+    // so the number answered adds to it without asking again.
+    if (multiListOn() && cmd.list) {
+      const named = resolveList(cmd.list, await botLists()).list;
+      if (named) {
+        actions = actions.map((o) =>
+          /^(?:approve|list add)\b/i.test(o.command)
+            ? { ...o, command: withListToken(o.command, named.rkey) }
+            : o,
+        );
+      }
+    }
     const head = cmd.remembered ? 'Using the post you sent earlier.\n\n' : '';
     return {
       text: `${head}${renderPlanReport(plan, { template })}`,
@@ -692,6 +888,9 @@ export async function runCommand(
     // sees what was done and not why.
     // Each entry names its account, unless the history is one account's.
     const profiles = did ? null : await handlesFor(h.rows.map((r) => r.did));
+    // Which list each change was on, by name, once there are several.
+    const multi = multiListOn();
+    if (multi) await botLists().catch(() => null);
     const lines = h.rows.map((r) => {
       const verb =
         r.action === 'list_remove'
@@ -700,7 +899,8 @@ export async function runCommand(
             ? 'asked again, already on the list'
             : 'added';
       const undone = r.undone_at ? ' (undone)' : '';
-      const row = `${verb} · ${String(r.band).toLowerCase()} · ${r.approved_via ?? '?'} · plan ${r.code}${undone} · ${when(r.acted_at)}`;
+      const on = multi ? ` · ${listName(planList(r.plan))}` : '';
+      const row = `${verb}${on} · ${String(r.band).toLowerCase()} · ${r.approved_via ?? '?'} · plan ${r.code}${undone} · ${when(r.acted_at)}`;
       const note =
         canWrite && r.plan?.note ? `"${oneQuotable(r.plan.note)}"` : null;
       return [did ? null : whoIs(r.did, profiles), row, note]
@@ -721,9 +921,15 @@ export async function runCommand(
       const { did } = last.removed;
       const found = lookUp ? await lookUp(did).catch(() => null) : null;
       const who = nameOf(found, did);
+      const on = await changeList(last.removed.planId);
       return say(
-        `The last change took ${who} off the list. Undo only takes people off, so nothing was undone. "block ${who}" puts them back.`,
-        [{ label: `Put ${who} back on the list`, command: `list add ${did}` }],
+        `The last change took ${who} off ${on.name}. Undo only takes people off, so nothing was undone. "block ${who}" puts them back.`,
+        [
+          {
+            label: `Put ${who} back on ${on.name}`,
+            command: `list add ${did}${on.token}`,
+          },
+        ],
       );
     }
     // The newest change was a block of someone already listed, which wrote
@@ -733,10 +939,14 @@ export async function runCommand(
       const { did } = last.unchanged;
       const found = lookUp ? await lookUp(did).catch(() => null) : null;
       const who = nameOf(found, did);
+      const on = await changeList(last.unchanged.planId);
       return say(
-        `The last change was a block of ${who}, who was already on the list, so nothing was undone. "unblock ${who}" takes them off, and "undo <code>" takes back an earlier change ("history" shows the codes).`,
+        `The last change was a block of ${who}, who was already on ${on.name}, so nothing was undone. "unblock ${who}" takes them off, and "undo <code>" takes back an earlier change ("history" shows the codes).`,
         [
-          { label: `Take ${who} off the list`, command: `list remove ${did}` },
+          {
+            label: `Take ${who} off ${on.name}`,
+            command: `list remove ${did}${on.token}`,
+          },
           { label: 'Show me what changed', command: 'history' },
         ],
       );
@@ -917,6 +1127,25 @@ export async function runCommand(
       return renderReview(plan, review, { bands: cmd.bands });
     }
 
+    // Multi-list mode: the plan goes to one list. An approval of a plan no
+    // approval has bound names its list or is asked which; one of a bound plan
+    // goes where the plan went, and naming another list is refused. Asked
+    // only of an approval that can run, so a "name the bands" is not preceded
+    // by a question whose answer it would then refuse.
+    const runnable =
+      cmd.actors?.length ||
+      cmd.labels?.length ||
+      cmd.bands.length ||
+      cmd.kinds?.length;
+    if (multiListOn() && cmd.action === 'approve' && runnable) {
+      const pick = await pickPlanList(plan, cmd.list, {
+        conflict: Boolean(cmd.listConflict),
+        commandsFor: (l) => [withListToken(cmd.raw, l.rkey)],
+      });
+      if (pick.refuse) return say(pick.refuse);
+      if (pick.reply) return pick.reply;
+    }
+
     // The personal path: named accounts the sender read and decided on.
     // Every approval keeps the words that asked for it in the plan's note.
     if (cmd.actors?.length) {
@@ -1021,7 +1250,7 @@ export async function runCommand(
         ? [
             {
               label: `Add ${handle} to the list`,
-              command: `list add ${did}`,
+              command: namedListOn(`list add ${did}`, cmd),
             },
           ]
         : []),
@@ -1029,7 +1258,7 @@ export async function runCommand(
         ? [
             {
               label: `Remove ${handle} from the list`,
-              command: `list remove ${did}`,
+              command: namedListOn(`list remove ${did}`, cmd),
             },
           ]
         : []),
@@ -1056,6 +1285,8 @@ export async function runCommand(
   // who meant the author of a quoted post sees the mistake at once. The
   // handle is for reading only: it can fail to verify or pass to someone
   // else, and the DID cannot.
+  if (multiListOn()) return listedWrite(cmd, writeAgent, { lookUp });
+
   const byDid = /^did:/.test(String(cmd.actor));
   const account =
     cmd.fromPost && lookUp ? await lookUp(cmd.actor).catch(() => null) : null;
@@ -1317,6 +1548,28 @@ async function answerAsAgent({
     );
   }
 
+  // Multi-list mode: writes the check let through that named no list. One
+  // "Which list?" for all of them, built here from the commands the tools
+  // stored, sent last so it is the menu a "1" answers. Each option runs every
+  // write with that list on it, through the classic commands and their vetoes.
+  const menus = canWrite ? reply.listMenus || [] : [];
+  if (menus.length) {
+    const lists = menus[0].lists;
+    const every = menus.every((m) => m.all?.length)
+      ? menus.flatMap((m) => m.all)
+      : null;
+    const options = listMenu(
+      lists,
+      (l) => menus.flatMap((m) => m.commandsFor(l)),
+      { all: every },
+    );
+    const what = menus.map((m) => m.describe).join('; ');
+    const ids = await send(withMenu(`Which list? (${what})`, options)).catch(
+      () => null,
+    );
+    if (ids) await offerChoices(entry.convoId, options);
+  }
+
   // One row per model and kind (first wave, escalation, write check), so
   // spend can be told apart by model.
   const usageRows = (reply.usages || [])
@@ -1386,6 +1639,9 @@ const LOUD_BANDS = new Set(['CONNECTED', 'NOTABLE']);
  * not on the list, or a failure.
  */
 async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
+  if (multiListOn()) {
+    return runQuickListed(quick, { writeAgent, getIo, convoId, send, log });
+  }
   let out;
   try {
     out = await applyCommand(writeAgent, quick.action, quick.actor, {
@@ -1448,6 +1704,151 @@ async function runQuick(quick, { writeAgent, getIo, convoId, send, log }) {
 }
 
 /**
+ * The quick lane in multi-list mode. Still no model: a block that names no
+ * list is answered with the "Which list?" menu, which a "1" answers, and an
+ * unblock looks for the account first (listPick.js). A block that goes
+ * through stays quiet as it does with one list, and the burst summary names
+ * the list each went on.
+ */
+async function runQuickListed(
+  quick,
+  { writeAgent, getIo, convoId, send, log },
+) {
+  const lookUp = async (a) => (await getIo()).lookUp(a);
+  const fail = async (err) => {
+    await send(`That failed: ${String(err?.message || err).slice(0, 200)}`);
+    return { outcome: 'failed', quick: quick.action };
+  };
+  const ask = async (reply) => {
+    await send(withMenu(reply.text, reply.options));
+    await offerChoices(convoId, reply.options);
+    log('Asked which list', { action: quick.action });
+    return { outcome: null, quick: quick.action };
+  };
+  let did;
+  try {
+    did = /^did:/.test(String(quick.actor))
+      ? quick.actor
+      : await resolveActor(quick.actor);
+  } catch (err) {
+    await send(
+      `I could not resolve ${quick.actor}: ${String(err?.message || err).replace(/\.$/, '')}.`,
+    );
+    return { outcome: 'failed', quick: quick.action };
+  }
+  const handle = /^did:/.test(String(quick.actor))
+    ? (await handlesFor([did]).catch(() => new Map())).get(did)?.handle
+    : String(quick.actor).replace(/^@/, '');
+  const who = handle ? `@${handle}` : did;
+
+  if (quick.action === 'list_remove') {
+    let pick;
+    try {
+      pick = await pickRemoval(did, quick.list, {
+        conflict: Boolean(quick.listConflict),
+        who,
+        commandsFor: (l) => [`list remove ${did} list:${l.rkey}`],
+      });
+    } catch (err) {
+      return fail(err);
+    }
+    if (pick.none) {
+      await send(`${who} is not on any of your lists.`);
+      return { outcome: null, quick: quick.action };
+    }
+    if (pick.reply) return ask(pick.reply);
+    const lines = [];
+    let changed = false;
+    let failed = false;
+    for (const list of pick.lists) {
+      try {
+        const out = await applyCommand(writeAgent, 'list_remove', did, {
+          raw: quick.raw,
+          lookUp,
+          via: 'command',
+          list: list.uri,
+        });
+        lines.push(out.message.replaceAll(did, who));
+        changed ||= Boolean(out.changed);
+        failed ||= !out.ok;
+      } catch (err) {
+        lines.push(`That failed: ${String(err?.message || err).slice(0, 200)}`);
+        failed = true;
+      }
+    }
+    // Said out loud: a quiet check mark cannot say which list it came off.
+    if (changed && !failed) await sendReceipt(send, lines.join('\n'), { log });
+    else await send(lines.join('\n'));
+    return {
+      outcome: failed ? 'failed' : changed ? 'done' : null,
+      quick: quick.action,
+    };
+  }
+
+  let pick;
+  try {
+    pick = await pickList(quick.list, {
+      conflict: Boolean(quick.listConflict),
+      question: `Which list for ${who}?`,
+      commandsFor: (l) => [`list add ${did} list:${l.rkey}`],
+    });
+  } catch (err) {
+    return fail(err);
+  }
+  if (pick.reply) return ask(pick.reply);
+  let out;
+  try {
+    out = await applyCommand(writeAgent, 'list_add', did, {
+      raw: quick.raw,
+      lookUp,
+      via: 'command',
+      list: pick.list.uri,
+    });
+  } catch (err) {
+    return fail(err);
+  }
+  const a = out.account;
+  const at = nameOf(a, who);
+  log('Quick lane', {
+    action: quick.action,
+    actor: at,
+    list: pick.list.name,
+    ok: out.ok,
+    changed: Boolean(out.changed),
+    band: a?.band ?? '-',
+  });
+  if (!out.ok) {
+    await send(out.message.replaceAll(did, at));
+    return { outcome: 'failed', quick: quick.action };
+  }
+  if (out.changed && out.logged === false) {
+    await sendReceipt(send, out.message.replaceAll(did, at), { log });
+    return { outcome: 'done', quick: quick.action };
+  }
+  if (out.changed && a && LOUD_BANDS.has(a.band)) {
+    const why = [
+      a.band,
+      a.vouches ? `followed by ${a.vouches} people you follow` : null,
+      a.followers ? `${a.followers.toLocaleString('en-US')} followers` : null,
+    ].filter(Boolean);
+    await sendReceipt(
+      send,
+      `Blocked ${at} on ${pick.list.name}. Worth knowing: ${why.join(', ')}. "unblock ${at}" takes it back.`,
+      { log },
+    );
+    return { outcome: 'done', quick: quick.action };
+  }
+  noteQuiet(convoId, {
+    action: quick.action,
+    handle: at.replace(/^@/, ''),
+    already: Boolean(out.already),
+    blocksYou: Boolean(a?.blocksYou),
+    list: pick.list.name,
+  });
+  return { outcome: 'done', quick: quick.action };
+}
+
+/**
  * Posts per round of a card's "hostile": one wave of single-post calls, so a
  * round holds the shared job queue no longer than one batched wave does.
  */
@@ -1462,12 +1863,24 @@ const HOSTILE_PER_ROUND = CONCURRENCY;
  * the counts are not taken for the whole post. Anyone CONNECTED or NOTABLE is
  * held, as a watch holds them, and `ask` puts them to the owner as a 👍.
  */
-async function runHostile(code, { writeAgent, generate, model, log }) {
+async function runHostile(
+  code,
+  { writeAgent, generate, model, log, list = null },
+) {
   if (!(modelsEnabled() && model)) {
     return { text: NO_MODEL_TO_SORT, outcome: 'failed' };
   }
   const plan = await findPlan(code);
   if (!plan) return { text: `No plan with code ${code}.`, outcome: 'failed' };
+  // Before any reading: the adds at the end go to the plan's list, and a
+  // question about which comes before the model calls, not after.
+  if (multiListOn()) {
+    const pick = await pickPlanList(plan, list, {
+      commandsFor: (l) => [`hostile ${code} list:${l.rkey}`],
+    });
+    if (pick.refuse) return { text: pick.refuse, outcome: null };
+    if (pick.reply) return { ...pick.reply };
+  }
   let out = null;
   // A round that labels nothing is failing, and another would fail the same.
   for (let round = 0; round < 3; round += 1) {
@@ -1548,25 +1961,66 @@ async function runPending(
   const asks = [];
   let failed = false;
   let changed = false;
+  let options = null;
+  // Multi-list mode: commands that write to a list without naming it are not
+  // run one by one into a question each. One "Which list?" goes back, each
+  // option running all of them with the list on the ones that need it.
+  const which = await askListFor(pending.commands || []);
+  if (which) {
+    return {
+      text: which.text,
+      options: which.options,
+      failed: false,
+      changed: false,
+      asks: [],
+    };
+  }
+  const multi = multiListOn();
   for (const command of pending.commands || []) {
     try {
-      const watch = /^watch\s+(\S+)(?:\s+(\d+)h)?(\s+auto)?\s*$/i.exec(command);
+      // The list is read off before the two commands nobody types are matched,
+      // as parseCommand reads it off the ones people do.
+      const choice = multi
+        ? splitListChoice(command)
+        : { text: command, list: null };
+      const watch = /^watch\s+(\S+)(?:\s+(\d+)h)?(\s+auto)?\s*$/i.exec(
+        choice.text,
+      );
       if (watch) {
         const hours = Number(watch[2] || 24);
         const auto = Boolean(watch[3]);
+        let list = null;
+        if (multi && auto) {
+          const pick = await pickList(choice.list, {
+            question: 'Which list should the watch add to?',
+            commandsFor: (l) => [
+              `watch ${watch[1]} ${hours}h auto list:${l.rkey}`,
+            ],
+          });
+          if (pick.reply) {
+            lines.push(pick.reply.text);
+            options = pick.reply.options;
+            continue;
+          }
+          list = pick.list.uri;
+        }
         const out = await startWatch({
           convoId,
           target: watch[1],
           hours,
           auto,
+          ...(list ? { list } : {}),
         });
+        const onList =
+          multi && auto && out.list ? ` on ${listName(out.list)}` : '';
         lines.push(
-          `${out.extended ? 'Still watching' : 'Watching'} it for ${hours}h${auto ? ', blocking the hostile ones as they come' : ''}. I'll send an update each hour there's something new.`,
+          `${out.extended ? 'Still watching' : 'Watching'} it for ${hours}h${auto ? `, blocking the hostile ones as they come${onList}` : ''}. I'll send an update each hour there's something new.`,
         );
         changed = true;
         continue;
       }
       // The shield's questions (shield.js): owner only, as typed ones are.
+      // They never name a list, so they are matched as stored.
       if (isShieldCommand(command)) {
         const out = await runShieldCommand(command, { isOwner, convoId });
         lines.push(out.text);
@@ -1574,15 +2028,17 @@ async function runPending(
         changed ||= out.outcome === 'done';
         continue;
       }
-      const hostile = /^hostile\s+([0-9a-f]{8})$/i.exec(command);
+      const hostile = /^hostile\s+([0-9a-f]{8})$/i.exec(choice.text);
       if (hostile) {
         const out = await runHostile(hostile[1], {
           writeAgent,
           generate,
           model,
           log,
+          list: choice.list,
         });
         lines.push(out.text);
+        if (out.options?.length) options = out.options;
         if (out.ask) asks.push(out.ask);
         failed ||= out.outcome === 'failed';
         changed ||= out.outcome === 'done';
@@ -1603,6 +2059,16 @@ async function runPending(
         convoId,
       });
       lines.push(reply.text);
+      // In multi-list mode the menu a lone command answers with is kept: a
+      // "Which list?" it asked, or the undo on its receipt. With one list
+      // these have never carried a menu, and still do not.
+      if (
+        multi &&
+        reply.options?.length &&
+        (pending.commands || []).length === 1
+      ) {
+        options = reply.options;
+      }
       failed ||= Boolean(cmd.needsTarget) || reply.outcome === 'failed';
       changed ||= reply.outcome === 'done';
     } catch (err) {
@@ -1610,7 +2076,7 @@ async function runPending(
       failed = true;
     }
   }
-  return { text: lines.join('\n\n'), failed, changed, asks };
+  return { text: lines.join('\n\n'), failed, changed, asks, options };
 }
 
 /** The reaction a run of stored commands earns: a failure outranks a change. */
@@ -1624,13 +2090,16 @@ const pendingOutcome = (out) =>
  */
 async function sendRun(send, convoId, out, { log }) {
   const asks = out.asks || [];
-  const text = asks.length
+  const options = out.options || [];
+  const asked = asks.length
     ? `${out.text}\n\n${confirmLine(asks.map((a) => a.describe))}`
     : out.text;
+  const text = withMenu(asked, options);
   const ids =
     pendingOutcome(out) === 'done'
       ? await sendReceipt(send, text, { log })
       : await send(text);
+  if (options.length && ids) await offerChoices(convoId, options);
   if (asks.length && ids) {
     await savePending(convoId, {
       commands: asks.flatMap((a) => a.commands),
@@ -1641,6 +2110,10 @@ async function sendRun(send, convoId, out, { log }) {
     );
   }
 }
+
+/** What "lists" and "new list" say with one list. */
+const MULTI_LIST_OFF =
+  'Multi-list mode is off, so there is one list and every command uses it. Set MOD_MULTI_LIST=true and restart to keep several lists and choose between them.';
 
 /** What a yes gets when no question is open. */
 const NOTHING_TO_CONFIRM =
@@ -1707,11 +2180,26 @@ async function standingCommand({
   // The shared record of any kind, not only a post: "stop watching" with a
   // list or a feed attached then matches no watch, where dropping it would
   // stop the newest one. "watch" still takes only a post.
-  const watching = parseWatchCommand(text, {
+  let watching = parseWatchCommand(text, {
     embedUri: sharedRecordUri(entry.message) || embedUri,
     links: msgLinks,
   });
   if (!watching) return null;
+  // "watch this and block the hostile ones to spam". Read again without the
+  // list only when that still reads as a watch that blocks: a watch that only
+  // reports writes to no list, and "watch this to see" names none.
+  if (multiListOn() && watching.action === 'watch') {
+    const choice = splitListChoice(text);
+    if (choice.list) {
+      const again = parseWatchCommand(choice.text, {
+        embedUri: sharedRecordUri(entry.message) || embedUri,
+        links: msgLinks,
+      });
+      if (again?.action === 'watch' && again.auto) {
+        watching = { ...again, list: choice.list };
+      }
+    }
+  }
   if (watching.action === 'watches') {
     const live = await liveWatches();
     await send(watchesText(live), {
@@ -1742,16 +2230,33 @@ async function standingCommand({
     await send('Which post? Send it with "watch this", or paste its link.');
     return { convoId, watch: 'ask', outcome: null };
   }
+  let list = null;
+  if (watching.auto && multiListOn()) {
+    const pick = await pickList(watching.list ?? null, {
+      question: 'Which list should the watch add to?',
+      commandsFor: (l) => [
+        `watch ${target} ${watching.hours}h auto list:${l.rkey}`,
+      ],
+    });
+    if (pick.reply) {
+      await send(withMenu(pick.reply.text, pick.reply.options));
+      await offerChoices(convoId, pick.reply.options);
+      return { convoId, watch: 'which-list', outcome: null };
+    }
+    list = pick.list.uri;
+  }
   const out = await startWatch({
     convoId,
     target,
     hours: watching.hours,
     auto: watching.auto,
+    ...(list ? { list } : {}),
   });
+  const onList = list ? ` on ${listName(out.list || list)}` : '';
   await send(
     `${out.extended ? 'Still watching' : 'Watching'} it for ${watching.hours}h. ` +
       (watching.auto
-        ? `I'll block what ${escalationEnabled() ? 'two models read' : 'the model reads'} as hostile in new quotes and replies, hold anyone CONNECTED or NOTABLE for you, and `
+        ? `I'll block what ${escalationEnabled() ? 'two models read' : 'the model reads'} as hostile in new quotes and replies${onList}, hold anyone CONNECTED or NOTABLE for you, and `
         : "I'll read new quotes and replies as they come and ") +
       'send an update each hour there is something new. "stop watching" ends it.',
   );
@@ -1809,8 +2314,12 @@ async function withoutModel({
 
     const offered = await readCardChoices(convoId);
     if (offered) {
+      // "likers to spam": the list comes off before the words are matched.
+      const named = multiListOn()
+        ? splitListChoice(text)
+        : { text, list: null };
       const keys = parseCardWords(
-        text,
+        named.text,
         offered.map((o) => o.key),
       );
       if (keys) {
@@ -1821,9 +2330,10 @@ async function withoutModel({
         const notes = picked
           .filter((o) => !o.command)
           .map((o) => `${o.key}: ${o.unavailable}`);
-        const commands = [
-          ...new Set(picked.filter((o) => o.command).map((o) => o.command)),
-        ];
+        const commands = await withNamedList(
+          [...new Set(picked.filter((o) => o.command).map((o) => o.command))],
+          named.list,
+        );
         if (!commands.length) {
           await send(notes.join('\n'));
           log('Answered a card', { keys: keys.join(','), ran: 0 });
@@ -2654,8 +3164,34 @@ export async function runDmPass({
       if (!cmd) {
         const choice = parseChoice(entry.message.text);
         if (choice) {
-          const chosen = await takeChoice(entry.convoId, choice);
-          if (chosen) cmd = parseCommand(chosen, { embedUri });
+          const option = await takeOption(entry.convoId, choice);
+          // An option that runs several commands, or one nobody types (a
+          // "Which list?" for a card's words, a watch that blocks), runs as a
+          // stored question does: through runPending, with the same vetoes.
+          // Only for a sender who may write; the gate in runCommand answers
+          // anyone else from the option's first command.
+          if (option?.commands?.length && canWrite) {
+            const out = await runPending(
+              { commands: option.commands },
+              {
+                writeAgent,
+                getIo,
+                convoId: entry.convoId,
+                generate,
+                model: activeModel,
+                log,
+              },
+            );
+            outcome = pendingOutcome(out);
+            await sendRun(send, entry.convoId, out, { log });
+            log('Ran a chosen option', {
+              commands: option.commands.join(' | '),
+              ok: !out.failed,
+            });
+            turns.push({ convoId: entry.convoId, choice: option.label });
+            continue;
+          }
+          if (option?.command) cmd = parseCommand(option.command, { embedUri });
         }
       }
 
@@ -2800,10 +3336,11 @@ export async function runDmPass({
         // through sendReceipt whatever its words.
         outcome = reply.outcome ?? null;
         const text = withMenu(reply.text, options);
+        const allow = reply.allow || [];
         const shown =
           outcome === 'done'
-            ? await sendReceipt(send, text, { log })
-            : await send(text);
+            ? await sendReceipt(send, text, { allow, log })
+            : await send(text, { allow });
         if (shown) await offerChoices(entry.convoId, options, reply.lastPost);
         log('Ran a command', {
           action: cmd.action,
