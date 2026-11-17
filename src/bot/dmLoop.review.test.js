@@ -230,6 +230,37 @@ describe('a label approval that names bands or a time', () => {
     );
     expect(out.text).toMatch(/^Added 2 that a model read as hostile\./);
   });
+
+  // A watch keeps labelling while a menu stays live, so the add a count
+  // offers adds that count and nothing labelled after it.
+  it("adds only what a label review counted, pressed after more were labelled", async () => {
+    await label('PERIPHERAL', 3, '2026-11-01T10:00:00.000Z');
+    const review = await runCommand(
+      parseCommand('review abcd1234 hostile'),
+      agent,
+      {},
+    );
+    expect(review.options[0].label).toBe('Add all 3');
+    await label('CONNECTED', 5, '2026-11-01T10:20:00.000Z');
+    await label('NOTABLE', 4, '2026-11-01T10:25:00.000Z');
+    const out = await press(review, 1);
+    expect(out.text).toMatch(/^Added 3 that a model read as hostile\./);
+  });
+
+  it("adds only what a triage reply counted, pressed after more were labelled", async () => {
+    await label('PERIPHERAL', 3, '2026-11-01T10:00:00.000Z');
+    const read = await runCommand(parseCommand('triage abcd1234'), agent, {
+      model: 'test/model',
+      generate: async () => {
+        throw new Error('nothing here has words to read');
+      },
+    });
+    const add = read.options.find((o) => /^Add the/.test(o.label));
+    expect(add.label).toBe('Add the 3 hostile ones');
+    await label('CONNECTED', 5, '2026-11-01T10:20:00.000Z');
+    const out = await runCommand(parseCommand(add.command), agent, {});
+    expect(out.text).toMatch(/^Added 3 that a model read as hostile\./);
+  });
 });
 
 describe('what undo and cancel say they do', () => {

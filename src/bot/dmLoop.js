@@ -440,6 +440,27 @@ const liveAdds = (plan) =>
   countDecisions(plan, { state: 'live' }).catch(() => null);
 
 /**
+ * When the newest `label` on a plan was given, or null when no row carries a
+ * time. A menu that offers to add a counted label carries it as "asof=", so
+ * pressing it later adds what was counted and nothing a watch labelled while
+ * the menu was live.
+ */
+async function newestLabelAt(plan, label) {
+  const rows = await select('decision', {
+    select: 'triage_at',
+    eq: { plan_id: plan.id, triage: label },
+    where: { triage_at: 'not.is.null' },
+    order: 'triage_at.desc',
+    limit: 1,
+  });
+  const at = Date.parse(rows?.[0]?.triage_at);
+  return Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
+
+/** " asof=<time>", or nothing when there is no time to bound by. */
+const asOfToken = (at) => (at ? ` asof=${at}` : '');
+
+/**
  * Run one typed command and return what to say back.
  *
  * No branch asks a model what to do. The inputs are the sender's literal text
@@ -597,6 +618,9 @@ export async function runCommand(
     if (cmd.action === 'triage') {
       const out = await runTriage(plan, { generate, model, log });
       const { counts } = out;
+      // Read after this run's labels are written, so the add below covers
+      // them and nothing labelled later.
+      const hostileAsOf = await newestLabelAt(plan, 'hostile');
       // How many were read as hostile and how many are not yet acted on can
       // differ, and a button can only be about the second.
       const left = out.pending || counts;
@@ -647,7 +671,7 @@ export async function runCommand(
         });
         choices.push({
           label: `Add the ${left.hostile} hostile ones`,
-          command: `approve ${cmd.code} hostile`,
+          command: `approve ${cmd.code} hostile${asOfToken(hostileAsOf)}`,
         });
       }
       if (out.remaining) {
@@ -681,6 +705,9 @@ export async function runCommand(
     // model's opinion.
     if (cmd.action === 'review' && cmd.labels?.length) {
       const label = cmd.labels[0];
+      // Read before the review counts, so a label given after the count is
+      // past the bound.
+      const asOf = await newestLabelAt(plan, label);
       const out = await reviewTriage(plan, label);
       if (!out.total)
         return say(`Nothing in ${cmd.code} was read as ${label}.`);
@@ -726,7 +753,7 @@ export async function runCommand(
       const choices = [
         {
           label: `Add all ${out.pending}`,
-          command: `approve ${cmd.code} ${label}`,
+          command: `approve ${cmd.code} ${label}${asOfToken(asOf)}`,
         },
         { label: 'Do nothing', command: `cancel ${cmd.code}` },
       ];
