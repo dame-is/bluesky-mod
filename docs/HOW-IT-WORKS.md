@@ -110,6 +110,7 @@ Commands are parsed, not interpreted. They never reach a model.
 | `thread <post>` *(model)* | What a thread is arguing about, without grading anyone in it |
 | `watch this` *(model)* | Re-reads a post's new quotes and replies for 24 hours. `for 12h`, `and block the hostile ones` (agent mode only), `stop watching`, `what are you watching` |
 | `remember: <note>` *(agent mode)* | Keeps your words as a standing note the model reads. `what do you remember`, `forget 2`. Classic mode answers it with a note saying so. |
+| `panel` *(with the web panel on)* | Answers with a sign-in code for the panel. The whole message, in either mode, and never through a model. |
 
 **You rarely type a code.** Bare `undo` means the newest change to the list when that change was an add, one block or a whole batch. After an unblock, or a block of someone already on the list, it undoes nothing and says so. A reply that offers a next step ends in a numbered menu, so the usual path is answering `1`. A number answers only the menu on the bot's last message. A code that doesn't parse is refused rather than guessed, because undoing the most recent plan over a typo would act on a batch you didn't name.
 
@@ -137,6 +138,12 @@ The only version of "act only on my commands" that survives that is one where th
 A shared post is treated like a typed handle: you put the record in the message, and its author is read out of the URI by code. Wording that might mean somebody else ("block whoever is in the replies") comes back naming the author and asking, rather than acting on a guess.
 
 Attacker-controlled strings (handles, display names, bios, post text) are fenced in `<untrusted>` tags before any model sees them in a tool result. The bot's own earlier DMs come back to the model as its own words. In them, code fences the quotes a label review prints and the agent's reasons in `history`, and the write check counts a name found only inside those fences as not mentioned. A handle or display name in a lookup report, and anything a model wrote, come back as written. The bot never puts a link or mention facet on text it didn't build. A mention would notify the person being discussed.
+
+### The web panel
+
+With `PANEL_PORT` set the bot also serves a web page: the list, each scan on a radar, the review queue and the log ([PANEL.md](PANEL.md)). It is a second place to type the same commands, not a second way to write. A click builds the text of a command, and that text goes through `parseCommand` and `runCommand` on the bot's job queue, as a DM does (`src/panel/commands.js`). The panel has no code that creates or deletes a list item.
+
+Who may open it is the roster again. A session comes only from a code the bot sent by DM to someone it answers, and what that account may do is read from the roster on every request (`src/panel/auth.js`).
 
 ## Agent mode
 

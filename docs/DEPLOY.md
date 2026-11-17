@@ -106,6 +106,10 @@ Things to know:
 
 Moving an existing bot from the SQLite file to Postgres isn't automatic. A new database starts empty: the snapshot rebuilds itself, but the decision log and history stay in the old file.
 
+## The web panel
+
+The hosts above run the bot as a worker with no web address, which is all it needs. The optional web panel needs one port reachable by you. [PANEL.md](PANEL.md) says how to turn it on and how to reach it without opening it to everyone.
+
 ## How much disk it needs
 
 Nearly all of the file is the follow-graph snapshot: one row for every account anyone you follow follows. While the weekly rebuild runs, it also holds every follow it read until they're counted. These figures assume each account you follow follows about 600, and use row sizes measured on the real schema, with two snapshots kept:

@@ -27,6 +27,11 @@ With a model:
 - **Sort replies by tone.** Reads the replies and quotes on a post and labels each `hostile`, `arguing` or `neutral`, so you can add only the hostile ones, with their own words kept next to each label.
 - **Watch a post.** Re-reads a post's new quotes and replies every few minutes for a day and tells you what came in. It can also offer to watch one of your posts when it suddenly takes off.
 
+A web panel, if you turn it on:
+
+- **The list and every scan as pages.** A radar puts you at the centre and each band in a ring, so a batch of 4,000 has a shape you can see before you approve any of it. Click a ring to tick it, read the names of anyone near you, and the page shows the command it will send.
+- **The same gate.** The panel changes the list only by sending the bot its own commands, so the PROTECTED veto, the decision log and undo are the ones the DMs use. You sign in with a code the bot sends you by DM. [docs/PANEL.md](docs/PANEL.md) has the rest.
+
 ## How it decides who is close to you
 
 The bot does not try to decide who is bad. It answers a narrower question: if you blocked this account, who would notice? The bands rest on one signal: **how many of the people you follow also follow them**.
@@ -80,7 +85,7 @@ On the gateway and OpenRouter the model defaults to DeepSeek V4.1 Flash (`deepse
 
 ## What it stores
 
-One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker), or a Postgres database if you set `DATABASE_URL` ([docs/DEPLOY.md](docs/DEPLOY.md#with-your-own-database)): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, and token counts for model calls from the last 90 days. It holds other people's posts where a batch was sorted by tone. Treat it as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
+One SQLite file (`data/bluesky-mod.db`, in a Docker volume if you use Docker), or a Postgres database if you set `DATABASE_URL` ([docs/DEPLOY.md](docs/DEPLOY.md#with-your-own-database)): the follow-graph snapshot, proposed batches and every decision, the DM cursor, the bot's session token, notes you asked it to remember, token counts for model calls from the last 90 days, and, with the web panel on, its sign-ins as hashes. It holds other people's posts where a batch was sorted by tone. Treat it as private and back it up; losing it loses the decision log. [docs/SETUP-VPS.md](docs/SETUP-VPS.md#backups) has the steps, including the one a restore needs.
 
 How much it keeps is up to you: `MOD_SCORING=simple` skips the friends-of-friends half of the snapshot, which is nearly all of the file, and the `MOD_KEEP_*` settings say how long old scans, quotes and re-scores are kept.
 
@@ -96,6 +101,7 @@ The settings most people change are in [.env.example](.env.example), commented. 
 npm install
 npm test
 DRY_RUN=true npm run dev   # reads no DMs and writes nothing
+npm run panel:demo         # the web panel on invented data, with no account
 ```
 
 The store's tests run against SQLite, and against Postgres as well when `TEST_DATABASE_URL` names a database they may create schemas in.
