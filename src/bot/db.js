@@ -358,8 +358,9 @@ export async function count(tableName, opts = {}) {
 // --- functions ----------------------------------------------------------------
 
 /**
- * How many finalised snapshots to keep: the newest, which is scored against,
- * and the one before, which is used while a newer one cannot be read. Each is
+ * How many finalised snapshots to keep, unless the caller says
+ * (MOD_KEEP_SNAPSHOTS): the newest, which is scored against, and the one
+ * before, which is used while a newer one cannot be read. Each full one is
  * one row per account anyone in the owner's circle follows, which runs to
  * hundreds of thousands for someone who follows a few thousand.
  */
@@ -374,7 +375,7 @@ const FUNCTIONS = {
    * circle.unreadable) contributes no edges, so its vouches are missing from
    * the count.
    */
-  finalise_snapshot({ snapshot }) {
+  finalise_snapshot({ snapshot, keep = KEEP_SNAPSHOTS }) {
     const conn = openDb();
     const pending = conn
       .prepare('select count(*) as n from circle where taken_at = ? and follows_indexed_at is null')
@@ -396,7 +397,7 @@ const FUNCTIONS = {
       conn.prepare('delete from circle_follow where taken_at = ?').run(snapshot);
       const old = conn
         .prepare('select distinct taken_at from circle order by taken_at desc limit -1 offset ?')
-        .all(KEEP_SNAPSHOTS)
+        .all(Math.max(1, keep))
         .map((r) => r.taken_at);
       for (const takenAt of old) {
         conn.prepare('delete from vouch where taken_at = ?').run(takenAt);

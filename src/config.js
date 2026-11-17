@@ -5,7 +5,6 @@
 // for the settings most people change.
 
 import { OWNER_DID } from './constants.js';
-import { normaliseMode } from './bot/dmLoop.js';
 import { rosterFromEnv, parseDids } from './lib/senders.js';
 import { readFlag, badFlags } from './flags.js';
 import { modelProblems, modelsEnabled, PROVIDER } from './models.js';
@@ -46,6 +45,19 @@ function wanted({ positive, min, max, whole }) {
       : low ? ` from ${low} to ${max}` : ` above 0 and at most ${max}`;
   const kind = whole ? 'a whole number' : 'a number';
   return `${!positive && min > 0 ? '0 (off) or ' : ''}${kind}${range}`;
+}
+
+/**
+ * Which surface answers by default. Anything but "agent" is classic, so an
+ * unset or misspelt value gets the mode where the model holds no write tools.
+ */
+export function normaliseMode(value) {
+  return String(value ?? '').trim().toLowerCase() === 'agent' ? 'agent' : 'classic';
+}
+
+/** "simple" or "full", the default; anything else is reported by assertConfig. */
+export function normaliseScoring(value) {
+  return String(value ?? '').trim().toLowerCase() === 'simple' ? 'simple' : 'full';
 }
 
 /**
@@ -151,6 +163,33 @@ export const config = {
   snapshotMaxAgeDays: num('SNAPSHOT_MAX_AGE_DAYS', 7, { positive: true }),
 
   /**
+   * How much of the follow graph to read. "full" reads who the owner follows
+   * and who each of them follows, so someone followed by several of the
+   * owner's follows scores as connected. "simple" reads only who the owner
+   * follows, and asks at scoring time whether an account follows the owner
+   * back: a much smaller database and a snapshot built in seconds, with no
+   * peripheral band and no friends of friends.
+   */
+  scoring: normaliseScoring(process.env.MOD_SCORING),
+
+  /**
+   * What the database keeps, and for how long. Days settings take 0 for
+   * forever.
+   */
+  keep: {
+    /** Finalised snapshots: the newest is scored against, older ones are spares. */
+    snapshots: num('MOD_KEEP_SNAPSHOTS', 2, { positive: true, whole: true }),
+    /** Finished weekly re-scores, the newest compared with the one before. */
+    audits: num('MOD_KEEP_AUDITS', 4, { positive: true, min: 2, whole: true }),
+    /** Scans never approved: their plans and every row in them. */
+    unapprovedDays: num('MOD_KEEP_UNAPPROVED_DAYS', 30),
+    /** The words of a reply or quote kept beside its tone label. */
+    quotesDays: num('MOD_KEEP_QUOTES_DAYS', 0),
+    /** Token counts per model call. */
+    usageDays: num('MOD_KEEP_USAGE_DAYS', 90),
+  },
+
+  /**
    * How often to re-score the list and report what moved. A sweep knows one
    * moment of the graph, and a stranger blocked today may be a friend of a
    * friend in a month. 0 turns it off.
@@ -250,6 +289,10 @@ export function assertConfig(env = process.env) {
   const mode = String(env.MOD_DM_MODE ?? '').trim().toLowerCase();
   if (mode && mode !== 'classic' && mode !== 'agent') {
     problems.push(`MOD_DM_MODE must be classic or agent, not "${env.MOD_DM_MODE}"`);
+  }
+  const scoring = String(env.MOD_SCORING ?? '').trim().toLowerCase();
+  if (scoring && scoring !== 'full' && scoring !== 'simple') {
+    problems.push(`MOD_SCORING must be full or simple, not "${env.MOD_SCORING}"`);
   }
   if (config.dmMode === 'agent' && !modelsEnabled()) {
     problems.push('MOD_DM_MODE=agent needs a model provider; set one or use classic mode');

@@ -42,7 +42,22 @@ At the write it also asks the AppView whether you follow the account at that mom
 
 ### The snapshot
 
-Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. A plan's decision rows record what the gate saw (band, trust, distance and vouches), and a single block or unblock records the band. The vouch counts behind them are kept for the last two snapshots.
+Scores read a snapshot of your follow graph: who you follow, and who each of them follows. `src/snapshot.js` builds it on first start and rebuilds it weekly (`SNAPSHOT_MAX_AGE_DAYS`), about 25 seconds of work at a time so DMs are answered in between. Building it once means a score is a lookup rather than an API call. A plan's decision rows record what the gate saw (band, trust, distance and vouches), and a single block or unblock records the band. The vouch counts behind them are kept for the last two snapshots (`MOD_KEEP_SNAPSHOTS`).
+
+### Simple scoring
+
+`MOD_SCORING=simple` skips the second half of the snapshot. The bot reads only who you follow and your curation lists, which takes seconds and stores one row per account you follow, and asks at scoring time whether each account follows you. The bands become:
+
+| Band         | Rule |
+| ------------ | ---- |
+| `PROTECTED`  | The same as above. |
+| `CONNECTED`  | They follow you. |
+| `NOTABLE`    | They don't follow you, and have 10,000+ followers or very high activity with real reach. |
+| `UNKNOWN`    | Everyone else. |
+
+There is no `PERIPHERAL`, and a friend of a friend who doesn't follow you is `UNKNOWN`. That is the cost: an `UNKNOWN` account is the kind a batch approval adds without a named look, so in simple mode more of the people near your circle are in it. Choose it if your database has to stay small or your host's disk is tight. The protected set, the veto at the write and the live follow check are the same in both modes.
+
+Change it by restarting the bot with the new setting. Going to simple drops the full snapshot's vouch counts at once. Going back to full starts a full build, and scores go on using the simple snapshot until it is done.
 
 Known limits:
 

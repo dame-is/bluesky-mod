@@ -15,6 +15,10 @@
 //   idle        the current snapshot is complete and fresh enough
 //
 // `restart: true` forces a new snapshot regardless of age.
+//
+// With MOD_SCORING=simple only the owner's own follows are read, so a
+// snapshot is collected and finalised in one step and holds no vouch counts.
+// A snapshot taken in the other mode is rebuilt at the next check.
 
 import { OWNER_DID } from './constants.js';
 import { config } from './config.js';
@@ -94,12 +98,12 @@ const aheadOfClock = () => new Date(Date.now() + CLOCK_SKEW_MS).toISOString();
  */
 async function currentSnapshot() {
   const rows = await select('circle', {
-    select: 'taken_at',
+    select: 'taken_at,scoring',
     where: { taken_at: `lte.${aheadOfClock()}` },
     order: 'taken_at.desc',
     limit: 1,
   });
-  return rows?.[0]?.taken_at ?? null;
+  return rows?.[0] ?? null;
 }
 
 /** Delete every snapshot dated ahead of the clock. */
@@ -129,7 +133,7 @@ async function dropSnapshotsAhead() {
   }
 }
 
-async function startSnapshot(pds) {
+async function startSnapshot(pds, { scoring = config.scoring } = {}) {
   const takenAt = new Date().toISOString();
   const circle = await readCircle({ pds, did: OWNER_DID });
   if (!circle.length) throw new Error('read zero follows; refusing to snapshot');
@@ -192,9 +196,17 @@ async function startSnapshot(pds) {
     where: { added_at: `lt.${takenAt}` },
   });
 
+  // A simple snapshot reads no follow lists, so every member is done as
+  // soon as it is written.
+  const indexedAt = scoring === 'simple' ? takenAt : null;
   await upsert(
     'circle',
-    circle.map((did) => ({ taken_at: takenAt, did })),
+    circle.map((did) => ({
+      taken_at: takenAt,
+      did,
+      scoring,
+      follows_indexed_at: indexedAt,
+    })),
   );
 
   return { takenAt, members: circle.length, protected: rows.length };
@@ -215,7 +227,11 @@ export async function snapshotStep({
 } = {}) {
   const pds = await resolvePds(OWNER_DID);
 
-  let takenAt = await currentSnapshot();
+  const current = await currentSnapshot();
+  if (config.scoring === 'simple') {
+    return simpleStep(pds, current, { restart });
+  }
+  let takenAt = current?.scoring === 'full' ? current.taken_at : null;
   let started = null;
 
   if (takenAt && !restart) {
@@ -362,7 +378,10 @@ export async function snapshotStep({
   // any is pending, and no follow list cut short by a failed page is staged,
   // so a count here is low only by the members written off (counted below)
   // and by follows past the 1,500 each member is read to.
-  const written = await rpc('finalise_snapshot', { snapshot: takenAt });
+  const written = await rpc('finalise_snapshot', {
+    snapshot: takenAt,
+    keep: config.keep.snapshots,
+  });
   await dropSnapshotsAhead();
   const gaps = await count('circle', {
     eq: { taken_at: takenAt },
@@ -378,7 +397,88 @@ export async function snapshotStep({
   };
 }
 
-/** Is there a finalised snapshot to score against at all? */
-export async function hasSnapshot() {
-  return (await count('vouch', {})) > 0;
+/**
+ * One step in simple mode: if the newest snapshot is simple and fresh there is
+ * nothing to do, and otherwise a new one is read and finalised at once.
+ *
+ * Finalising a simple snapshot writes no vouches. It also drops what full
+ * scoring left behind, the vouch counts and any follow lists read for a build
+ * that did not finish, since choosing simple scoring is choosing not to keep
+ * them.
+ */
+async function simpleStep(pds, current, { restart }) {
+  if (current?.scoring === 'simple' && !restart) {
+    const ageDays = (Date.now() - Date.parse(current.taken_at)) / 86_400_000;
+    if (ageDays < config.snapshotMaxAgeDays) {
+      return {
+        state: 'idle',
+        snapshot: current.taken_at,
+        vouches: 0,
+        ageDays: Number(ageDays.toFixed(2)),
+      };
+    }
+  }
+  const started = await startSnapshot(pds, { scoring: 'simple' });
+  const takenAt = started.takenAt;
+  await rpc('finalise_snapshot', {
+    snapshot: takenAt,
+    keep: config.keep.snapshots,
+  });
+  const full = new Set(
+    (
+      await selectAll('circle', {
+        select: 'taken_at',
+        eq: { scoring: 'full' },
+        order: 'taken_at.desc',
+      })
+    ).map((r) => r.taken_at),
+  );
+  for (const old of full) {
+    for (const table of ['vouch', 'circle_follow', 'circle']) {
+      await del(table, { eq: { taken_at: old } });
+    }
+  }
+  await dropSnapshotsAhead();
+  lastFailed.takenAt = null;
+  readSoFar = new Map();
+  return {
+    state: 'finalised',
+    snapshot: takenAt,
+    started,
+    vouches: 0,
+    unreadableMembers: 0,
+  };
+}
+
+/**
+ * The snapshot to score against: the newest finalised one, full or simple.
+ * Null before any is built.
+ *
+ * A full snapshot is finalised once it has vouch counts, and one that came to
+ * none is never scored against. A simple one is finalised as it is written.
+ * While a build in the other mode runs, the snapshot before it is used.
+ *
+ * @returns {Promise<{ takenAt: string, scoring: 'full'|'simple' } | null>}
+ */
+export async function usableSnapshot() {
+  const [vouched, simple] = await Promise.all([
+    select('vouch', {
+      select: 'taken_at',
+      order: 'taken_at.desc',
+      limit: 1,
+    }),
+    select('circle', {
+      select: 'taken_at',
+      eq: { scoring: 'simple' },
+      order: 'taken_at.desc',
+      limit: 1,
+    }),
+  ]);
+  const full = vouched?.[0]?.taken_at ?? null;
+  const light = simple?.[0]?.taken_at ?? null;
+  if (!full && !light) return null;
+  if (!light || (full && full > light)) {
+    return { takenAt: full, scoring: 'full' };
+  }
+  return { takenAt: light, scoring: 'simple' };
 }

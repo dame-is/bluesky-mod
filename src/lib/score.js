@@ -42,6 +42,8 @@ export const DEFAULT_THRESHOLDS = {
   notableReach: 10000,
   notableActivityPostsPerDay: 20,
   notableActivityReach: 2000,
+  /** Set for a simple snapshot: an account that follows you is connected. */
+  followsYouConnects: false,
 };
 
 function clamp(n, lo, hi) {
@@ -84,6 +86,9 @@ export function assignBand(f, thresholds = DEFAULT_THRESHOLDS) {
   const t = { ...DEFAULT_THRESHOLDS, ...thresholds };
   const vouches = f.vouches || 0;
   const followers = f.followers || 0;
+  // Simple scoring reads no one's follows but the owner's, so the one sign of
+  // closeness left is that they follow the owner.
+  if (t.followsYouConnects && f.followsYou) return 'CONNECTED';
   if (
     vouches >= t.connectedVouches ||
     (vouches >= t.connectedVouchesWithReach && followers >= t.connectedReach)

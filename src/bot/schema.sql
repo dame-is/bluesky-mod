@@ -8,12 +8,15 @@
 
 -- The follow-graph snapshot. One row per account the owner follows, per
 -- snapshot; `follows_indexed_at` is set once that account's follows are read.
+-- `scoring` is how the snapshot was taken: 'full' reads each follow's own
+-- follows into vouch counts, 'simple' reads only who the owner follows.
 create table if not exists circle (
   taken_at text not null,
   did text not null,
   follows_indexed_at text,
   attempts integer not null default 0,
   unreadable text,
+  scoring text not null default 'full',
   primary key (taken_at, did)
 );
 

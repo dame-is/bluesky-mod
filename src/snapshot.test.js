@@ -8,6 +8,7 @@ const db = {
   protected: [],
   writes: [],
   takenAt: null,
+  scoring: 'full',
   counts: {},
   pending: [],
 };
@@ -16,8 +17,8 @@ const fail = { protectedUpsert: false };
 vi.mock('./bot/db.js', () => ({
   // Only the newest snapshot's timestamp is ever read back here.
   select: vi.fn(async (table, { select } = {}) => {
-    if (table === 'circle' && select === 'taken_at' && db.takenAt) {
-      return [{ taken_at: db.takenAt }];
+    if (table === 'circle' && select === 'taken_at,scoring' && db.takenAt) {
+      return [{ taken_at: db.takenAt, scoring: db.scoring }];
     }
     // Members still waiting for their follow list.
     if (table === 'circle' && select === 'did,attempts') return db.pending;
@@ -78,6 +79,7 @@ beforeEach(() => {
   db.circle = [];
   db.writes = [];
   db.takenAt = null;
+  db.scoring = 'full';
   db.counts = {};
   db.pending = [];
   indexCircleFollows.mockClear();

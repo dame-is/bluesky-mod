@@ -20,7 +20,8 @@ import {
 } from '../lib/score.js';
 import { referenceFrom } from '../lib/precompute.js';
 import { pulse } from '../lib/pulse.js';
-import { select, selectAll } from './db.js';
+import { selectAll } from './db.js';
+import { usableSnapshot } from '../snapshot.js';
 import { listUri, ownerOf } from './listWrite.js';
 import { graphFacts, listedView, blockersView } from './graphFacts.js';
 
@@ -29,17 +30,14 @@ import { graphFacts, listedView, blockersView } from './graphFacts.js';
  *
  * Throws rather than scoring against nothing. An empty vouch table puts every
  * account in UNKNOWN and waves the whole batch through, which is the failure
- * this system exists to prevent, reported as a successful run.
+ * this system exists to prevent, reported as a successful run. A simple
+ * snapshot has no vouches by design, and is used only when it is the newest.
  *
  * @returns {Promise<{ takenAt: string, ref: object, thresholds: object }>}
  */
 export async function loadReference() {
-  const latest = await select('vouch', {
-    select: 'taken_at',
-    order: 'taken_at.desc',
-    limit: 1,
-  });
-  const takenAt = latest?.[0]?.taken_at;
+  const usable = await usableSnapshot();
+  const takenAt = usable?.takenAt;
   if (!takenAt) {
     throw new Error(
       'the follow-graph snapshot is not built yet. It builds by itself after the bot starts and takes a few minutes; ask again shortly',
@@ -65,9 +63,15 @@ export async function loadReference() {
     graphFacts({ list }).catch(() => null),
   ]);
 
-  const thresholds = DEFAULT_THRESHOLDS;
+  // A simple snapshot has no vouch counts, so following the owner is what
+  // makes an account connected.
+  const thresholds =
+    usable.scoring === 'simple'
+      ? { ...DEFAULT_THRESHOLDS, followsYouConnects: true }
+      : DEFAULT_THRESHOLDS;
   return {
     takenAt,
+    scoring: usable.scoring,
     thresholds,
     ref: {
       ...referenceFrom({

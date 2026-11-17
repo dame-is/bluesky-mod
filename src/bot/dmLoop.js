@@ -33,6 +33,7 @@ import { generateText } from 'ai';
 import { modelsEnabled } from '../models.js';
 
 import { OWNER_DID } from '../constants.js';
+import { normaliseMode } from '../config.js';
 import { rosterFromEnv } from '../lib/senders.js';
 import { ownLinkFacets, postWebUrl } from '../lib/links.js';
 import {
@@ -137,17 +138,7 @@ import {
 } from './memory.js';
 import { startWatch, stopWatch, liveWatches, watchesText } from './watch.js';
 
-/**
- * Which surface answers by default. Anything but "agent" is classic, so an
- * unset or misspelt value gets the mode where the model holds no write tools.
- */
-export function normaliseMode(value) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase() === 'agent'
-    ? 'agent'
-    : 'classic';
-}
+export { normaliseMode };
 
 /**
  * "!block @x" in agent mode runs the classic path for that one message.

@@ -83,7 +83,8 @@ vi.mock('./bot/botAgent.js', () => {
 
 vi.mock('./snapshot.js', () => ({
   UNPROTECTED_LISTS: [],
-  hasSnapshot: async () => h.snapshotExists,
+  usableSnapshot: async () =>
+    h.snapshotExists ? { takenAt: '2026-11-01T00:00:00.000Z', scoring: 'full' } : null,
   snapshotStep: async () => {
     h.events.push('step');
     // A step spends its whole budget, as a real one does on a large graph.

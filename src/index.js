@@ -29,7 +29,7 @@ import { stopWrites } from './bot/bulkPlan.js';
 import { checkModelFor, ESCALATION_MODEL } from './bot/tiers.js';
 import { botAgent, chatView } from './bot/botAgent.js';
 import { openDb, closeDb } from './bot/db.js';
-import { snapshotStep, hasSnapshot, UNPROTECTED_LISTS } from './snapshot.js';
+import { snapshotStep, usableSnapshot, UNPROTECTED_LISTS } from './snapshot.js';
 import { connectJetstream } from './jetstream.js';
 import { loadState, setCursor } from './state.js';
 import { ownerGraphHandler, OWNER_GRAPH_COLLECTIONS } from './ownerGraph.js';
@@ -574,11 +574,21 @@ async function start() {
   }
 
   // Nothing can be scored until the first snapshot exists, so build it now
-  // rather than waiting for the hourly check.
-  if (!(await hasSnapshot())) {
+  // rather than waiting for the hourly check. The same goes for a change of
+  // MOD_SCORING, which is made by restarting with it.
+  const usable = await usableSnapshot();
+  if (!usable) {
     logger.info(
-      'No follow-graph snapshot yet; building one. This takes a few minutes, and DMs are answered in between.',
+      config.scoring === 'simple'
+        ? 'No follow-graph snapshot yet; reading who you follow.'
+        : 'No follow-graph snapshot yet; building one. This takes a few minutes, and DMs are answered in between.',
     );
+    runSnapshot({ force: true });
+  } else if (usable.scoring !== config.scoring) {
+    logger.info('Scoring changed; building a new snapshot', {
+      from: usable.scoring,
+      to: config.scoring,
+    });
     runSnapshot({ force: true });
   }
 
