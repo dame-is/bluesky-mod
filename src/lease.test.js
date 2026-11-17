@@ -49,3 +49,26 @@ describe('the lease', () => {
     ).toMatchObject({ ok: false, holder: { host: 'b' } });
   });
 });
+
+describe('the lease in the database', () => {
+  it('is held by one copy, the other told who has it, and freed on release', async () => {
+    const { openDb, closeDb, rpc } = await import('./bot/db.js');
+    const { acquireDbLease } = await import('./lease.js');
+    await closeDb();
+    openDb(':memory:');
+    try {
+      const a = await acquireDbLease({ call: rpc, host: 'box-a', pid: 7 });
+      const b = await acquireDbLease({ call: rpc, host: 'box-b', pid: 9 });
+      expect(a.ok).toBe(true);
+      expect(b.ok).toBe(false);
+      expect(b.holder).toMatchObject({ host: 'box-a', pid: 7 });
+      expect(Number.isFinite(b.holder.heartbeatAt)).toBe(true);
+      await a.release();
+      const c = await acquireDbLease({ call: rpc, host: 'box-b', pid: 9 });
+      expect(c.ok).toBe(true);
+      await c.release();
+    } finally {
+      await closeDb();
+    }
+  });
+});
