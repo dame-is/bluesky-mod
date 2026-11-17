@@ -25,13 +25,14 @@ import {
   approveByName,
   approveCommand,
   cancelCommand,
+  onList,
   primaryKind,
   selected,
   triageCommand,
   undoCommand,
 } from '../lib/commands.js';
 import { bandMark } from '../radar.js';
-import { band, chips, confirm, empty, pager, run, section, table, tone, who, whoName } from '../ui.js';
+import { band, chips, confirm, empty, listPicker, pager, run, section, table, toast, tone, who, whoName } from '../ui.js';
 import { legend, scanRadar, stateWords, view } from './shared.js';
 
 const PAGE = 50;
@@ -52,6 +53,17 @@ export function scan(ctx) {
       const read = data.labels.hostile + data.labels.arguing + data.labels.neutral;
       const unread = data.withText - read;
       const after = () => reload({ quiet: true });
+
+      // With several lists a scan adds to one. The first approval binds it,
+      // and until then the approval has to say which: `target` is what is
+      // chosen here, and nothing is chosen for you.
+      const { several } = ctx.lists;
+      const boundTo = several ? data.list : null;
+      let target = null;
+      const dest = () => boundTo || target;
+      const destName = () => (!several ? 'the list' : dest() ? ctx.lists.name(dest()) : 'a list');
+      // A bound scan needs no list named: the bot sends it where it went.
+      const named = (command) => onList(command, boundTo ? null : target);
 
       const panel = h('div', { class: 'section' });
       const people = h('div', { class: 'section' });
@@ -74,13 +86,38 @@ export function scan(ctx) {
       }
 
       const current = () => ({ bands: [...sel.bands], sectors: [...sel.sectors], hostileOnly: sel.hostileOnly });
+      // An approval of the hostile ones adds only what was labelled by the
+      // time this page counted them.
+      const approval = () => named(approveCommand(code, current(), { asOf: data.hostileAsOf }));
+
+      /**
+       * Is the scan still what this page showed? A watch adds to its plan as
+       * people arrive, and the bot runs a command against the plan as it is
+       * then. So the scan is read again just before the command goes, and if
+       * what would be added has changed, nothing is sent.
+       */
+      async function unchanged(shown) {
+        let fresh;
+        try {
+          fresh = await get('/api/scan', { code });
+        } catch (err) {
+          toast(String(err.message || err), { bad: true });
+          return false;
+        }
+        const now = selected(fresh.rows, current());
+        const was = new Set(shown.map((r) => r.did));
+        if (now.length === shown.length && now.every((r) => was.has(r.did))) return true;
+        toast(`This scan changed while you were looking at it: it would now add ${nf(now.length)}, not ${nf(shown.length)}. Nothing was added. Look again.`, { bad: true });
+        after();
+        return false;
+      }
 
       async function addSelection() {
         const chosen = selected(rows, current());
-        const command = approveCommand(code, current());
+        const command = approval();
         const near = chosen.filter((r) => CLOSE.includes(r.band));
         const ok = await confirm({
-          title: `Add ${plural(chosen.length, 'person', 'people')} to the block list?`,
+          title: several ? `Add ${plural(chosen.length, 'person', 'people')} to ${destName()}?` : `Add ${plural(chosen.length, 'person', 'people')} to the block list?`,
           body: h(
             'div',
             { class: 'section' },
@@ -88,31 +125,39 @@ export function scan(ctx) {
             h('p', { class: 'muted' }, 'Anyone protected is left out, whatever is ticked. One undo takes the whole batch back.'),
           ),
           command,
-          yes: `Add ${nf(chosen.length)} to the list`,
+          yes: `Add ${nf(chosen.length)} to ${destName()}`,
           danger: true,
         });
-        if (ok) await run(command, { after });
+        if (ok && (await unchanged(chosen))) await run(command, { after });
       }
 
       async function addPicked() {
         const dids = [...picked];
+        if (several && !dest()) {
+          toast('Choose which list this scan adds to first, beside the radar.', { bad: true });
+          return;
+        }
+        const commands = approveByName(code, dids).map(named);
         const ok = await confirm({
-          title: `Add the ${plural(dids.length, 'account')} you picked?`,
+          title: `Add the ${plural(dids.length, 'account')} you picked${several ? ` to ${destName()}` : ''}?`,
           body: h('p', { class: 'muted' }, 'Recorded as accounts you looked at, not as a band you approved.'),
-          command: approveByName(code, dids)[0] + (dids.length > 25 ? ' …' : ''),
-          yes: `Add ${nf(dids.length)} to the list`,
+          command: commands[0] + (commands.length > 1 ? ' …' : ''),
+          yes: `Add ${nf(dids.length)} to ${destName()}`,
           danger: true,
         });
         if (!ok) return;
-        for (const command of approveByName(code, dids)) await run(command);
+        for (const command of commands) await run(command);
         after();
       }
 
       function drawPanel() {
         const chosen = selected(rows, current());
-        const command = approveCommand(code, current());
+        const command = approval();
         const near = chosen.filter((r) => CLOSE.includes(r.band));
         const cost = writeCost(chosen.length);
+        // Which list, when the bot has several and no approval has said yet.
+        const picker = several && !boundTo ? listPicker(ctx.lists, { onChange: (v) => { target = v || null; drawPanel(); } }) : null;
+        if (picker) picker.value = target || '';
         const pendingIn = (b) => rows.filter((r) => r.band === b && addable(r)).length;
         const hostileIn = (b) => rows.filter((r) => r.band === b && r.label === 'hostile').length;
 
@@ -187,9 +232,10 @@ export function scan(ctx) {
                       )
                     : null,
                   h('p', { class: 'muted' }, `${nf(cost.writes)} writes, ${nf(cost.points)} points, ${cost.time}.`, chosen.length > 500 ? ' The bot adds 500 at a time and carries on by itself.' : '', ' One undo takes it back.'),
+                  picker && ctx.me.canWrite ? h('label', { class: 'label' }, 'Which list', picker, h('small', null, 'A scan adds to one list, and its first approval decides which.')) : null,
                   h('p', { class: 'muted' }, 'The bot will run: ', h('span', { class: 'mono' }, command)),
                   ctx.me.canWrite
-                    ? h('div', { class: 'toolbar' }, h('button', { type: 'button', class: 'btn btn-danger-fill', onClick: addSelection }, `Add ${nf(chosen.length)} to the list`))
+                    ? h('div', { class: 'toolbar' }, h('button', { type: 'button', class: 'btn btn-danger-fill', disabled: several && !dest(), onClick: addSelection }, `Add ${nf(chosen.length)} to ${destName()}`))
                     : h('p', { class: 'note' }, 'This account is read-only here, so it cannot add anyone.'),
                 ]
               : h('p', { class: 'muted' }, sel.bands.size ? 'Nobody in what is ticked is left to add.' : 'Tick a ring, or click one on the radar, to see who it would add.'),
@@ -340,10 +386,11 @@ export function scan(ctx) {
         h(
           'p',
           { class: 'page-sub' },
-          data.kind === 'everyone' ? 'Everyone who engaged with ' : `${KIND_WORDS[data.kind] || 'A scan'} of `,
+          data.kind === 'everyone' ? 'Everyone who engaged with ' : data.kind === 'watch' ? 'Everyone who has engaged since a watch began on ' : `${KIND_WORDS[data.kind] || 'A scan'} of `,
           author === ctx.me.owner?.did ? 'your post' : ['a post by ', whoName(author, { onOpen: ctx.openAccount })],
           link ? [' (', h('a', { href: link, target: '_blank', rel: 'noopener noreferrer' }, 'open it'), ')'] : null,
           `. ${plural(data.total, 'account')}, scanned ${ago(data.createdAt)}. ${stateWords(data)}.`,
+          boundTo ? ` It adds to ${ctx.lists.name(boundTo)}.` : '',
           data.truncated ? ' The post was too busy to read in full, so some likes are missing.' : '',
         ),
         data.words.length ? h('p', { class: 'muted' }, 'Approved with: ', data.words.map((w, i) => [i ? ', ' : '', h('span', { class: 'mono' }, w)])) : null,

@@ -5,7 +5,7 @@ import { get } from '../api.js';
 import { h } from '../dom.js';
 import { BANDS, ago, bandName, bytes, clock, nf, plural, postLink, until } from '../lib/format.js';
 import { cancelCommand } from '../lib/commands.js';
-import { band, chips, confirm, empty, meter, run, section, table } from '../ui.js';
+import { band, chips, confirm, empty, listChips, meter, run, section, table } from '../ui.js';
 import { bars, changeCols, legend, listRadar, scanCols, view } from './shared.js';
 
 const SPANS = [
@@ -16,13 +16,23 @@ const SPANS = [
 
 export function overview(ctx) {
   const days = SPANS.some((s) => s.value === ctx.params.get('days')) ? ctx.params.get('days') : '30';
+  // With several lists, the one this page counts and draws. The main one
+  // unless the address names another.
+  const { several } = ctx.lists;
+  const asked = ctx.params.get('list');
+  const shown = several && ctx.lists.all.some((l) => l.rkey === asked) ? asked : ctx.lists.main;
+  const list = several ? shown : null;
+  const isMain = !several || shown === ctx.lists.main;
+  const name = several ? ctx.lists.name(shown) : 'the list';
+  const listHref = (extra = '') => `#/list${list && !isMain ? `?list=${list}${extra ? `&${extra}` : ''}` : extra ? `?${extra}` : ''}`;
+  const to = (patch) => ctx.go('/', { days: days === '30' ? null : days, list: isMain ? null : list, ...patch });
 
   return view('Overview', {
-    aside: chips(SPANS, days, (v) => ctx.go('/', { days: v === '30' ? null : v }), 'Period'),
+    aside: chips(SPANS, days, (v) => to({ days: v === '30' ? null : v }), 'Period'),
     load: async () => {
       const [o, radar, health] = await Promise.all([
-        get('/api/overview', { days }),
-        get('/api/list/radar'),
+        get('/api/overview', { days, list }),
+        get('/api/list/radar', { list }),
         get('/api/health'),
       ]);
       return { o, radar, health };
@@ -30,9 +40,14 @@ export function overview(ctx) {
     draw({ o, radar, health }, { reload, onCleanup }) {
       const chart = listRadar(radar, {
         onPick: (p) => ctx.openAccount(p.did),
-        onBand: (b) => ctx.go('/list', { band: b }),
+        onBand: (b) => ctx.go('/list', { band: b, list: isMain ? null : list }),
       });
       onCleanup(() => chart.destroy());
+      // Only the main list is re-scored. Another list shows each account
+      // where it stood when it was added.
+      const scoredWhen = isMain
+        ? o.list.asOf ? `As of the re-score ${ago(o.list.asOf)}` : 'Not re-scored yet'
+        : 'As each stood when added';
 
       const source =
         o.list.source === 'repo'
@@ -42,7 +57,7 @@ export function overview(ctx) {
             : 'The bot could not read its list and has not re-scored it yet, so this is counted from the log.';
 
       const figures = [
-        { value: nf(o.list.total), label: 'On the list', note: `${nf(o.week.added)} added and ${nf(o.week.removed)} taken off this week`, href: '#/list' },
+        { value: nf(o.list.total), label: several ? `On ${name}` : 'On the list', note: `${nf(o.week.added)} added and ${nf(o.week.removed)} taken off this week${several ? ', on every list' : ''}`, href: listHref() },
         { value: nf(o.waiting.queue + o.waiting.scans), label: 'Waiting for you', note: `${nf(o.waiting.queue)} in the review queue, ${plural(o.waiting.scans, 'scan')}`, href: o.waiting.queue ? '#/queue' : '#/scans' },
         { value: nf(o.protected.total), label: 'Protected', note: `${nf(o.protected.follows)} you follow, ${nf(o.protected.lists)} on your lists, ${nf(o.protected.manual)} by hand`, href: '#/protected' },
         o.snapshot
@@ -61,6 +76,7 @@ export function overview(ctx) {
       };
 
       return [
+        several ? listChips(ctx.lists, shown, (v) => to({ list: v === ctx.lists.main ? null : v })) : null,
         h(
           'div',
           { class: 'figs' },
@@ -77,8 +93,8 @@ export function overview(ctx) {
             'div',
             { class: 'grow-2' },
             section(
-              'Who on the list is near you',
-              h('span', { class: 'muted' }, o.list.asOf ? `As of the re-score ${ago(o.list.asOf)}` : 'Not re-scored yet'),
+              `Who on ${name} is near you`,
+              h('span', { class: 'muted' }, scoredWhen),
               h('div', { class: 'well' }, chart.el, legend()),
             ),
           ),
@@ -86,8 +102,8 @@ export function overview(ctx) {
             'div',
             { class: 'grow-1' },
             section(
-              'The list by band',
-              h('a', { href: '#/list' }, 'Open the list'),
+              several ? `${name} by band` : 'The list by band',
+              h('a', { href: listHref() }, 'Open the list'),
               h(
                 'ul',
                 { class: 'bandrows' },
@@ -95,19 +111,21 @@ export function overview(ctx) {
                   h(
                     'li',
                     null,
-                    h('a', { class: 'band', href: `#/list?band=${b}` }, band(b)),
+                    h('a', { class: 'band', href: listHref(`band=${b}`) }, band(b)),
                     meter(o.list.counts[b] || 0, Math.max(1, o.list.total), { label: `${nf(o.list.counts[b] || 0)} ${bandName(b).toLowerCase()}` }),
                     h('span', { class: 'num' }, nf(o.list.counts[b] || 0)),
                   ),
                 ),
               ),
-              o.list.counts.UNSCORED ? h('p', { class: 'muted' }, `${nf(o.list.counts.UNSCORED)} added since the last re-score have no band yet.`) : null,
-              o.waiting.queue
-                ? h('p', null, `${plural(o.waiting.queue, 'account')} on the list ${o.waiting.queue === 1 ? 'is' : 'are'} not a stranger to you. `, h('a', { href: '#/queue' }, 'Open the review queue'))
-                : h('p', { class: 'muted' }, o.list.total ? 'Everyone on the list is a stranger to you, or you have chosen to keep them.' : 'Nobody is on the list yet. Send the bot “block” with a post or a handle, or scan a post.'),
+              o.list.counts.UNSCORED ? h('p', { class: 'muted' }, isMain ? `${nf(o.list.counts.UNSCORED)} added since the last re-score have no band yet.` : `${nf(o.list.counts.UNSCORED)} were added without a band.`) : null,
+              !isMain
+                ? h('p', { class: 'muted' }, o.list.total ? 'The weekly re-score reads your main list only, so nobody on this one is queued for review.' : 'Nobody is on this list yet.')
+                : o.waiting.queue
+                  ? h('p', null, `${plural(o.waiting.queue, 'account')} on ${name} ${o.waiting.queue === 1 ? 'is' : 'are'} not a stranger to you. `, h('a', { href: '#/queue' }, 'Open the review queue'))
+                  : h('p', { class: 'muted' }, o.list.total ? `Everyone on ${name} is a stranger to you, or you have chosen to keep them.` : 'Nobody is on the list yet. Send the bot “block” with a post or a handle, or scan a post.'),
             ),
             section(
-              'Added per day',
+              several ? 'Added per day, on every list' : 'Added per day',
               h('span', { class: 'muted' }, `${nf(o.span.added)} added, ${nf(o.span.removed)} taken off`),
               bars(
                 o.days.map((d) => ({ day: d.day, value: d.added, title: `${d.day}: ${nf(d.added)} added, ${nf(d.removed)} taken off` })),
@@ -195,7 +213,7 @@ export function overview(ctx) {
                 { class: 'rows' },
                 h('div', null, h('dt', null, 'DMs'), h('dd', null, health.lastPollAt ? `Read ${ago(health.lastPollAt)}` : 'Not read yet', health.queued ? `. ${plural(health.queued, 'job')} queued` : '')),
                 h('div', null, h('dt', null, 'The bot'), h('dd', null, health.bot?.handle ? `@${health.bot.handle}` : 'Not signed in', health.dmMode === 'agent' ? ', agent mode' : ', classic mode')),
-                h('div', null, h('dt', null, 'Re-score'), h('dd', null, o.list.asOf ? `Last ran ${ago(o.list.asOf)}` : 'Has not run yet')),
+                h('div', null, h('dt', null, 'Re-score'), h('dd', null, o.rescoredAt ? `Last ran ${ago(o.rescoredAt)}` : 'Has not run yet')),
                 h('div', null, h('dt', null, 'Model'), h('dd', null, health.model || 'None: commands only')),
                 h('div', null, h('dt', null, 'Database'), h('dd', null, health.database?.kind || '', health.database?.bytes ? `, ${bytes(health.database.bytes)}` : '')),
                 health.disk ? h('div', null, h('dt', null, 'Disk'), h('dd', { class: health.disk.low ? 'error' : null }, `${bytes(health.disk.free)} free of ${bytes(health.disk.total)}`, health.disk.low ? '. Nearly full' : '')) : null,

@@ -80,11 +80,15 @@ export function selected(rows, sel) {
  *
  * A tone label does not combine with an engagement kind (the parser refuses
  * it), so "only the hostile ones" drops the sectors.
+ *
+ * `asOf` is when the newest hostile label the page counted was given. With
+ * it the bot adds only what was labelled by then, so a watch that labels
+ * more while the page is open does not add to what was shown.
  */
-export function approveCommand(code, sel) {
+export function approveCommand(code, sel, { asOf = null } = {}) {
   const bands = bandsOf(sel);
   if (!bands.length) return null;
-  if (sel.hostileOnly) return `approve ${code} hostile ${bands.join(',')}`;
+  if (sel.hostileOnly) return `approve ${code} hostile ${bands.join(',')}${asOf ? ` asof=${asOf}` : ''}`;
   const words = sectorsOf(sel).map((k) => KIND_WORD[k]);
   return `approve ${code} ${bands.join(',')}${words.length ? ` ${words.join(' ')}` : ''}`;
 }
@@ -104,6 +108,14 @@ export function approveByName(code, dids) {
   }
   return out;
 }
+
+/**
+ * A command with the list it goes to named on it, for a bot with several
+ * lists. `list:<record key>` is the token the bot's own menus write, so it
+ * means the same list whatever the lists are called later. With no key the
+ * command is left as it is, which is every command when there is one list.
+ */
+export const onList = (command, rkey) => (rkey ? `${command} list:${rkey}` : command);
 
 export const blockCommand = (actor) => `block ${actor}`;
 export const unblockCommand = (actor) => `unblock ${actor}`;

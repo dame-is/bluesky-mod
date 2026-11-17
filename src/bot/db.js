@@ -886,6 +886,7 @@ const FUNCTIONS = {
   /** For each of these plans: how many accounts, added, still on, and read. */
   *panel_plan_counts(b, { ids = [] }) {
     if (!ids.length) return [];
+    const C = b.kind === 'pg' ? ' collate "C"' : '';
     const rows = yield [
       'all',
       `select plan_id, count(*) as total,
@@ -894,7 +895,13 @@ const FUNCTIONS = {
               sum(case when triage = 'hostile' then 1 else 0 end) as hostile,
               sum(case when triage = 'arguing' then 1 else 0 end) as arguing,
               sum(case when triage = 'neutral' then 1 else 0 end) as neutral,
-              sum(case when evidence_uri is not null then 1 else 0 end) as with_text
+              sum(case when evidence_uri is not null then 1 else 0 end) as with_text,
+              sum(case when band = 'PROTECTED' then 1 else 0 end) as band_protected,
+              sum(case when band = 'CONNECTED' then 1 else 0 end) as band_connected,
+              sum(case when band = 'PERIPHERAL' then 1 else 0 end) as band_peripheral,
+              sum(case when band = 'NOTABLE' then 1 else 0 end) as band_notable,
+              sum(case when band = 'UNKNOWN' then 1 else 0 end) as band_unknown,
+              max(case when triage = 'hostile' then triage_at${C} end) as hostile_at
        from ${tableName(b, 'decision')}
        where plan_id in (${ids.map(() => '?').join(',')})
        group by plan_id`,
@@ -902,7 +909,10 @@ const FUNCTIONS = {
     ];
     return rows.map((r) =>
       Object.fromEntries(
-        Object.entries(r).map(([k, v]) => [k, k === 'plan_id' ? v : Number(v)]),
+        Object.entries(r).map(([k, v]) => [
+          k,
+          k === 'plan_id' || k === 'hostile_at' ? v : Number(v),
+        ]),
       ),
     );
   },

@@ -312,6 +312,45 @@ export function confirm({ title, body = null, command = null, yes, danger = fals
   });
 }
 
+// --- several lists -----------------------------------------------------------------
+
+/**
+ * Which of the bot's lists a write goes to. Nothing is chosen when it opens:
+ * the bot does not guess a list, and neither does the page.
+ */
+export function listPicker(lists, { onChange = null } = {}) {
+  return h(
+    'select',
+    { class: 'field', required: true, 'aria-label': 'Which list', onChange: (e) => onChange?.(e.target.value) },
+    h('option', { value: '' }, 'Choose a list'),
+    lists.all.map((l) => h('option', { value: l.rkey }, l.name)),
+  );
+}
+
+/** One of the bot's lists as chips, to choose which a page shows. */
+export const listChips = (lists, value, onChange) =>
+  chips(lists.all.map((l) => ({ value: l.rkey, label: l.name })), value, onChange, 'List');
+
+/**
+ * The bot's own question, asked here where a DM would wait for a number.
+ * Resolves with the option chosen, or null.
+ */
+function choose(text, options) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const answer = (value) => { answered = true; close(); resolve(value); };
+    const content = h(
+      'div',
+      { class: 'dialog', 'aria-label': 'Which list' },
+      h('h2', null, text),
+      h('p', { class: 'muted' }, 'Nothing has changed yet.'),
+      h('div', { class: 'choices' }, options.map((o) => h('button', { type: 'button', class: 'btn', onClick: () => answer(o) }, o.label))),
+      h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'btn', 'data-focus': true, onClick: () => answer(null) }, 'Cancel')),
+    );
+    const close = openOver(content, { onClose: () => { if (!answered) resolve(null); } });
+  });
+}
+
 // --- the one way to change the list -----------------------------------------------
 
 /**
@@ -322,11 +361,24 @@ export function confirm({ title, body = null, command = null, yes, danger = fals
  * @returns {Promise<object|null>} what the bot answered, or null if it failed
  */
 export async function run(command, { after = null } = {}) {
+  // What a follow-up runs, in order: "Every list" is one command per list.
+  const each = async (commands) => {
+    let last = null;
+    for (const c of commands) last = await run(c, { after });
+    return last;
+  };
   try {
     const out = await post('/api/command', { command });
+    if (out.choice) {
+      // The bot asked which list and did nothing.
+      const picked = await choose(out.text, out.options);
+      return picked ? each(picked.commands) : out;
+    }
+    // One press beside the receipt, and only for the way back: an option
+    // that adds anyone is not offered here (src/panel/commands.js).
     toast(out.text || 'Done.', {
       bad: out.outcome === 'failed',
-      actions: (out.options || []).slice(0, 1).map((o) => ({ label: o.label, run: () => run(o.command, { after }) })),
+      actions: (out.options || []).filter((o) => o.takesBack).slice(0, 1).map((o) => ({ label: o.label, run: () => each(o.commands) })),
     });
     window.dispatchEvent(new Event('panel:changed'));
     await after?.(out);

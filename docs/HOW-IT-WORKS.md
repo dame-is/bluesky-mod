@@ -146,6 +146,8 @@ With `PANEL_PORT` set the bot also serves a web page: the list, each scan on a r
 
 Who may open it is the roster again. A session comes only from a code the bot sent by DM to someone it answers, and what that account may do is read from the roster on every request (`src/panel/auth.js`).
 
+With several lists the page puts `list:<rkey>` on the command, as the bot's own menus do. A command that names no list gets the bot's "Which list?" back, and the page asks it with a button for each answer.
+
 ## Several lists (multi-list mode)
 
 `MOD_MULTI_LIST=true` lets the bot keep several moderation lists ("Spam", "Trolls", "Block List") and asks which one each change goes to. It is off by default, and with it off everything is as described above: one list, `MOD_LIST_URI`.

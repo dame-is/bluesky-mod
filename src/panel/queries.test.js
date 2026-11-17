@@ -6,8 +6,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 
 import { storesFor, freshStore } from '../bot/testStores.js';
-import { select } from '../bot/db.js';
-import { seedDemo, demoDid, demoAccount } from '../../scripts/panel-fixtures.js';
+import { select, upsert } from '../bot/db.js';
+import { seedDemo, demoDid, demoAccount, demoLists } from '../../scripts/panel-fixtures.js';
 import * as q from './queries.js';
 
 const NOW = Date.parse('2026-11-17T14:40:00Z');
@@ -267,3 +267,133 @@ for (const [kind, target] of storesFor('panel_queries_test')) {
     });
   });
 }
+
+for (const [kind, target] of storesFor('panel_lists_test')) {
+  let seeded;
+
+  describe(`a bot with several lists (${kind})`, () => {
+    let main;
+    let spam;
+    let trolls;
+
+    beforeAll(async () => {
+      await freshStore(kind, target);
+      q.forgetList();
+      seeded = await seedDemo({ now: NOW, lists: true });
+      [main, spam, trolls] = demoLists(seeded.bot);
+    }, 60_000);
+
+    const index = (list) => q.listIndex({ list: list.uri, primary: main.uri });
+
+    it('counts each list from the plans that wrote to it', async () => {
+      const everything = await q.listIndex();
+      q.forgetList();
+      const [a, b, c] = [await index(main), await index(spam), await index(trolls)];
+      expect(b.total).toBe(61);
+      expect(c.total).toBe(30);
+      // Nobody is counted twice, and nobody is lost.
+      expect(new Set([...b.rows, ...c.rows].map((r) => r.did)).size).toBe(91);
+      const mainDids = new Set(a.rows.map((r) => r.did));
+      expect(b.rows.some((r) => mainDids.has(r.did))).toBe(false);
+      expect(c.rows.some((r) => mainDids.has(r.did))).toBe(false);
+      // With no list named every add counts, as when there is one list.
+      expect(everything.source).toBe('rescore');
+      expect(a.source).toBe('rescore');
+    });
+
+    it('uses the re-score for the main list only', async () => {
+      const [a, b] = [await index(main), await index(spam)];
+      expect(a.asOf).not.toBe(null);
+      expect(b.asOf).toBe(null);
+      expect(b.source).toBe('log');
+      // Another list shows the band each account had when it was added.
+      expect(b.rows.every((r) => r.band === 'UNKNOWN' && !r.rescored)).toBe(true);
+    });
+
+    it('reads a list from the repo when it could be read, whichever list', async () => {
+      const members = { dids: [demoDid(65000), demoDid(65001), 'did:plc:someoneelse'], complete: true, at: 2 };
+      const page = await q.listPage({ members, list: spam.uri, primary: main.uri });
+      expect(page.source).toBe('repo');
+      expect(page.total).toBe(3);
+      // Someone on the list with no add in the log has no record of how.
+      expect(page.rows.find((r) => r.did === 'did:plc:someoneelse')).toMatchObject({ via: null, family: 'none' });
+      expect(page.rows.find((r) => r.did === demoDid(65000))).toMatchObject({ family: 'name' });
+    });
+
+    it('says which list a scan is bound to, and which have none yet', async () => {
+      expect(await q.scan(seeded.codes.pileon)).toMatchObject({ list: trolls.uri, approved: true });
+      expect(await q.scan(seeded.codes.pilot)).toMatchObject({ list: null, approved: false });
+      // Approved before lists were told apart: no list_uri, so the main list.
+      expect(await q.scan(seeded.codes.sweep)).toMatchObject({ list: null, approved: true });
+    });
+
+    it('carries the list on each line of the log and of an account', async () => {
+      const log = await q.activity({ limit: 2000, filter: 'added' });
+      expect(log.events.some((e) => e.list === spam.uri)).toBe(true);
+      expect(log.events.find((e) => e.code === seeded.codes.pileon).list).toBe(trolls.uri);
+      expect(log.events.find((e) => e.code === seeded.codes.sweep).list).toBe(null);
+      const story = await q.accountHistory(demoDid(65000));
+      expect(story.entries[0]).toMatchObject({ action: 'list_add', list: spam.uri });
+    });
+
+    it('keeps the review queue to the main list, whichever list the overview shows', async () => {
+      const [a, b] = [
+        await q.overview({ now: NOW, list: main.uri, primary: main.uri }),
+        await q.overview({ now: NOW, list: spam.uri, primary: main.uri }),
+      ];
+      expect(b.list.total).toBe(61);
+      expect(b.waiting.queue).toBe(a.waiting.queue);
+      expect(b.rescoredAt).toBe(a.rescoredAt);
+      expect(a.waiting.queue).toBeGreaterThan(0);
+    });
+  });
+
+  describe(`a watch's plan (${kind})`, () => {
+    const id = '0a7c4000-0000-4000-8000-000000000001';
+    const uri = 'at://did:plc:owner0000000000000000000/app.bsky.feed.post/3mwatched';
+
+    beforeAll(async () => {
+      // As src/bot/watch.js makes it: no totals but the post and the kind,
+      // and rows that arrive one check at a time.
+      await upsert('plan', [{ id, created_at: new Date(NOW - 3_600_000).toISOString(), totals: { uri, kind: 'watch' }, note: `watch of ${uri}` }]);
+      await upsert('decision', [
+        ...[701, 702].map((i) => ({ plan_id: id, did: demoDid(i), band: 'PERIPHERAL', engaged: ['reply'] })),
+        ...[71000, 71001, 71002].map((i, k) => ({
+          plan_id: id,
+          did: demoDid(i),
+          band: 'UNKNOWN',
+          engaged: ['quote'],
+          evidence_uri: `at://${demoDid(i)}/app.bsky.feed.post/3x`,
+          triage: k < 2 ? 'hostile' : 'neutral',
+          triage_at: new Date(NOW - (30 - k * 10) * 60_000).toISOString(),
+        })),
+      ]);
+    });
+
+    it('is counted from its rows, since it stores no totals', async () => {
+      const found = await q.scan('0a7c4000', { canWrite: true });
+      expect(found.kind).toBe('watch');
+      expect(found.total).toBe(5);
+      expect(found.byBand).toMatchObject({ PERIPHERAL: 2, UNKNOWN: 3, CONNECTED: 0 });
+      const listed = (await q.scans()).scans.find((s) => s.code === '0a7c4000');
+      expect(listed.byBand).toMatchObject({ PERIPHERAL: 2, UNKNOWN: 3 });
+    });
+
+    it('says when its newest hostile label was given, to bound an approval', async () => {
+      const found = await q.scan('0a7c4000');
+      expect(found.hostileAsOf).toBe(new Date(NOW - 20 * 60_000).toISOString());
+      expect((await q.scan(seeded.codes.hottake)).hostileAsOf).toBe(null);
+    });
+
+    it('is left off the scans page of someone who may not write', async () => {
+      const mine = await q.scans({ canWrite: true });
+      const theirs = await q.scans({ canWrite: false });
+      expect(mine.scans.some((s) => s.code === '0a7c4000')).toBe(true);
+      expect(theirs.scans.some((s) => s.code === '0a7c4000')).toBe(false);
+      expect(theirs.scans.length).toBe(mine.scans.length - 1);
+      const o = await q.overview({ now: NOW, canWrite: false });
+      expect(o.watches).toEqual([]);
+    });
+  });
+}
+

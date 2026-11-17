@@ -133,6 +133,36 @@ describe('signing in', () => {
     expect(await panel.codeFor(READER)).toMatch(/Your panel code is \d{4} \d{4}\./);
   });
 
+  it('counts wrong codes sent together, each before any is answered', async () => {
+    // Its own panel, so its count of wrong codes is its own.
+    const { demoDeps } = await import('../../scripts/panel-demo.js');
+    const other = createPanel({
+      settings: { port: 0, host: '127.0.0.1', url: '', sessionDays: 30 },
+      roster: makeRoster({ owner: seeded.owner }),
+      deps: demoDeps(seeded),
+    });
+    const at = `http://127.0.0.1:${(await other.listen()).port}`;
+    try {
+      const real = await issueCode(seeded.owner);
+      const wrong = Array.from({ length: 40 }, (_, i) => String(10_000_000 + i)).filter((c) => c !== real);
+      const tries = await Promise.all(
+        [...wrong, real].map((code) =>
+          fetch(`${at}/api/sign-in`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-panel-request': '1' },
+            body: JSON.stringify({ code }),
+          }).then((r) => r.status),
+        ),
+      );
+      // Five were looked at; the rest, the right one among them or not, were
+      // refused without being checked.
+      expect(tries.filter((status) => status !== 429).length).toBeLessThanOrEqual(5);
+      expect(tries.filter((status) => status === 429).length).toBeGreaterThanOrEqual(36);
+    } finally {
+      await other.close();
+    }
+  });
+
   it('stops answering after five wrong codes', async () => {
     const other = createPanel({
       settings: { port: 0, host: '127.0.0.1', url: '', sessionDays: 30 },
@@ -223,7 +253,9 @@ describe('the owner', () => {
     expect(res.status).toBe(200);
     expect(out).toMatchObject({ ok: true, action: 'approve', outcome: 'done' });
     expect(out.text).toContain('Added 12');
-    expect(out.options).toEqual([{ label: 'Undo all 12', command: `undo ${code}` }]);
+    expect(out.options).toEqual([
+      { label: 'Undo all 12', command: `undo ${code}`, commands: [`undo ${code}`], takesBack: true },
+    ]);
     const after = await (await get(`/api/scan?code=${code}`, cookie)).json();
     expect(after).toMatchObject({ added: 12, state: 'added' });
     expect(after.words).toEqual([`approve ${code} hostile UNKNOWN`]);
@@ -335,5 +367,76 @@ describe('a read-only account', () => {
   it('may still scan a post, which adds nobody', async () => {
     const res = await post('/api/scans', { link: 'https://bsky.app/profile/someone.example.social/post/3kabd', kind: 'likers' }, { cookie });
     expect(res.status).toBe(200);
+  });
+
+  it('is not told what is being watched, as it is not in a DM', async () => {
+    expect((await get('/api/watches', cookie)).status).toBe(403);
+    expect((await (await get('/api/overview', cookie)).json()).watches).toEqual([]);
+    const { cookie: owner } = await signIn(seeded.owner);
+    expect((await (await get('/api/watches', owner)).json()).live.length).toBeGreaterThan(0);
+    expect((await (await get('/api/overview', owner)).json()).watches.length).toBeGreaterThan(0);
+  });
+});
+
+describe('when something breaks', () => {
+  /** Call the panel's handler with a made-up request and collect the answer. */
+  const call = async (handle, req) => {
+    const res = { headersSent: false, writeHead(status) { this.status = status; }, end(text) { this.body = JSON.parse(text); } };
+    await handle({ socket: {}, ...req }, res);
+    return res;
+  };
+
+  it('tells someone with no session only that it broke', async () => {
+    // Broken before any session is read: the reason names a host.
+    const headers = { get cookie() { throw new Error('connect ECONNREFUSED db.internal:5432'); } };
+    const res = await call(panel.handle, { method: 'GET', url: '/api/me', headers });
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.body)).not.toContain('db.internal');
+    expect(res.body.error).toContain('did not work');
+  });
+
+  it('tells someone signed in why', async () => {
+    const { demoDeps } = await import('../../scripts/panel-demo.js');
+    const broken = createPanel({
+      settings: { port: 0, host: '127.0.0.1', url: '', sessionDays: 30 },
+      roster: makeRoster({ owner: seeded.owner }),
+      deps: { ...demoDeps(seeded), health: async () => { throw new Error('the disk at /data is gone'); } },
+    });
+    const { cookie } = await signIn(seeded.owner);
+    const res = await call(broken.handle, { method: 'GET', url: '/api/health', headers: { cookie } });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain('the disk at /data is gone');
+  });
+});
+
+describe('a file the browser stops waiting for', () => {
+  it('is closed, not left open', async () => {
+    const net = await import('node:net');
+    const fs = await import('node:fs');
+    const open = () =>
+      fs.readdirSync('/proc/self/fd').filter((fd) => {
+        try {
+          return fs.readlinkSync(`/proc/self/fd/${fd}`).endsWith('styles.css');
+        } catch {
+          return false;
+        }
+      }).length;
+    if (!fs.existsSync('/proc/self/fd')) return;
+    const { port } = new URL(base);
+    await Promise.all(
+      Array.from({ length: 40 }, () =>
+        new Promise((resolve) => {
+          const s = net.connect(Number(port), '127.0.0.1', () => {
+            s.write('GET /styles.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n', () => {
+              s.resetAndDestroy();
+              resolve();
+            });
+          });
+          s.on('error', () => resolve());
+        }),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    expect(open()).toBe(0);
   });
 });

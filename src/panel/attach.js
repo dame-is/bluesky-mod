@@ -21,6 +21,7 @@ import { proposePlan } from '../bot/bulkPlan.js';
 import { usingPostgres } from '../bot/db.js';
 import { runCommand } from '../bot/dmLoop.js';
 import { graphFacts, heldListed } from '../bot/graphFacts.js';
+import { botLists, multiListOn } from '../bot/lists.js';
 import { listNotes } from '../bot/memory.js';
 import { checkModelFor, ESCALATION_MODEL } from '../bot/tiers.js';
 import { stopWatch } from '../bot/watch.js';
@@ -45,9 +46,9 @@ export async function startPanel(bot) {
   const activeModel = async () =>
     modelsEnabled() ? (await loadAgentConfig())?.model || MODELS.agent : null;
 
-  let refreshedAt = 0;
-  async function members() {
-    const list = listUri();
+  /** list -> when the panel last asked for it to be brought up to date. */
+  const refreshedAt = new Map();
+  async function members(list = listUri()) {
     if (!list) return null;
     let held = heldListed(list);
     if (!held) {
@@ -55,15 +56,20 @@ export async function startPanel(bot) {
       // other read of the network.
       await bot.queued('panel-list', () => graphFacts({ list })).catch(() => null);
       held = heldListed(list);
-    } else if (Date.now() - refreshedAt > REFRESH_LIST_EVERY_MS) {
+    } else if (Date.now() - (refreshedAt.get(list) || 0) > REFRESH_LIST_EVERY_MS) {
       // Held: answer from it now, and let the queue bring it up to date when
       // it is due (graphFacts decides that).
-      refreshedAt = Date.now();
+      refreshedAt.set(list, Date.now());
       bot.queued('panel-list', () => graphFacts({ list })).catch(() => {});
     }
     if (!held) return null;
     return { dids: [...held.listed.keys()], complete: held.complete, at: held.at };
   }
+
+  // The bot's lists, numbered as its "Which list?" menus number them. Read
+  // from the bot's PDS without a session and held for ten minutes
+  // (src/bot/lists.js), so it does not wait its turn on the queue.
+  const lists = async () => ({ multi: multiListOn(), lists: await botLists() });
 
   function status() {
     const agent = bot.agent();
@@ -134,6 +140,15 @@ export async function startPanel(bot) {
       atmosphere: config.atmosphere,
       database: usingPostgres() ? 'Postgres' : 'SQLite',
       list: listUri(),
+      multiList: multiListOn(),
+      // What the shield is set to do. Its gates need the owner's own app
+      // password; without one it can only say what it sees.
+      shield: {
+        mode: config.shield.mode,
+        attack: config.shield.attack.mode,
+        canGate: config.shield.canGate,
+        stream: Boolean(config.stream),
+      },
       keep: config.keep,
       rescoreEveryHours: config.driftEveryHours,
       snapshotMaxAgeDays: config.snapshotMaxAgeDays,
@@ -176,6 +191,7 @@ export async function startPanel(bot) {
       ownerConvo: () => ownerConvo(bot.chat()),
       model: activeModel,
       generate: generateText,
+      lists,
       members,
       profiles: createProfiles(),
       stopWatch: (uri) => stopWatch({ target: uri }),

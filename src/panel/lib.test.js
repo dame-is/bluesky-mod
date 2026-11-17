@@ -14,6 +14,7 @@ import {
   blockCommand,
   cancelCommand,
   NAMED_PER_COMMAND,
+  onList,
   primaryKind,
   selected,
   triageCommand,
@@ -120,6 +121,33 @@ describe('the command for a selection', () => {
     const parsed = commands.map((c) => parseCommand(c));
     expect(parsed.every((c) => c.action === 'approve' && !c.refusal && !c.bands.length && !c.labels.length)).toBe(true);
     expect(parsed.flatMap((c) => c.actors)).toEqual(many);
+  });
+
+  it('bounds an approval of the hostile ones by when the page counted them', () => {
+    const asOf = '2026-11-17T14:20:00.000Z';
+    const text = approveCommand(CODE, { bands: ['UNKNOWN', 'NOTABLE'], hostileOnly: true }, { asOf });
+    expect(text).toBe(`approve ${CODE} hostile NOTABLE,UNKNOWN asof=${asOf}`);
+    expect(parseCommand(text)).toMatchObject({ action: 'approve', labels: ['hostile'], bands: ['NOTABLE', 'UNKNOWN'], asOf, needsTarget: false });
+    // A ring has no label time to be bounded by, and the parser refuses one.
+    expect(approveCommand(CODE, { bands: ['UNKNOWN'] }, { asOf })).toBe(`approve ${CODE} UNKNOWN`);
+  });
+
+  it('names the list a write goes to the way the bot\'s own menus do', () => {
+    expect(onList('block did:plc:abc', null)).toBe('block did:plc:abc');
+    const before = process.env.MOD_MULTI_LIST;
+    process.env.MOD_MULTI_LIST = 'true';
+    try {
+      expect(parseCommand(onList(blockCommand('did:plc:abc'), '3kspam'))).toMatchObject({ action: 'list_add', actor: 'did:plc:abc', list: '3kspam', needsTarget: false });
+      expect(parseCommand(onList(unblockCommand('did:plc:abc'), '3kspam'))).toMatchObject({ action: 'list_remove', actor: 'did:plc:abc', list: '3kspam' });
+      expect(parseCommand(onList(approveCommand(CODE, { bands: ['UNKNOWN'], sectors: ['like'] }), '3kspam'))).toMatchObject({ action: 'approve', code: CODE, bands: ['UNKNOWN'], list: '3kspam' });
+      expect(parseCommand(onList(approveCommand(CODE, { bands: ['UNKNOWN'], hostileOnly: true }, { asOf: '2026-11-17T14:20:00.000Z' }), '3kspam'))).toMatchObject({ labels: ['hostile'], asOf: '2026-11-17T14:20:00.000Z', list: '3kspam' });
+      for (const text of approveByName(CODE, ['did:plc:abc', 'did:plc:def']).map((c) => onList(c, '3kspam'))) {
+        expect(parseCommand(text)).toMatchObject({ action: 'approve', actors: ['did:plc:abc', 'did:plc:def'], list: '3kspam' });
+      }
+    } finally {
+      if (before === undefined) delete process.env.MOD_MULTI_LIST;
+      else process.env.MOD_MULTI_LIST = before;
+    }
   });
 
   it('writes the other commands the way the bot reads them', () => {

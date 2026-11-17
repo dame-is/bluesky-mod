@@ -5,8 +5,8 @@
 import { get } from '../api.js';
 import { h, fill, icon } from '../dom.js';
 import { BAND_RULE, ago, clock, compact, nf, shortDid, viaWords } from '../lib/format.js';
-import { blockCommand, unblockCommand } from '../lib/commands.js';
-import { avatar, band, closeButton, confirm, loadProfile, loading, problem, run, tone } from '../ui.js';
+import { blockCommand, onList, unblockCommand } from '../lib/commands.js';
+import { avatar, band, closeButton, confirm, listPicker, loadProfile, loading, problem, run, tone } from '../ui.js';
 
 function reasonLine(live) {
   if (!live) return null;
@@ -49,31 +49,50 @@ export function openAccount(actor, ctx) {
     const handle = profile.handle || live?.handle || null;
     const name = profile.displayName || live?.displayName || handle || shortDid(a.did);
     const face = avatar(profile, { large: true, fallback: handle || '' });
-    const onList = a.onList;
+    // With one list, whether they are on it. With several, each one they
+    // are on, and a write names its list.
+    const { several } = ctx.lists;
+    const listed = a.onLists[0] || null;
     const isProtected = Boolean(live?.protectedReason || a.protectedReason);
+    const at = handle ? `@${handle}` : 'this account';
 
     const after = async () => {
       await load();
       ctx.refresh();
     };
+    // The list a block goes to, when there are several: chosen in the
+    // question, with nothing chosen when it opens.
+    const picker = several ? listPicker(ctx.lists) : null;
     const add = async () => {
+      if (picker) picker.value = '';
       const ok = await confirm({
-        title: `Add ${handle ? `@${handle}` : 'this account'} to the block list?`,
-        body: h('p', null, reasonLine(live) || 'The bot will check they are not protected before it writes.'),
-        command: blockCommand(a.did),
-        yes: 'Add to the list',
+        title: several ? `Add ${at} to one of your lists?` : `Add ${at} to the block list?`,
+        body: [
+          h('p', null, reasonLine(live) || 'The bot will check they are not protected before it writes.'),
+          picker ? h('label', { class: 'label' }, 'Which list', picker) : null,
+        ],
+        command: several ? null : blockCommand(a.did),
+        yes: several ? 'Add to that list' : 'Add to the list',
         danger: true,
       });
-      if (ok) await run(blockCommand(a.did), { after });
+      // With no list chosen the command names none, and the bot asks which.
+      if (ok) await run(onList(blockCommand(a.did), picker?.value), { after });
     };
-    const remove = async () => {
+    const remove = async (rkey = null) => {
+      const command = onList(unblockCommand(a.did), rkey);
       const ok = await confirm({
-        title: `Take ${handle ? `@${handle}` : 'this account'} off the block list?`,
-        command: unblockCommand(a.did),
-        yes: 'Take off the list',
+        title: rkey ? `Take ${at} off ${ctx.lists.name(rkey)}?` : `Take ${at} off the block list?`,
+        command,
+        yes: rkey ? `Take off ${ctx.lists.name(rkey)}` : 'Take off the list',
       });
-      if (ok) await run(unblockCommand(a.did), { after });
+      if (ok) await run(command, { after });
     };
+    // "since 3 days ago. Typed by name. 3f2a1b7c", after a "Yes" or a list's name.
+    const since = (row) => [
+      row.addedAt ? `, since ${ago(row.addedAt)}. ` : '. ',
+      viaWords(row.via),
+      row.code ? ['. ', h('span', { class: 'mono' }, row.code)] : null,
+    ];
 
     const facts = [
       profile.followers != null ? `${compact(profile.followers)} followers` : null,
@@ -104,22 +123,27 @@ export function openAccount(actor, ctx) {
         { class: 'rows' },
         h('div', null, h('dt', null, 'To you, now'), h('dd', null, live ? [band(live.band), h('div', { class: 'muted' }, reasonLine(live))] : h('span', { class: 'muted' }, a.failed ? `Could not be scored now: ${a.failed}` : 'Not scored'))),
         live ? h('div', null, h('dt', null, 'What that means'), h('dd', null, BAND_RULE[live.band] || '')) : null,
-        h(
-          'div',
-          null,
-          h('dt', null, 'On the list'),
-          h(
-            'dd',
-            null,
-            onList
-              ? [
-                  onList.addedAt ? `Yes, since ${ago(onList.addedAt)}. ` : 'Yes. ',
-                  viaWords(onList.via),
-                  onList.code ? ['. ', h('span', { class: 'mono' }, onList.code)] : null,
-                ]
-              : 'No',
-          ),
-        ),
+        several
+          ? h(
+              'div',
+              null,
+              h('dt', null, 'On your lists'),
+              h(
+                'dd',
+                null,
+                a.onLists.length
+                  ? a.onLists.map((row) =>
+                      h(
+                        'div',
+                        { class: 'toolbar' },
+                        h('span', null, h('strong', null, ctx.lists.name(row.list)), since(row)),
+                        ctx.me.canWrite ? h('button', { type: 'button', class: 'btn btn-small', onClick: () => remove(row.list) }, 'Take off') : null,
+                      ),
+                    )
+                  : 'None',
+              ),
+            )
+          : h('div', null, h('dt', null, 'On the list'), h('dd', null, listed ? ['Yes', since(listed)] : 'No')),
         live?.blocksYou ? h('div', null, h('dt', null, 'Blocks you'), h('dd', null, 'Yes. They cannot reply to you or quote you.')) : null,
         live?.followsYou ? h('div', null, h('dt', null, 'Follows you'), h('dd', null, 'Yes')) : null,
         a.kept ? h('div', null, h('dt', null, 'Review queue'), h('dd', null, `Kept on the list ${ago(a.kept.at)}.`)) : null,
@@ -130,11 +154,13 @@ export function openAccount(actor, ctx) {
         ? h(
             'div',
             { class: 'toolbar' },
-            onList
-              ? h('button', { type: 'button', class: 'btn', onClick: remove }, 'Take off the list')
+            !several && listed
+              ? h('button', { type: 'button', class: 'btn', onClick: () => remove() }, 'Take off the list')
               : isProtected
                 ? h('p', { class: 'note' }, 'Protected. No path in the bot adds them. If you mean it, block them from your own client.')
-                : h('button', { type: 'button', class: 'btn btn-danger', onClick: add }, 'Add to the list'),
+                : several && a.onLists.length === ctx.lists.all.length
+                  ? null
+                  : h('button', { type: 'button', class: 'btn btn-danger', onClick: add }, several ? 'Add to a list' : 'Add to the list'),
           )
         : null,
 
@@ -156,6 +182,7 @@ export function openAccount(actor, ctx) {
                     { class: 'toolbar muted' },
                     band(e.band === 'UNSCORED' ? null : e.band),
                     e.action === 'list_add' || e.action === 'list_remove' ? h('span', null, viaWords(e.via)) : null,
+                    several && e.action ? h('span', null, ctx.lists.name(e.list)) : null,
                     e.scan
                       ? h('a', { href: `#/scans/${e.code}` }, `Scan ${e.code}`)
                       : h('span', { class: 'mono' }, e.code),

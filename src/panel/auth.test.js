@@ -159,6 +159,25 @@ describe('a session', () => {
     expect(await sessionFor(b.token, { roster })).toBe(null);
   });
 
+  it('forgets a code asked for and not yet used when signing out everywhere', async () => {
+    const code = await issueCode(OWNER);
+    await endSessionsFor(OWNER);
+    expect(await redeemCode(code, { roster })).toBe(null);
+  });
+
+  it('forgets the sign-ins of someone taken off the roster, for good', async () => {
+    const { token } = await signIn(WRITER);
+    const without = makeRoster({ owner: OWNER });
+    // Seen while off the roster: refused, and the session is gone.
+    expect(await sessionFor(token, { roster: without })).toBe(null);
+    expect(await sessionFor(token, { roster })).toBe(null);
+    // Not seen in between: the start-up prune does the same.
+    const again = await signIn(WRITER);
+    await pruneAuth({ roster: without });
+    expect(await sessionFor(again.token, { roster })).toBe(null);
+    expect(await sessionsFor(OWNER)).not.toBe(null);
+  });
+
   it('lists sessions without anything that could be used as one', async () => {
     const { token } = await signIn(OWNER);
     const [listed] = await sessionsFor(OWNER);
@@ -179,18 +198,30 @@ describe('a session', () => {
 describe('the limit on wrong codes', () => {
   it('stops one address after five, and lets it back after the window', () => {
     const limiter = attemptLimiter({ max: 5, windowMs: 1000 });
-    for (let i = 0; i < 5; i += 1) {
-      expect(limiter.allowed('1.2.3.4', 100)).toBe(true);
-      limiter.failed('1.2.3.4', 100);
-    }
-    expect(limiter.allowed('1.2.3.4', 200)).toBe(false);
-    expect(limiter.allowed('5.6.7.8', 200)).toBe(true);
-    expect(limiter.allowed('1.2.3.4', 1200)).toBe(true);
+    for (let i = 0; i < 5; i += 1) expect(limiter.take('1.2.3.4', 100)).not.toBe(null);
+    expect(limiter.take('1.2.3.4', 200)).toBe(null);
+    expect(limiter.take('5.6.7.8', 200)).not.toBe(null);
+    expect(limiter.take('1.2.3.4', 1200)).not.toBe(null);
   });
 
   it('stops everyone when many addresses share a search', () => {
     const limiter = attemptLimiter({ max: 2, windowMs: 1000 });
-    for (let i = 0; i < 10; i += 1) limiter.failed(`10.0.0.${i}`, 100);
-    expect(limiter.allowed('10.9.9.9', 200)).toBe(false);
+    for (let i = 0; i < 10; i += 1) limiter.take(`10.0.0.${i}`, 100);
+    expect(limiter.take('10.9.9.9', 200)).toBe(null);
+  });
+
+  it('counts a try when it starts, so tries opened together are all counted', () => {
+    const limiter = attemptLimiter({ max: 5, windowMs: 1000 });
+    // Two hundred at once, none answered yet: five get through.
+    const through = Array.from({ length: 200 }, () => limiter.take('1.2.3.4', 100)).filter(Boolean);
+    expect(through).toHaveLength(5);
+  });
+
+  it('gives a try back when the code was right', () => {
+    const limiter = attemptLimiter({ max: 2, windowMs: 1000 });
+    limiter.take('1.2.3.4', 100);
+    limiter.take('1.2.3.4', 100).refund();
+    expect(limiter.take('1.2.3.4', 150)).not.toBe(null);
+    expect(limiter.take('1.2.3.4', 160)).toBe(null);
   });
 });

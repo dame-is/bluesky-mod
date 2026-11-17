@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -127,7 +128,8 @@ async function readJson(req) {
  *   ownerConvo()         the owner's DM conversation id
  *   model()              the model id in use, or null
  *   generate             the model call triage uses
- *   members()            who is on the list by the bot's repo, or null
+ *   lists()              { multi, lists }: the bot's lists, the main one first
+ *   members(uri)         who is on that list by the bot's repo, or null
  *   profiles(dids)       names and faces for DIDs
  *   stopWatch(uri)       stop the watch on a post
  *   status()             what the process is doing
@@ -177,13 +179,44 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     }
   }
 
-  const members = async () => {
+  const members = async (uri) => {
     try {
-      return (await deps.members()) || null;
+      return (await deps.members(uri)) || null;
     } catch {
       return null;
     }
   };
+
+  const rkeyOf = (uri) => String(uri || '').split('/').pop() || null;
+
+  /**
+   * The bot's lists, the main one first. With one list this is that list and
+   * nothing asks which. With several (MOD_MULTI_LIST) a page names the one it
+   * wants by its record key, and one that is not there is refused, never
+   * swapped for the main list.
+   */
+  async function listsNow() {
+    let got;
+    try {
+      got = await deps.lists();
+    } catch (err) {
+      throw new HttpError(502, String(err?.message || err).slice(0, 300));
+    }
+    const lists = got.lists.map((l) => ({ uri: l.uri, rkey: l.rkey, name: l.name, n: l.n }));
+    return { multi: Boolean(got.multi), lists, primary: lists[0] };
+  }
+
+  async function chosenList(url) {
+    const all = await listsNow();
+    const key = url.searchParams.get('list');
+    if (!key || !all.multi) return { ...all, list: all.primary };
+    const list = all.lists.find((l) => l.rkey === key);
+    if (!list) throw new HttpError(404, 'The bot has no list with that key. It may have been deleted.');
+    return { ...all, list };
+  }
+
+  /** Which list something in the log was on, as a record key. */
+  const keyFor = (uri, all) => rkeyOf(uri) || all.primary.rkey;
 
   const needWrite = (session) => {
     if (!session.canWrite) {
@@ -209,18 +242,36 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       };
     },
 
-    'GET /api/overview': async ({ session, url }) =>
-      q.overview({
+    'GET /api/lists': async () => {
+      const all = await listsNow();
+      return {
+        multi: all.multi,
+        lists: all.lists.map(({ rkey, name, n }) => ({ rkey, name, n })),
+      };
+    },
+
+    'GET /api/overview': async ({ session, url }) => {
+      const at = await chosenList(url);
+      const out = await q.overview({
         days: int(url.searchParams.get('days'), 30, { min: 7, max: 90 }),
-        members: await members(),
+        members: await members(at.list.uri),
+        list: at.list.uri,
+        primary: at.primary.uri,
+        mainMembers: at.list === at.primary ? null : await members(at.primary.uri),
         canWrite: session.canWrite,
-      }),
+      });
+      return {
+        ...out,
+        changes: out.changes.map((e) => ({ ...e, list: keyFor(e.list, at) })),
+      };
+    },
 
     'GET /api/health': async () => deps.health(),
 
-    'GET /api/scans': async ({ url }) => {
+    'GET /api/scans': async ({ session, url }) => {
       const state = url.searchParams.get('state');
       return q.scans({
+        canWrite: session.canWrite,
         state: ['waiting', 'adding', 'added', 'cancelled', 'undone'].includes(state)
           ? state
           : null,
@@ -253,16 +304,24 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       const code = String(url.searchParams.get('code') || '').toLowerCase();
       const found = CODE.test(code) ? await q.scan(code, session) : null;
       if (!found) throw new HttpError(404, 'There is no scan with that code.');
-      return found;
+      // The list its approvals go to, once one has bound it. Only asked for
+      // with several lists; with one there is nothing to say.
+      const all = await listsNow().catch(() => null);
+      const bound = found.list || (found.approved ? all?.primary.uri : null);
+      return { ...found, list: all?.multi && bound ? rkeyOf(bound) : null };
     },
 
-    'GET /api/queue': async ({ url }) =>
-      q.queue({
-        members: await members(),
+    'GET /api/queue': async ({ url }) => {
+      const all = await listsNow();
+      return q.queue({
+        members: await members(all.primary.uri),
+        list: all.primary.uri,
+        primary: all.primary.uri,
         band: q.CLOSE.includes(url.searchParams.get('band')) ? url.searchParams.get('band') : null,
         offset: int(url.searchParams.get('offset'), 0),
         limit: int(url.searchParams.get('limit'), 30, { min: 1, max: 100 }),
-      }),
+      });
+    },
 
     'POST /api/queue/keep': async ({ session, body }) => {
       needWrite(session);
@@ -278,29 +337,49 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       return { ok: true };
     },
 
-    'GET /api/list': async ({ url }) =>
-      q.listPage({
-        members: await members(),
+    'GET /api/list': async ({ url }) => {
+      const at = await chosenList(url);
+      return q.listPage({
+        members: await members(at.list.uri),
+        list: at.list.uri,
+        primary: at.primary.uri,
         band: url.searchParams.get('band') || null,
         family: url.searchParams.get('family') || null,
         q: String(url.searchParams.get('q') || '').slice(0, 200),
         offset: int(url.searchParams.get('offset'), 0),
         limit: int(url.searchParams.get('limit'), 50, { min: 1, max: 200 }),
-      }),
-
-    'GET /api/list/radar': async () => q.listRadar({ members: await members() }),
-
-    'GET /api/activity': async ({ session, url }) => {
-      const filter = url.searchParams.get('filter');
-      return q.activity({
-        filter: ['added', 'removed', 'undone'].includes(filter) ? filter : null,
-        offset: int(url.searchParams.get('offset'), 0, { max: 5000 }),
-        limit: int(url.searchParams.get('limit'), 30, { min: 1, max: 100 }),
-        canWrite: session.canWrite,
       });
     },
 
-    'GET /api/watches': async () => q.watches(),
+    'GET /api/list/radar': async ({ url }) => {
+      const at = await chosenList(url);
+      return q.listRadar({
+        members: await members(at.list.uri),
+        list: at.list.uri,
+        primary: at.primary.uri,
+      });
+    },
+
+    'GET /api/activity': async ({ session, url }) => {
+      const filter = url.searchParams.get('filter');
+      const [all, out] = await Promise.all([
+        listsNow(),
+        q.activity({
+          filter: ['added', 'removed', 'undone'].includes(filter) ? filter : null,
+          offset: int(url.searchParams.get('offset'), 0, { max: 5000 }),
+          limit: int(url.searchParams.get('limit'), 30, { min: 1, max: 100 }),
+          canWrite: session.canWrite,
+        }),
+      ]);
+      return { ...out, events: out.events.map((e) => ({ ...e, list: keyFor(e.list, all) })) };
+    },
+
+    // "What are you watching" is answered only for someone who may write,
+    // in a DM and here.
+    'GET /api/watches': async ({ session }) => {
+      needWrite(session);
+      return q.watches();
+    },
 
     'POST /api/watches/stop': async ({ session, body }) => {
       needWrite(session);
@@ -355,16 +434,27 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       }
       const did = live?.did || (DID.test(actor) ? actor : null);
       if (!did) throw new HttpError(404, failed || 'I could not find that account.');
-      const [history, listed] = await Promise.all([
-        q.accountHistory(did, session),
-        q.listPage({ members: await members(), q: did, limit: 1 }),
-      ]);
+      const all = await listsNow();
+      const history = await q.accountHistory(did, session);
+      // Every list they are on, the main one first.
+      const onLists = [];
+      for (const l of all.lists) {
+        const page = await q.listPage({
+          members: await members(l.uri),
+          list: l.uri,
+          primary: all.primary.uri,
+          q: did,
+          limit: 1,
+        });
+        if (page.rows[0]) onLists.push({ ...page.rows[0], list: l.rkey });
+      }
       return {
         did,
         live,
         failed,
-        onList: listed.rows[0] || null,
+        onLists,
         ...history,
+        entries: history.entries.map((e) => ({ ...e, list: keyFor(e.list, all) })),
       };
     },
 
@@ -399,7 +489,10 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
   async function signIn(req, res) {
     assertOwnPage(req);
     const who = req.socket.remoteAddress || 'unknown';
-    if (!limiter.allowed(who)) {
+    // Counted before the body is read, so a burst of requests opened
+    // together is held to the limit too. A right code gets its try back.
+    const tried = limiter.take(who);
+    if (!tried) {
       throw new HttpError(429, 'Too many wrong codes. Wait ten minutes, then ask the bot for a new one.');
     }
     const body = await readJson(req);
@@ -408,9 +501,9 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       roster,
     });
     if (!session) {
-      limiter.failed(who);
       throw new HttpError(401, 'That code is wrong, used or out of date. Send the bot "panel" for a new one.');
     }
+    tried.refund();
     log('Signed in to the panel', { tier: tierOf(session.did, roster) });
     json(res, 200, { ok: true }, {
       'Set-Cookie': sessionCookie(session.token, Math.round(settings.sessionDays * 86400)),
@@ -423,6 +516,8 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     }
     const session = await sessionFor(cookieOf(req, SESSION_COOKIE), { roster });
     if (!session) throw new HttpError(401, 'Sign in first.');
+    // Past here the caller is someone the bot answers (see `handle`).
+    req.signedIn = true;
     const route = routes[`${req.method} ${url.pathname}`];
     if (!route) throw new HttpError(404, 'There is nothing at that address.');
     let body = {};
@@ -473,7 +568,9 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     }
     res.writeHead(200, { ...head, 'Content-Length': stat.size });
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(file).pipe(res);
+    // pipeline, not pipe: it closes the file when the browser goes away
+    // before the end, where pipe would leave it open for good.
+    return pipeline(fs.createReadStream(file), res, () => {});
   }
 
   async function handle(req, res) {
@@ -485,19 +582,25 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) log('The panel could not answer', { err: String(err?.message || err) });
       if (res.headersSent) return res.end();
+      // Why it broke can name a host or a file. Someone signed in is told;
+      // anyone else is told only that it broke, and the log has the rest.
       json(res, status, {
         error:
-          status === 500
-            ? `That did not work: ${String(err?.message || err).slice(0, 300)}`
-            : err.message,
+          status !== 500
+            ? err.message
+            : req.signedIn
+              ? `That did not work: ${String(err?.message || err).slice(0, 300)}`
+              : 'That did not work. The bot’s log says why.',
       });
     }
   }
 
   const server = http.createServer(handle);
-  // An approval writes for a while before it answers.
-  server.requestTimeout = 10 * 60_000;
-  server.headersTimeout = 30_000;
+  // How long a request may take to arrive. The largest is a few kilobytes of
+  // JSON, so one that dawdles is not a browser. How long an answer may take
+  // is not limited by this: an approval writes for a while before it replies.
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 15_000;
   let pruner = null;
 
   return {
@@ -512,6 +615,9 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
         server.once('error', reject);
         server.listen(settings.port, settings.host, () => {
           server.off('error', reject);
+          // Once now, with the roster: anyone taken off it since the last
+          // run loses their sign-ins. Then hourly, for what has run out.
+          pruneAuth({ roster }).catch(() => {});
           pruner = setInterval(() => pruneAuth().catch(() => {}), 60 * 60_000);
           if (pruner.unref) pruner.unref();
           resolve(server.address());

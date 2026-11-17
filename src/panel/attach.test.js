@@ -122,6 +122,6 @@ describe('the panel on a bot that has only just started', () => {
     const { status, body } = await get('/api/account?actor=someone.test');
     expect(status).toBe(200);
     expect(queued).toHaveBeenCalledWith('panel-lookup', expect.any(Function));
-    expect(body).toMatchObject({ did: 'did:plc:someone00000000000000000', live: { band: 'UNKNOWN' }, onList: null, entries: [] });
+    expect(body).toMatchObject({ did: 'did:plc:someone00000000000000000', live: { band: 'UNKNOWN' }, onLists: [], entries: [] });
   });
 });

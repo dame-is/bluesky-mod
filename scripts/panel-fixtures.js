@@ -90,6 +90,17 @@ export function demoIndex(actor) {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * The demo bot's lists, the main one first, as src/bot/lists.js numbers
+ * them. Only the first exists unless the demo is run with several lists.
+ */
+export const demoLists = (bot) =>
+  [
+    ['3mdemolist', 'Block List'],
+    ['3mdemospam', 'Spam'],
+    ['3mdemotroll', 'Trolls'],
+  ].map(([rkey, name], i) => ({ uri: `at://${bot}/app.bsky.graph.list/${rkey}`, rkey, name, n: i + 1 }));
+
 const uuid = (r) => {
   const hex = Array.from({ length: 32 }, () => Math.floor(r() * 16).toString(16)).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
@@ -99,11 +110,13 @@ const range = (from, n) => Array.from({ length: n }, (_, k) => from + k);
 
 /**
  * Fill the open store. `now` is the moment the data is "as of", so the
- * newest change is minutes old whenever this runs.
+ * newest change is minutes old whenever this runs. `lists` adds what a bot
+ * with several lists would also hold: blocks on a second list and a scan
+ * approved to a third.
  *
  * @returns {Promise<{ owner: string, bot: string, codes: Record<string, string> }>}
  */
-export async function seedDemo({ now = Date.now(), owner = 'did:plc:owner0000000000000000000' } = {}) {
+export async function seedDemo({ now = Date.now(), owner = 'did:plc:owner0000000000000000000', lists = false } = {}) {
   const r = prng(20261117);
   const iso = (ms) => new Date(ms).toISOString();
   const bot = 'did:plc:demobot00000000000000000';
@@ -407,6 +420,22 @@ export async function seedDemo({ now = Date.now(), owner = 'did:plc:owner0000000
     if (busy > 1) usage.push({ at, kind: 'triage-escalated', model: 'test/escalation', input_tokens: Math.floor(14_000 + r() * 8000), output_tokens: Math.floor(900 + r() * 600) });
   }
   await put('llm_usage', usage);
+
+  // --- other lists -----------------------------------------------------------------
+  // After the re-score on purpose: it reads the main list and no other.
+  if (lists) {
+    const [, spam, trolls] = demoLists(bot);
+    for (let k = 0; k < 61; k += 1) {
+      const id = await single({ i: 65000 + k, at: now - (1 + (k % 20)) * DAY - k * 60_000, words: 'block, it is spam to spam' });
+      await upsert('plan', [{ id, list_uri: spam.uri }]);
+    }
+    const rows = [...band('PERIPHERAL', 792, { quote: 3 }), ...band('UNKNOWN', 66000, { quote: 30 })];
+    const at = now - 4 * DAY;
+    const uri = postBy(demoDid(826), '3mpileon');
+    const id = await scan('pileon', { uri, kind: 'quoters', at: at - HOUR, rows });
+    await add(id, rows.filter((x) => x.band === 'UNKNOWN'), at, 'band');
+    await upsert('plan', [{ id, approved_at: iso(at), approved_bands: ['UNKNOWN'], list_uri: trolls.uri, note: `bulk quoters from ${uri}; approved: approve ${id.slice(0, 8)} UNKNOWN to trolls` }]);
+  }
 
   return { owner, bot, codes };
 }

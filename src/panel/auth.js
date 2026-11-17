@@ -140,7 +140,12 @@ export async function sessionFor(token, { now = Date.now(), roster } = {}) {
   const [row] = (await select('panel_session', { eq: { token_hash: hash } })) || [];
   if (!row || !(Date.parse(row.expires_at) > now)) return null;
   const tier = tierOf(row.did, roster);
-  if (!tier) return null;
+  if (!tier) {
+    // Off the roster: their sign-ins are forgotten, so putting them back on
+    // it later does not bring an old cookie back to life.
+    await endSessionsFor(row.did).catch(() => {});
+    return null;
+  }
   if (!(now - Date.parse(row.last_seen_at || 0) < TOUCH_EVERY_MS)) {
     await update(
       'panel_session',
@@ -166,9 +171,13 @@ export async function endSession(token) {
   await del('panel_session', { eq: { token_hash: sha(token) } });
 }
 
-/** Sign out everywhere: forget every cookie issued to this account. */
+/**
+ * Sign out everywhere: forget every cookie issued to this account, and any
+ * code it asked for and has not used.
+ */
 export async function endSessionsFor(did) {
   await del('panel_session', { eq: { did } });
+  await del('panel_code', { eq: { did } });
 }
 
 /** This account's sign-ins, newest first, for "where am I signed in". */
@@ -189,11 +198,22 @@ export async function sessionsFor(did, { now = Date.now() } = {}) {
     }));
 }
 
-/** Clear codes and sessions that are out of date. */
-export async function pruneAuth({ now = Date.now() } = {}) {
+/**
+ * Clear codes and sessions that are out of date, and with `roster` those of
+ * anyone no longer on it. The roster is read from the environment at start,
+ * so this at start is what makes taking someone off it final.
+ */
+export async function pruneAuth({ now = Date.now(), roster = null } = {}) {
   const cut = iso(now);
   await del('panel_code', { where: { expires_at: `lt.${cut}` } });
   await del('panel_session', { where: { expires_at: `lt.${cut}` } });
+  if (!roster) return;
+  for (const table of ['panel_session', 'panel_code']) {
+    const rows = (await select(table, { select: 'did' })) || [];
+    for (const did of new Set(rows.map((r) => r.did))) {
+      if (!tierOf(did, roster)) await del(table, { eq: { did } });
+    }
+  }
 }
 
 /**
@@ -211,13 +231,27 @@ export function attemptLimiter({ max = 5, windowMs = 10 * 60_000 } = {}) {
     return kept;
   };
   return {
-    /** May this address try a code now? */
-    allowed(key, now = Date.now()) {
-      return recent(key, now).length < max && recent('*', now).length < max * 5;
-    },
-    /** A wrong code from this address. */
-    failed(key, now = Date.now()) {
+    /**
+     * Count a try from this address, before its code is read. Null when the
+     * address, or everyone together, is over the limit. Counted at the start
+     * so that tries opened together are each counted before any is answered;
+     * `refund` gives the try back when the code turned out right.
+     */
+    take(key, now = Date.now()) {
+      if (recent(key, now).length >= max || recent('*', now).length >= max * 5) {
+        return null;
+      }
       for (const k of [key, '*']) byKey.set(k, [...recent(k, now), now]);
+      return {
+        refund() {
+          for (const k of [key, '*']) {
+            const kept = byKey.get(k) || [];
+            const i = kept.indexOf(now);
+            if (i !== -1) kept.splice(i, 1);
+            if (!kept.length) byKey.delete(k);
+          }
+        },
+      };
     },
   };
 }

@@ -13,6 +13,7 @@
 // list or label a plan are run here. Questions for a model stay in the DMs.
 
 import { parseCommand, isWrite, readOnlyReply } from '../lib/command.js';
+import { listTokenOf } from '../lib/listChoice.js';
 
 /** The commands the panel runs. */
 export const PANEL_ACTIONS = new Set([
@@ -83,16 +84,40 @@ export async function runPanelCommand(text, session, deps) {
       convoId,
     });
   });
+  // Follow-ups the bot offers with its receipt ("undo 3f2a1b7c"), kept only
+  // where the panel could run every command in them. An option can run more
+  // than one: "Every list" takes someone off each list in turn.
+  const options = (reply?.options || [])
+    .map((o) => ({
+      label: o.label,
+      commands: (o.commands?.length ? o.commands : [o.command]).map(String),
+    }))
+    .filter((o) => o.commands.every((c) => checkCommand(c, session).ok))
+    .map((o) => ({
+      label: o.label,
+      command: o.commands[0],
+      commands: o.commands,
+      // Does it only take people off? The page offers such a follow-up as
+      // one press beside the receipt ("Undo that"). One that adds anyone is
+      // never a single press: the bot's "Add the 37 hostile ones" after a
+      // read has to go through the page's own preview and question.
+      takesBack: o.commands.every((c) =>
+        ['undo', 'list_remove'].includes(parseCommand(c)?.action),
+      ),
+    }));
   return {
     ok: true,
     status: 200,
     action: cmd.action,
     text: reply?.text || '',
     outcome: reply?.outcome ?? null,
-    // Follow-ups the bot offers with its receipt ("undo 3f2a1b7c"), kept only
-    // where the panel could run them.
-    options: (reply?.options || [])
-      .filter((o) => checkCommand(o.command, session).ok)
-      .map((o) => ({ label: o.label, command: o.command })),
+    options,
+    // The bot's "Which list?": nothing was done, and every option is the same
+    // write with a list named on it. The page asks, where a DM would wait for
+    // a number.
+    choice:
+      (reply?.outcome ?? null) === null &&
+      options.length > 0 &&
+      options.every((o) => o.commands.every((c) => listTokenOf(c))),
   };
 }

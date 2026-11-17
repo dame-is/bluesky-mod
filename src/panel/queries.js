@@ -64,7 +64,8 @@ export function wordsOf(plan) {
 
 // --- plans ---------------------------------------------------------------------
 
-const PLAN_COLUMNS = 'id,created_at,approved_at,approved_bands,totals,note';
+const PLAN_COLUMNS =
+  'id,created_at,approved_at,approved_bands,totals,note,list_uri';
 
 function planSummary(plan, counts = {}, carrying = null) {
   const t = plan.totals || {};
@@ -83,10 +84,18 @@ function planSummary(plan, counts = {}, carrying = null) {
   return {
     code: shortCode(plan.id),
     createdAt: plan.created_at,
+    // The list this plan's writes go to, once an approval has bound it
+    // (planList.js). Null with `approved` set is the main list.
+    list: plan.list_uri || null,
+    approved: Boolean(plan.approved_at),
     uri: t.uri || null,
     kind: t.kind || null,
     total: counts.total ?? t.selected ?? 0,
-    byBand: Object.fromEntries(BANDS.map((b) => [b, t.byBand?.[b] || 0])),
+    // Counted from the plan's rows, not read from what the scan stored: a
+    // watch's plan stores no totals and grows as people arrive.
+    byBand: Object.fromEntries(
+      BANDS.map((b) => [b, counts[`band_${b.toLowerCase()}`] ?? t.byBand?.[b] ?? 0]),
+    ),
     engagements: t.engagements || {},
     alreadyListed: t.alreadyListed || 0,
     truncated: Boolean(t.truncated),
@@ -96,6 +105,10 @@ function planSummary(plan, counts = {}, carrying = null) {
       arguing: counts.arguing || 0,
       neutral: counts.neutral || 0,
     },
+    // When the newest "hostile" label was given. An approval of the hostile
+    // ones carries it, so it adds what this page counted and nothing a watch
+    // labels afterwards (the bot's own menus do the same with "asof=").
+    hostileAsOf: counts.hostile_at ? new Date(Date.parse(counts.hostile_at)).toISOString() : null,
     added,
     live,
     state,
@@ -120,15 +133,23 @@ async function summarise(plans) {
   return plans.map((p) => planSummary(p, byId.get(p.id), carry.get(p.id)));
 }
 
-/** Scans, newest first. `state` narrows to one of planSummary's states. */
-export async function scans({ state = null, limit = 60 } = {}) {
-  const plans = await select('plan', {
-    select: PLAN_COLUMNS,
-    where: { totals: 'not.is.null' },
-    order: 'created_at.desc',
-    limit: 200,
-  });
-  const all = await summarise(plans || []);
+/**
+ * Scans, newest first. `state` narrows to one of planSummary's states.
+ *
+ * A watch keeps its newcomers in a plan of its own. Which posts are watched
+ * is told only to someone who may write, in a DM and here, so without
+ * `canWrite` those plans are left out.
+ */
+export async function scans({ state = null, limit = 60, canWrite = true } = {}) {
+  const plans = (
+    (await select('plan', {
+      select: PLAN_COLUMNS,
+      where: { totals: 'not.is.null' },
+      order: 'created_at.desc',
+      limit: 200,
+    })) || []
+  ).filter((p) => canWrite || p.totals?.kind !== 'watch');
+  const all = await summarise(plans);
   const shown = state ? all.filter((p) => p.state === state) : all;
   const tally = {};
   for (const p of all) tally[p.state] = (tally[p.state] || 0) + 1;
@@ -229,7 +250,7 @@ export async function activity({
   const ids = [...new Set(page.map((e) => e.planId))];
   const plans = ids.length
     ? await select('plan', {
-        select: 'id,note,totals,created_at',
+        select: 'id,note,totals,created_at,list_uri',
         where: { id: { in: ids } },
       })
     : [];
@@ -243,6 +264,7 @@ export async function activity({
         code: shortCode(planId),
         scan: Boolean(plan?.totals),
         uri: plan?.totals?.uri || null,
+        list: plan?.list_uri || null,
         words: canWrite
           ? e.kind === 'undone'
             ? [e.reason].filter(Boolean)
@@ -307,7 +329,7 @@ export async function accountHistory(did, { canWrite = false } = {}) {
   const ids = [...new Set((rows || []).map((r) => r.plan_id))];
   const plans = ids.length
     ? await select('plan', {
-        select: 'id,note,totals,created_at',
+        select: 'id,note,totals,created_at,list_uri',
         where: { id: { in: ids } },
       })
     : [];
@@ -324,6 +346,7 @@ export async function accountHistory(did, { canWrite = false } = {}) {
           code: shortCode(r.plan_id),
           scan: Boolean(plan?.totals),
           uri: plan?.totals?.uri || null,
+          list: plan?.list_uri || null,
           at: r.acted_at || plan?.created_at || null,
           band: r.band,
           vouches: r.vouches,
@@ -356,12 +379,27 @@ async function latestAudit() {
   );
 }
 
-let listCache = null;
+/** list -> { key, at, value }. One slot per list, so two lists do not evict each other. */
+const listCache = new Map();
 const LIST_CACHE_MS = 30_000;
 
-/** Forget the held copy of the list, after something changed it. */
+/** Forget the held copies of the lists, after something changed one. */
 export function forgetList() {
-  listCache = null;
+  listCache.clear();
+}
+
+/**
+ * Plan id -> list, for every plan bound to a list by name. A plan with no
+ * list_uri went to the main list (src/bot/planList.js), so only these need
+ * reading to tell which list an add was on.
+ */
+async function boundPlans() {
+  const rows = await selectAll('plan', {
+    select: 'id,list_uri',
+    where: { list_uri: 'not.is.null' },
+    order: 'id.asc',
+  });
+  return new Map(rows.map((r) => [r.id, r.list_uri]));
 }
 
 /**
@@ -372,14 +410,28 @@ export function forgetList() {
  * could read it: { dids: string[], complete: boolean }. Without it the
  * re-score's accounts stand in, and failing that the adds still open in the
  * log. `source` says which.
+ *
+ * `list` and `primary` are for a bot with several lists: only the adds made
+ * by plans on `list` count, and the weekly re-score, which reads the main
+ * list alone, is used only when `list` is the main one. Another list shows
+ * the band each account had when it was added. With no `list`, every add
+ * counts, as when there is one list.
  */
-export async function listIndex({ members = null, now = Date.now() } = {}) {
+export async function listIndex({
+  members = null,
+  list = null,
+  primary = null,
+  now = Date.now(),
+} = {}) {
   const key = members ? `${members.dids.length}:${members.at || ''}` : 'none';
-  if (listCache && listCache.key === key && now - listCache.at < LIST_CACHE_MS) {
-    return listCache.value;
+  const slot = list || '';
+  const cached = listCache.get(slot);
+  if (cached && cached.key === key && now - cached.at < LIST_CACHE_MS) {
+    return cached.value;
   }
-  const audit = await latestAudit();
-  const [items, adds, keeps] = await Promise.all([
+  const main = !list || list === primary;
+  const audit = main ? await latestAudit() : null;
+  const [items, everyAdd, keeps, bound] = await Promise.all([
     audit
       ? selectAll('audit_item', {
           select: 'did,handle,band,trust,vouches,followers,protected_reason',
@@ -394,7 +446,11 @@ export async function listIndex({ members = null, now = Date.now() } = {}) {
       order: 'acted_at.asc',
     }),
     selectAll('review_keep', { select: 'did,band,kept_at', order: 'did.asc' }),
+    list ? boundPlans() : null,
   ]);
+  const adds = list
+    ? everyAdd.filter((a) => (bound.get(a.plan_id) || primary) === list)
+    : everyAdd;
   const scored = new Map(items.map((i) => [i.did, i]));
   // The newest open add wins: it is the latest answer to "why are they here".
   const added = new Map(adds.map((a) => [a.did, a]));
@@ -440,7 +496,7 @@ export async function listIndex({ members = null, now = Date.now() } = {}) {
     total: rows.length,
     rows,
   };
-  listCache = { key, at: now, value };
+  listCache.set(slot, { key, at: now, value });
   return value;
 }
 
@@ -456,13 +512,15 @@ const bandCounts = (rows) => {
  */
 export async function listPage({
   members = null,
+  list = null,
+  primary = null,
   band = null,
   q = '',
   family = null,
   offset = 0,
   limit = 50,
 } = {}) {
-  const index = await listIndex({ members });
+  const index = await listIndex({ members, list, primary });
   const needle = String(q || '').trim().toLowerCase().replace(/^@/, '');
   const matched = index.rows.filter(
     (r) =>
@@ -487,8 +545,8 @@ export async function listPage({
  * The list as the radar draws it: everyone who is not a stranger, one mark
  * each, and the strangers as a count per way of having been added.
  */
-export async function listRadar({ members = null } = {}) {
-  const index = await listIndex({ members });
+export async function listRadar({ members = null, list = null, primary = null } = {}) {
+  const index = await listIndex({ members, list, primary });
   const near = [];
   const far = {};
   for (const r of index.rows) {
@@ -520,9 +578,19 @@ export async function listRadar({ members = null } = {}) {
  * The review queue: accounts on the list who are not strangers, closest
  * first. One the owner chose to keep stays out unless a later re-score put
  * them closer than they were when it was kept.
+ *
+ * With several lists this is the main list's queue: `list` and `primary`
+ * are both that list, since the re-score that fills it reads no other.
  */
-export async function queue({ members = null, band = null, offset = 0, limit = 30 } = {}) {
-  const index = await listIndex({ members });
+export async function queue({
+  members = null,
+  list = null,
+  primary = null,
+  band = null,
+  offset = 0,
+  limit = 30,
+} = {}) {
+  const index = await listIndex({ members, list, primary });
   const open = index.rows.filter(
     (r) =>
       CLOSE.includes(r.band) &&
@@ -732,6 +800,9 @@ export async function overview({
   days = 30,
   now = Date.now(),
   members = null,
+  list = null,
+  primary = null,
+  mainMembers = null,
   canWrite = false,
 } = {}) {
   const span = Math.min(90, Math.max(7, Number(days) || 30));
@@ -739,9 +810,9 @@ export async function overview({
   const [daily, index, waiting, adding, live, prot, usable, hour, day, log] =
     await Promise.all([
       rpc('panel_days', { since }),
-      listIndex({ members, now }),
-      scans({ state: 'waiting', limit: 5 }),
-      scans({ state: 'adding', limit: 5 }),
+      listIndex({ members, list, primary, now }),
+      scans({ state: 'waiting', limit: 5, canWrite }),
+      scans({ state: 'adding', limit: 5, canWrite }),
       watches({ now }),
       protectedCounts(),
       usableSnapshot(),
@@ -758,7 +829,12 @@ export async function overview({
   }
   const total = (rows, key) => rows.reduce((n, r) => n + r[key], 0);
   const week = series.slice(-7);
-  const open = index.rows.filter(
+  // The review queue is the main list's, whichever list is being shown.
+  const mainIndex =
+    list && list !== primary
+      ? await listIndex({ members: mainMembers, list: primary, primary, now })
+      : index;
+  const open = mainIndex.rows.filter(
     (r) =>
       CLOSE.includes(r.band) &&
       !(r.keptBand && closeness(r.band) >= closeness(r.keptBand)),
@@ -775,6 +851,8 @@ export async function overview({
     week: { added: total(week, 'added'), removed: total(week, 'removed') },
     span: { days: span, added: total(series, 'added'), removed: total(series, 'removed') },
     days: series,
+    // When the main list was last re-scored, whichever list is shown.
+    rescoredAt: mainIndex.asOf,
     waiting: { queue: open.length, scans: waiting.counts.waiting || 0 },
     protected: prot,
     snapshot: usable
@@ -790,7 +868,8 @@ export async function overview({
       hour: { used: hour, max: WRITE_LIMITS.hour },
       day: { used: day, max: WRITE_LIMITS.day },
     },
-    watches: live.live,
+    // What is being watched is a writer's to see, as in the DMs.
+    watches: canWrite ? live.live : [],
     changes: log.events,
   };
 }

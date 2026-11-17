@@ -10,6 +10,7 @@ import { view } from './shared.js';
 
 const row = (label, ...value) => h('div', null, h('dt', null, label), h('dd', null, value));
 const days = (n, forever = 'Forever') => (n ? plural(n, 'day') : forever);
+const SHIELD = { off: 'Off', ask: 'Asks you first', auto: 'Acts by itself' };
 const every = (ms) => (ms ? `Every ${ms >= 3_600_000 ? plural(Math.round(ms / 3_600_000), 'hour') : plural(Math.round(ms / 60_000), 'minute')}` : 'Off');
 
 export function settings(ctx) {
@@ -40,7 +41,17 @@ export function settings(ctx) {
                 row('Scoring', s.scoring === 'simple' ? 'Simple' : 'Full'),
                 row('Model provider', s.provider === 'none' ? 'None' : s.provider),
                 row('Atmosphere lookups', s.atmosphere ? 'On' : 'Off'),
-                row('List', h('span', { class: 'mono' }, s.list || 'Not made yet')),
+                s.multiList && ctx.lists.all.length
+                  ? row('Lists', ctx.lists.all.map((l) => `${l.n}. ${l.name}`).join(', '), '. Any moderation list on the bot account can be chosen')
+                  : row('List', h('span', { class: 'mono' }, s.list || 'Not made yet')),
+                s.shield
+                  ? row(
+                      'Shield',
+                      `One post: ${SHIELD[s.shield.mode] || s.shield.mode}. Attack mode: ${SHIELD[s.shield.attack] || s.shield.attack}. `,
+                      s.shield.canGate ? 'It can close replies and turn quotes off.' : 'It can only tell you: closing replies needs an app password for your own account.',
+                      s.shield.stream ? '' : ' The reply stream is off, so it cannot count.',
+                    )
+                  : null,
                 s.dryRun ? row('Dry run', 'On: nothing is written or sent') : null,
               ),
             ),

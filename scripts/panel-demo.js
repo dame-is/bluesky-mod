@@ -22,6 +22,8 @@ const { findPlan, shortCode } = await import('../src/bot/bulkPlan.js');
 const { isWrite, readOnlyReply, KINDS } = await import('../src/lib/command.js');
 const { makeRoster } = await import('../src/lib/senders.js');
 const { TargetError } = await import('../src/lib/target.js');
+const { multiListOn, withListToken } = await import('../src/lib/listChoice.js');
+const { resolveList } = await import('../src/bot/lists.js');
 const { createPanel } = await import('../src/panel/server.js');
 const { issueCode, formatCode } = await import('../src/panel/auth.js');
 const fx = await import('./panel-fixtures.js');
@@ -37,13 +39,19 @@ function bandOf(i) {
   return 'UNKNOWN';
 }
 
-async function openAdds(where) {
-  return selectAll('decision', {
+/** Adds still open, on one list when it is named. */
+async function openAdds(where, { list = null, main = null } = {}) {
+  const rows = await selectAll('decision', {
     select: 'plan_id,did,band,acted_at',
     eq: { action: 'list_add', ...where },
     where: { acted_at: 'not.is.null', undone_at: 'is.null' },
     order: 'did.asc',
   });
+  if (!list) return rows;
+  const bound = new Map(
+    (await selectAll('plan', { select: 'id,list_uri', where: { list_uri: 'not.is.null' }, order: 'id.asc' })).map((p) => [p.id, p.list_uri]),
+  );
+  return rows.filter((r) => (bound.get(r.plan_id) || main) === list);
 }
 
 /**
@@ -62,10 +70,26 @@ export function demoDeps(seeded) {
     return run;
   };
 
-  const logOne = async (did, action, raw, band, { already = false } = {}) => {
+  // The lists: one, or three when the demo is run with MOD_MULTI_LIST=true.
+  const everyList = fx.demoLists(seeded.bot);
+  const main = everyList[0];
+  const lists = () => (multiListOn() ? everyList : [{ ...main, name: 'the list' }]);
+  const onList = (where, list) => openAdds(where, { list: list.uri, main: main.uri });
+  const named = (list) => (multiListOn() ? list.name : 'the list');
+  /** The bot's "Which list?": the same command once per list, each naming it. */
+  const whichList = (text, among, commandsFor, { all = false } = {}) => ({
+    text,
+    outcome: null,
+    options: [
+      ...among.map((l) => ({ label: l.name, command: commandsFor(l)[0], commands: commandsFor(l) })),
+      ...(all && among.length > 1 ? [{ label: 'Every list', command: commandsFor(among[0])[0], commands: among.flatMap(commandsFor) }] : []),
+    ],
+  });
+
+  const logOne = async (did, action, raw, band, { already = false, list = main } = {}) => {
     const id = fx.demoId();
     const at = iso();
-    await upsert('plan', [{ id, created_at: at, approved_at: at, approved_bands: ['command'], note: raw }]);
+    await upsert('plan', [{ id, created_at: at, approved_at: at, approved_bands: ['command'], note: raw, ...(list.uri !== main.uri ? { list_uri: list.uri } : {}) }]);
     await upsert('decision', [{ plan_id: id, did, band, action, acted_at: at, acted_seq: (seq += 1), approved_via: 'command', ...(already ? { already_listed: true } : {}) }]);
   };
 
@@ -79,23 +103,47 @@ export function demoDeps(seeded) {
       if (i == null) return say(`I could not resolve ${cmd.actor}: no account found.`, 'failed');
       const did = fx.demoDid(i);
       const name = `@${fx.demoAccount(i).handle}`;
-      const open = await openAdds({ did });
+      const all = lists();
+      const want = cmd.list ? resolveList(cmd.list, all, { allowAll: cmd.action === 'list_remove' }) : null;
+      const token = (l) => (multiListOn() ? ` list:${l.rkey}` : '');
       if (cmd.action === 'list_add') {
+        const ask = (lead) => whichList(`${lead}Which list for ${name}?`, all, (l) => [`list add ${did} list:${l.rkey}`]);
+        if (want?.error) return ask(`${want.error} `);
+        if (!want && all.length > 1) return ask('');
+        const list = want?.list || all[0];
         const [veto] = await select('protected', { eq: { did } });
         if (veto) {
           return say(`${name} is PROTECTED (${veto.reason}). You follow them, or they are on one of your curation lists. No automated path acts on those, including this one. Do it in your client if you mean it.`);
         }
-        if (open.length) {
-          await logOne(did, 'list_add', cmd.raw, bandOf(i), { already: true });
-          return say(`${name} was already on the list.`, 'done');
+        if ((await onList({ did }, list)).length) {
+          await logOne(did, 'list_add', cmd.raw, bandOf(i), { already: true, list });
+          return say(`${name} was already on ${named(list)}.`, 'done');
         }
-        await logOne(did, 'list_add', cmd.raw, bandOf(i));
-        return say(`Added ${name} to the list.`, 'done', [{ label: 'Undo that', command: `list remove ${did}` }]);
+        await logOne(did, 'list_add', cmd.raw, bandOf(i), { list });
+        return say(`Added ${name} to ${named(list)}.`, 'done', [{ label: 'Undo that', command: `list remove ${did}${token(list)}` }]);
       }
-      if (!open.length) return say(`${name} was not on the list.`);
-      await upsert('decision', open.map((o) => ({ plan_id: o.plan_id, did, band: o.band, action: 'list_add', acted_at: o.acted_at, undone_at: iso(), undo_reason: cmd.raw })));
-      await logOne(did, 'list_remove', cmd.raw, bandOf(i));
-      return say(`Removed ${name} from the list.`, 'done');
+      // An unblock looks for them first: one list, that one; several, it asks.
+      const on = [];
+      for (const l of all) if ((await onList({ did }, l)).length) on.push(l);
+      const off = (l) => [`list remove ${did} list:${l.rkey}`];
+      if (want?.error) return whichList(`${want.error} Which should ${name} come off?`, all, off, { all: true });
+      const from = want?.all ? on : want?.list ? [want.list] : on.length > 1 ? null : on;
+      if (!from) return whichList(`${name} is on ${on.length} of your lists. Which should they come off?`, on, off, { all: true });
+      if (!from.length) return say(multiListOn() ? `${name} is not on any of your lists.` : `${name} was not on the list.`);
+      const lines = [];
+      let changed = false;
+      for (const l of from) {
+        const open = await onList({ did }, l);
+        if (!open.length) {
+          lines.push(`${name} was not on ${named(l)}.`);
+          continue;
+        }
+        await upsert('decision', open.map((o) => ({ plan_id: o.plan_id, did, band: o.band, action: 'list_add', acted_at: o.acted_at, undone_at: iso(), undo_reason: cmd.raw })));
+        await logOne(did, 'list_remove', cmd.raw, bandOf(i), { list: l });
+        lines.push(`Removed ${name} from ${named(l)}.`);
+        changed = true;
+      }
+      return say(lines.join('\n'), changed ? 'done' : null);
     }
 
     const plan = await findPlan(cmd.code);
@@ -129,13 +177,29 @@ export function demoDeps(seeded) {
       return say(`Read ${unread.length} of the ${rows.length} accounts on ${code}.\n\nHostile: ${counts.hostile}\nArguing: ${counts.arguing}\nNeutral: ${counts.neutral}`);
     }
 
-    // approve
+    // approve. A plan goes to one list: the one an earlier approval bound it
+    // to, or the one this approval names; with several lists and none named,
+    // the bot asks.
+    const all = lists();
+    const boundUri = plan.list_uri || (plan.approved_at ? main.uri : null);
+    let list = all.find((l) => l.uri === boundUri) || null;
+    if (all.length > 1) {
+      const want = cmd.list ? resolveList(cmd.list, all) : null;
+      if (list && want && want.list?.uri !== list.uri) {
+        return say(want.list ? `Plan ${code} adds to ${list.name}, so it cannot add to ${want.list.name} as well. Scan the post again and approve that scan to ${want.list.name}.` : `${want.error} Plan ${code} adds to ${list.name}; I changed nothing.`);
+      }
+      if (!list && !want?.list) {
+        return whichList(`${want?.error ? `${want.error} ` : ''}Which list should plan ${code} add to?`, all, (l) => [withListToken(cmd.raw, l.rkey)]);
+      }
+      list ||= want.list;
+    }
+    list ||= all[0];
     const vetoed = new Set((await selectAll('protected', { select: 'did', order: 'did.asc' })).map((p) => p.did));
-    const named = new Set((cmd.actors || []).map((a) => fx.demoDid(fx.demoIndex(a))));
+    const byName = new Set((cmd.actors || []).map((a) => fx.demoDid(fx.demoIndex(a))));
     const kinds = (cmd.kinds || []).flatMap((k) => KINDS[k] || []);
     const pending = rows.filter((x) => {
       if (x.acted_at || x.already_listed) return false;
-      if (named.size) return named.has(x.did);
+      if (byName.size) return byName.has(x.did);
       if (cmd.bands?.length && !cmd.bands.includes(x.band)) return false;
       if (cmd.labels?.length && x.triage !== cmd.labels[0]) return false;
       if (kinds.length && !(x.engaged || []).some((e) => kinds.includes(e))) return false;
@@ -143,16 +207,16 @@ export function demoDeps(seeded) {
     });
     const held = pending.filter((x) => x.band === 'PROTECTED' || vetoed.has(x.did));
     const adding = pending.filter((x) => !held.includes(x));
-    const via = named.size ? 'individual' : cmd.labels?.length ? `triage:${cmd.labels[0]}` : 'band';
+    const via = byName.size ? 'individual' : cmd.labels?.length ? `triage:${cmd.labels[0]}` : 'band';
     const at = Date.now();
     await upsert('decision', adding.map((x, k) => ({ plan_id: plan.id, did: x.did, band: x.band, action: 'list_add', acted_at: iso(at + k), acted_seq: (seq += 1), approved_via: via })));
     if (adding.length) {
       const add = `; approved: ${cmd.raw}`;
-      await update('plan', { eq: { id: plan.id } }, { approved_at: iso(at), note: String(plan.note || '').endsWith(add) ? plan.note : `${plan.note || ''}${add}` });
+      await update('plan', { eq: { id: plan.id } }, { approved_at: iso(at), note: String(plan.note || '').endsWith(add) ? plan.note : `${plan.note || ''}${add}`, ...(list.uri !== main.uri ? { list_uri: list.uri } : {}) });
     }
     const left = held.length ? ` ${held.length} PROTECTED were left out.` : '';
     return say(
-      adding.length ? `Added ${adding.length.toLocaleString('en-US')} to the list.${left}` : `Nothing to add.${left}`,
+      adding.length ? `Added ${adding.length.toLocaleString('en-US')} to ${named(list)}.${left}` : `Nothing to add.${left}`,
       adding.length ? 'done' : null,
       adding.length ? [{ label: `Undo all ${adding.length}`, command: `undo ${code}` }] : null,
     );
@@ -209,7 +273,7 @@ export function demoDeps(seeded) {
     reference: 'held',
     bot: { did: seeded.bot, handle: 'quietlist.example.social' },
     owner: { did: seeded.owner, handle: 'rae.example.social' },
-    list: `at://${seeded.bot}/app.bsky.graph.list/3mdemolist`,
+    list: main.uri,
     dryRun: false,
     dmMode: 'agent',
     scoring: 'full',
@@ -228,8 +292,9 @@ export function demoDeps(seeded) {
     ownerConvo: async () => 'demo-convo',
     model: async () => 'deepseek/deepseek-v4.1-flash',
     generate: null,
-    async members() {
-      const open = await openAdds({});
+    lists: async () => ({ multi: multiListOn(), lists: lists() }),
+    async members(uri = main.uri) {
+      const open = await openAdds({}, { list: uri, main: main.uri });
       return { dids: [...new Set(open.map((o) => o.did))], complete: true, at: Math.floor(Date.now() / 30_000) };
     },
     async profiles(dids) {
@@ -263,7 +328,9 @@ export function demoDeps(seeded) {
       provider: 'gateway',
       atmosphere: true,
       database: 'SQLite',
-      list: `at://${seeded.bot}/app.bsky.graph.list/3mdemolist`,
+      list: main.uri,
+      multiList: multiListOn(),
+      shield: { mode: 'ask', attack: 'ask', canGate: false, stream: true },
       keep: { snapshots: 2, audits: 4, unapprovedDays: 30, quotesDays: 0, usageDays: 90 },
       rescoreEveryHours: 168,
       snapshotMaxAgeDays: 7,
@@ -285,7 +352,7 @@ export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}
   // with nothing on it.
   const seeded = empty
     ? { owner: process.env.MOD_OWNER_DID, bot: 'did:plc:demobot00000000000000000', codes: {} }
-    : await fx.seedDemo();
+    : await fx.seedDemo({ lists: multiListOn() });
   const roster = makeRoster({ owner: seeded.owner, ...extraRoster });
   const panel = createPanel({
     settings: { port, host, url: '', sessionDays: 30 },

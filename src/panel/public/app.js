@@ -8,8 +8,8 @@
 import { get, post, ApiError } from './api.js';
 import { h, fill, icon } from './dom.js';
 import { nf } from './lib/format.js';
-import { blockCommand } from './lib/commands.js';
-import { openOver, resetProfiles, run, toast } from './ui.js';
+import { blockCommand, onList } from './lib/commands.js';
+import { listPicker, openOver, resetProfiles, run, toast } from './ui.js';
 import { openAccount } from './views/account.js';
 import { signIn } from './views/signin.js';
 import * as views from './views/index.js';
@@ -22,10 +22,12 @@ const NAV = [
   [
     { path: '/queue', label: 'Review queue', count: (c) => c.queue },
     { path: '/scans', label: 'Scans', count: (c) => c.scans },
-    { path: '/watches', label: 'Watches', count: (c) => c.watches },
+    // What is being watched is told to someone who may write, as in a DM.
+    { path: '/watches', label: 'Watches', count: (c) => c.watches, writers: true },
   ],
   [
-    { path: '/list', label: 'The list', count: (c) => c.list },
+    // With several lists the number would be one list's, so there is none.
+    { path: '/list', label: (l) => (l.several ? 'Lists' : 'The list'), count: (c, l) => (l.several ? null : c.list) },
     { path: '/protected', label: 'Protected', count: (c) => c.protected },
     { path: '/activity', label: 'Activity' },
   ],
@@ -68,6 +70,11 @@ export function go(path, params = {}) {
 }
 
 let me = null;
+/**
+ * The bot's lists. `several` is true only when a write has to say which:
+ * MOD_MULTI_LIST is on and the bot has more than one.
+ */
+let lists = { several: false, all: [], main: null, name: () => 'the list' };
 let counts = {};
 let current = null;
 let closeSheet = null;
@@ -91,7 +98,7 @@ async function refreshCounts() {
     counts = {};
   }
   for (const [item, el] of railLinks) {
-    const n = item.count?.(counts);
+    const n = item.count?.(counts, lists);
     el.textContent = n == null || n === 0 ? '' : nf(n);
   }
   for (const el of tabbar?.querySelectorAll('[data-count]') || []) {
@@ -105,13 +112,14 @@ function buildShell() {
   const link = (item) => {
     const count = h('span', { class: 'nav-count' });
     railLinks.set(item, count);
-    return h('a', { class: 'nav-link', href: `#${item.path}`, 'data-path': item.path }, h('span', null, item.label), count);
+    const label = typeof item.label === 'function' ? item.label(lists) : item.label;
+    return h('a', { class: 'nav-link', href: `#${item.path}`, 'data-path': item.path }, h('span', null, label), count);
   };
   rail = h(
     'nav',
     { class: 'rail', 'aria-label': 'Sections' },
     h('div', { class: 'rail-head' }, h('div', { class: 'rail-name' }, 'Block List'), h('div', { class: 'rail-sub' }, me.bot?.handle || 'the bot')),
-    NAV.map((group) => h('div', { class: 'nav-group' }, group.map(link))),
+    NAV.map((group) => h('div', { class: 'nav-group' }, group.filter((item) => !item.writers || me.canWrite).map(link))),
     h(
       'div',
       { class: 'rail-foot' },
@@ -179,6 +187,7 @@ function buildShell() {
 /** The context every page is given. */
 const ctx = () => ({
   me,
+  lists,
   go,
   openAccount: showAccount,
   /** Read the store again and redraw this page, after something changed. */
@@ -244,20 +253,30 @@ function show({ force = false } = {}) {
 }
 
 async function askBlock() {
-  const input = h('input', { class: 'field', type: 'text', 'data-focus': true, autocomplete: 'off', spellcheck: 'false', placeholder: 'someone.bsky.social' });
+  const input = h('input', { class: 'field', type: 'text', required: true, 'data-focus': true, autocomplete: 'off', spellcheck: 'false', placeholder: 'someone.bsky.social' });
+  const picker = lists.several ? listPicker(lists) : null;
   const done = await new Promise((resolve) => {
     let answered = false;
     const finish = (v) => { answered = true; close(); resolve(v); };
     const content = h(
       'form',
-      { class: 'dialog', 'aria-label': 'Block an account', onSubmit: (e) => { e.preventDefault(); finish(input.value.trim()); } },
+      {
+        class: 'dialog',
+        'aria-label': 'Block an account',
+        onSubmit: (e) => {
+          e.preventDefault();
+          const actor = input.value.trim();
+          finish(actor ? onList(blockCommand(actor), picker?.value) : '');
+        },
+      },
       h('h2', null, 'Block an account'),
-      h('label', { class: 'label' }, 'A handle, a DID or a profile link', input, h('small', null, 'Someone you follow, or on one of your lists, is refused, as in a DM.')),
-      h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'btn', onClick: () => finish('') }, 'Cancel'), h('button', { type: 'submit', class: 'btn btn-danger-fill' }, 'Add to the list')),
+      h('label', { class: 'label' }, 'A handle, a DID or a profile link', input, h('small', null, 'Someone you follow, or on one of your curation lists, is refused, as in a DM.')),
+      picker ? h('label', { class: 'label' }, 'Which list', picker) : null,
+      h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'btn', onClick: () => finish('') }, 'Cancel'), h('button', { type: 'submit', class: 'btn btn-danger-fill' }, lists.several ? 'Add to that list' : 'Add to the list')),
     );
     const close = openOver(content, { onClose: () => { if (!answered) resolve(''); } });
   });
-  if (done) await run(blockCommand(done), { after: () => show({ force: true }) });
+  if (done) await run(done, { after: () => show({ force: true }) });
 }
 
 async function askScan() {
@@ -313,6 +332,21 @@ async function boot() {
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return fill(app, signIn({ onDone: boot }).el);
     return fill(app, h('p', { class: 'boot error', role: 'alert' }, String(err.message || err), ' ', h('button', { type: 'button', class: 'btn-text', onClick: boot }, 'Try again')));
+  }
+  // Which lists there are decides what a write has to say. If they cannot be
+  // read the page still opens, as for a bot with one; the pages that need
+  // them say why they cannot load.
+  try {
+    const got = await get('/api/lists');
+    const all = got.lists || [];
+    lists = {
+      several: Boolean(got.multi) && all.length > 1,
+      all,
+      main: all[0]?.rkey || null,
+      name: (rkey) => all.find((l) => l.rkey === rkey)?.name || 'a list that is gone',
+    };
+  } catch {
+    lists = { several: false, all: [], main: null, name: () => 'the list' };
   }
   buildShell();
   shown = '';

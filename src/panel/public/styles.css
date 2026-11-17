@@ -362,6 +362,9 @@ button.radar-sector[aria-pressed="true"] .radar-sector-total { color: #0c1420; }
 }
 .dialog h2 { font-size: 19px; font-weight: 700; line-height: 1.25; }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+/* The bot's "Which list?": one button per list, in the bot's order. */
+.choices { display: grid; gap: 8px; }
+.choices .btn { justify-content: flex-start; text-align: left; }
 .sheet {
   margin-left: auto; width: min(480px, 100vw); height: 100vh; overflow-y: auto;
   background: var(--bg); color: var(--ink); border-left: 1px solid var(--ink);

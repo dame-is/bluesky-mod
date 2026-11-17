@@ -8,7 +8,7 @@
 import { get, post } from '../api.js';
 import { h, fill } from '../dom.js';
 import { BAND_RULE, ago, bandName, compact, nf, viaWords } from '../lib/format.js';
-import { unblockCommand } from '../lib/commands.js';
+import { onList, unblockCommand } from '../lib/commands.js';
 import { band, chips, empty, pager, run, toast, who } from '../ui.js';
 import { view } from './shared.js';
 
@@ -27,7 +27,7 @@ export function queue(ctx) {
   const offset = Number(ctx.params.get('offset')) || 0;
 
   return view('Review queue', {
-    sub: 'Accounts on the list who are not strangers to you, as of the last re-score. Most of the list was added as strangers; these are the ones that moved, or were close when they were added.',
+    sub: `Accounts on ${ctx.lists.several ? `your main list, ${ctx.lists.name(ctx.lists.main)},` : 'the list'} who are not strangers to you, as of the last re-score. Most of the list was added as strangers; these are the ones that moved, or were close when they were added.${ctx.lists.several ? ' The re-score reads no other list.' : ''}`,
     load: () => get('/api/queue', { band: chosen, offset, limit: PAGE }),
     draw(data, { reload }) {
       const cards = h('ol', { class: 'cards' });
@@ -50,7 +50,8 @@ export function queue(ctx) {
           });
           window.dispatchEvent(new Event('panel:changed'));
         } else {
-          const out = await run(unblockCommand(item.did));
+          // The queue is the main list's, so that is the list they come off.
+          const out = await run(onList(unblockCommand(item.did), ctx.lists.several ? ctx.lists.main : null));
           if (out?.outcome === 'done') tally.remove += 1;
         }
         return quiet();

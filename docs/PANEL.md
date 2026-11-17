@@ -39,7 +39,7 @@ There is no password. The bot already knows who it works for, so signing in is a
 2. It answers with an eight-digit code.
 3. Type the code into the panel's sign-in page.
 
-A code works once and for ten minutes, and asking again replaces the one before. The browser then holds a cookie for 30 days (`PANEL_SESSION_DAYS`). The People page lists where you are signed in and can sign you out everywhere.
+A code works once and for ten minutes, and asking again replaces the one before. The browser then holds a cookie for 30 days (`PANEL_SESSION_DAYS`). The People page lists where you are signed in and can sign you out everywhere, which also cancels a code you asked for and have not used.
 
 Anyone on the bot's roster can sign in, and gets the powers they have in DMs:
 
@@ -47,9 +47,9 @@ Anyone on the bot's roster can sign in, and gets the powers they have in DMs:
 | --- | --- |
 | `MOD_OWNER_DID` | Everything |
 | `MOD_WRITER_DIDS` | Everything, without the roster or the config file's text |
-| `MOD_ALLOWED_DIDS` | Read-only. Sees bands, scans and what was done. Does not see the words that asked for a change, or your notes |
+| `MOD_ALLOWED_DIDS` | Read-only. Sees bands, scans and what was done. Does not see the words that asked for a change, your notes, or which posts are being watched |
 
-What an account may do is read from the roster on every request. Take someone off it, restart the bot, and their cookie stops working.
+What an account may do is read from the roster on every request. Take someone off it, restart the bot, and their sign-ins are deleted. Putting them back later does not bring an old cookie back; they ask for a new code.
 
 `panel` is matched as the whole message and answered by code in both DM modes. The reply is a credential, so a model never writes it.
 
@@ -61,8 +61,8 @@ What an account may do is read from the roster on every request. Take someone of
 | Review queue | Accounts on the list who are not strangers to you, as of the last re-score, closest first | Keep one on the list, or remove it |
 | Scans | Every scan and its state | Scan a post |
 | A scan | Everyone who engaged with the post, on a radar and in a table, with what they wrote and how a model read it | Add a ring, a slice, the hostile ones or named accounts; sort by tone; cancel; undo |
-| Watches | Posts being re-read, and what came in | Stop one |
-| The list | Everyone on the list, searchable, with where they stand now and how they got there | Open an account, take it off |
+| Watches | Posts being re-read, and what came in. Not shown to a read-only account | Stop one |
+| The list | Everyone on the list, searchable, with where they stand now and how they got there. With several lists, one page for each | Open an account, take it off |
 | Protected | The accounts nothing automated may add, and why | |
 | Activity | Every add, removal and undo, with the words that asked for it | |
 | Follow graph | The snapshot the bands rest on, and each re-score of the list | |
@@ -106,9 +106,31 @@ That text goes to the bot, which parses it with the parser a DM goes through and
 - The decision log keeps the command as the words that asked for the change, and `undo` takes it back.
 - A read-only account cannot run a command that writes.
 
+Two things keep what is added to what the page showed:
+
+- **The scan is read again just before the command goes.** A watch adds to its scan as people arrive, and the bot runs a command against the scan as it is then. If what would be added is no longer what the page showed, nothing is sent and the page says so. A change in the moments between that read and the bot running the command is not caught.
+- **"Only the hostile ones" carries the time of the newest label the page counted** (`asof=`, as the bot's own menus write it), so anything a watch labels afterwards is left out.
+
+After a command the bot's receipt may come with one button. It is only ever the way back ("Undo that", "Undo all 12"). Where the bot's reply offers to add someone, as it does after reading a scan's replies, the page does not put that on a button: you tick it on the scan page and are asked like any other add.
+
 The panel runs `approve`, `cancel`, `undo`, `block`, `unblock` and `triage`. A scan is the bot's own `add everyone <post>`. It will not run a bare `undo`: in a DM that means the newest change, and from a page that has been open for an hour it could mean something you have not seen. The panel always names the plan.
 
 One thing is the panel's own. "Keep on the list" in the review queue records that you looked at an account and left it there, in a table called `review_keep`. It writes nothing to Bluesky. A kept account comes back to the queue only if a later re-score puts it closer to you than it was.
+
+## With several lists
+
+With `MOD_MULTI_LIST=true` and more than one moderation list on the bot account ([HOW-IT-WORKS.md](HOW-IT-WORKS.md#several-lists-multi-list-mode)), the panel follows the bot's rule: a write says which list, and nothing guesses.
+
+- **The Overview and the list page** show one list at a time, the main one unless you choose another. The log, an account and a scan name the list each change was on.
+- **A block** asks which list, with nothing chosen when the question opens.
+- **A scan adds to one list.** Its first approval chooses it, and the page says so from then on. Until then the approval has a list to choose, and the button stays off until you do.
+- **Taking someone off** from an account's page names the list they come off.
+- **The command carries the list** as `list:<record key>`, the token the bot's own menus write, so it means the same list whatever the lists are called later.
+- **If a command still reaches the bot with no list**, the bot answers "Which list?" and changes nothing. The page shows that question with a button for each answer.
+
+The review queue is the main list's. The weekly re-score reads no other list, so another list shows each account in the band it had when it was added, and nobody on it is queued.
+
+With one list, or with the mode off, none of this appears.
 
 ## Reaching it from somewhere else
 
@@ -139,7 +161,8 @@ Do not serve it over plain HTTP on a public address. The sign-in code and the co
 ### What stands between the internet and your list
 
 - **A session comes only from a code the bot sent by DM** to someone on its roster. Whoever can read that person's DMs with the bot could already tell it what to do.
-- **Five wrong codes** from one address, or twenty-five from all addresses together, and the panel refuses every code for ten minutes. That also means someone guessing can keep you out for ten minutes at a time.
+- **Five wrong codes** from one address, or twenty-five from all addresses together, and the panel refuses every code for ten minutes. A try is counted when it starts, so many sent at once are held to the same five. Behind a reverse proxy every visitor arrives from the proxy's address, so there the limit is five for everyone together. Either way, someone guessing can keep you out for ten minutes at a time.
+- **An error says why only to someone signed in.** Anyone else is told that it broke, and the reason is in the bot's log.
 - **The cookie** cannot be read by the page's scripts, and is not sent with requests from other sites.
 - **A request that changes something** must carry a header only the panel's own page sends, and a browser's `Origin` must be the panel's.
 - **The page loads nothing from elsewhere**, by its content security policy, except avatars from `cdn.bsky.app`.
@@ -166,6 +189,8 @@ That serves the real panel at `http://127.0.0.1:8787` over invented data, with n
 ## What it does not do
 
 - Start a watch, ask the model a question, or keep a note. Those are DMs.
+- Anything with the shield: closing replies, guarding a post, attack mode. Those are DMs too. The Settings page says how the shield is set and nothing more.
+- Make a list. `new list <name>` in a DM does that.
 - Change a setting.
 - Show a refusal after the fact. A block the veto refused wrote nothing, so the log has no line for it; the panel says so at the time.
 - Know the list's bands before the first weekly re-score. Until then it shows the band each account had when it was added.

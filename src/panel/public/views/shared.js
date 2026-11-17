@@ -290,7 +290,15 @@ export function changeCols(ctx) {
     { head: 'When', cell: (e) => h('span', { class: 'nowrap muted' }, clock(e.at)) },
     { head: 'What happened', cell: (e) => whatHappened(e, ctx) },
     { head: 'Band', label: 'Band', cell: (e) => (e.band && e.band !== 'UNSCORED' ? band(e.band) : h('span', { class: 'muted' }, e.band ? 'Not scored' : 'Mixed')) },
-    { head: 'How', label: 'How', cell: (e) => (e.kind === 'undone' ? 'An undo' : viaWords(e.via)) },
+    {
+      head: 'How',
+      label: 'How',
+      cell: (e) => [
+        e.kind === 'undone' ? 'An undo' : viaWords(e.via),
+        // Which list, once there are several.
+        ctx.lists.several ? h('div', { class: 'cell-sub' }, `On ${ctx.lists.name(e.list)}`) : null,
+      ],
+    },
     ...(ctx.me.canWrite
       ? [{ head: 'The words that asked for it', cell: (e) => e.words.map((w) => h('div', { class: 'words' }, `“${w}”`)) }]
       : []),

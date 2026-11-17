@@ -140,6 +140,8 @@ export const KIND_WORDS = {
   reposters: 'Reposters',
   repliers: 'Repliers',
   quoters: 'Quoters',
+  // A watch keeps whoever arrives after it starts in a plan of its own.
+  watch: 'Newcomers since a watch began',
 };
 
 /** How someone came to be on the list, in words (viaFamily in queries.js). */
