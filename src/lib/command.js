@@ -1296,10 +1296,17 @@ export function parseMemoryCommand(text) {
   }
   const remember = raw.match(/^remember\b[\s:,-]*(?:that\s+)?([\s\S]+)$/i);
   // "remember when we blocked them?" and "remember the post I sent? add the
-  // quoters" are for the agent, not notes. "remember:" with a colon is a note
-  // whatever it holds.
-  const asked = /\?/.test(raw) && !/^remember\s*:/i.test(raw);
-  if (remember && remember[1].trim().length >= 3 && !asked) {
+  // quoters" are for the agent, not notes, and so is "remember this", which
+  // points at a post or a person rather than saying anything. "remember:"
+  // with a colon is a note whatever it holds.
+  const colon = /^remember\s*:/i.test(raw);
+  const asked = /\?/.test(raw) && !colon;
+  if (
+    remember &&
+    remember[1].trim().length >= 3 &&
+    !asked &&
+    (colon || !onlyPointers(remember[1], REMEMBER_POINTER))
+  ) {
     return { action: 'remember', text: remember[1].trim().slice(0, 500) };
   }
   const forget = raw.match(/^forget\b[\s:,-]*(?:that\s+|about\s+)?([\s\S]*)$/i);
@@ -1310,12 +1317,7 @@ export function parseMemoryCommand(text) {
     }
     // "forget that" and "forget about it" mean never mind. Read as a search,
     // "that" matches any note with the word in it.
-    const pointsBack = rest
-      .toLowerCase()
-      .split(/\s+/)
-      .map((w) => w.replace(/[^a-z]/g, ''))
-      .every((w) => !w || FORGET_POINTER.has(w));
-    if (rest.length >= 3 && !pointsBack) {
+    if (rest.length >= 3 && !onlyPointers(rest, FORGET_POINTER)) {
       return { action: 'forget', index: null, text: rest };
     }
   }
@@ -1339,6 +1341,38 @@ const FORGET_POINTER = new Set([
   'last',
   'everything',
 ]);
+
+/** Those, and the posts and people "remember this" can point at. */
+const REMEMBER_POINTER = new Set([
+  ...FORGET_POINTER,
+  'post',
+  'posts',
+  'thread',
+  'reply',
+  'replies',
+  'account',
+  'accounts',
+  'user',
+  'users',
+  'person',
+  'people',
+  'guy',
+  'guys',
+  'him',
+  'her',
+  'he',
+  'she',
+  'they',
+]);
+
+/** Is every word in `text` one of `pointers`, once stripped to letters? */
+function onlyPointers(text, pointers) {
+  return text
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ''))
+    .every((w) => !w || pointers.has(w));
+}
 
 /**
  * watch this / stop watching / what are you watching.

@@ -184,6 +184,33 @@ describe('memory commands', () => {
     });
   });
 
+  it('does not save "remember this" as a note', () => {
+    // It means keep this post or person in mind, which is the agent's.
+    // Saved, "this" would be listed in every later turn's prompt.
+    for (const t of [
+      'remember this',
+      'remember this.',
+      'remember that',
+      'remember that!',
+      'remember him',
+      'remember this post',
+      'remember that post',
+      'remember this one',
+      'remember this guy',
+    ]) {
+      expect(parseMemoryCommand(t), t).toBe(null);
+    }
+    expect(parseMemoryCommand('remember this: skip likers')).toEqual({
+      action: 'remember',
+      text: 'this: skip likers',
+    });
+    // A colon makes a note whatever it holds.
+    expect(parseMemoryCommand('remember: this')).toEqual({
+      action: 'remember',
+      text: 'this',
+    });
+  });
+
   it('leaves a question with an instruction after it to the agent', () => {
     expect(
       parseMemoryCommand('remember the post I sent earlier? add the quoters'),
