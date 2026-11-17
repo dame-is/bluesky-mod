@@ -343,6 +343,14 @@ const nameOf = (account, fallback) =>
     ? `@${account.handle}`
     : fallback;
 
+/** How many posts a triage run could not read, in either wave. */
+const failedReadsOf = (out) =>
+  (out?.failed || 0) + (out?.secondWave?.failed || 0);
+
+/** "3 could not be read: <the reason>." */
+const failedReadsLine = (n, error) =>
+  `${n} could not be read${error ? `: ${error.replace(/\.$/, '')}` : ''}.`;
+
 /** What a request to sort by tone gets when there is no model to read with. */
 const NO_MODEL_TO_SORT =
   'Sorting by tone needs an AI model, and this bot has none set up.';
@@ -595,10 +603,16 @@ export async function runCommand(
             ]
           : []),
       ];
+      // Reads that failed are said apart from what is simply left, with the
+      // reason, so an outage does not read as "send it again".
+      const failedReads = failedReadsOf(out);
+      if (failedReads) lines.push(failedReadsLine(failedReads, out.error));
       if (out.remaining) {
         lines.push(
           '',
-          `${out.remaining} left. Send "triage ${cmd.code}" again.`,
+          !out.labelled && out.failed
+            ? `Nothing was read. Send "triage ${cmd.code}" again once that is fixed.`
+            : `${out.remaining} left. Send "triage ${cmd.code}" again.`,
         );
       }
       lines.push(
@@ -1186,9 +1200,12 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   const plan = await findPlan(code);
   if (!plan) return { text: `No plan with code ${code}.`, failed: true };
   let out = null;
+  let failedReads = 0;
+  // A round that labels nothing is failing, and another would fail the same.
   for (let round = 0; round < 3; round += 1) {
     out = await runTriage(plan, { generate, model, log });
-    if (!out.remaining) break;
+    failedReads += failedReadsOf(out);
+    if (!out.remaining || !out.labelled) break;
   }
   const added = await applyPlanToTriage(writeAgent, plan, 'hostile', {
     reason: `hostile ${code}`,
@@ -1197,9 +1214,12 @@ async function runHostile(code, { writeAgent, generate, model, log }) {
   const unread = out?.remaining
     ? ` ${out.remaining} not read yet; "triage ${code}" reads them.`
     : '';
+  const failedLine = failedReads
+    ? ` ${failedReadsLine(failedReads, out?.error)}`
+    : '';
   return {
     text:
-      `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${unread} ${added.message}`,
+      `Read the replies and quotes on ${code}: ${c.hostile || 0} hostile, ${c.arguing || 0} arguing, ${c.neutral || 0} neutral.${failedLine}${unread} ${added.message}`,
   };
 }
 

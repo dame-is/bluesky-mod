@@ -894,7 +894,7 @@ export function buildActionTools(ctx, deps = DEPS) {
 
     triage_plan: tool({
       description:
-        'Read what each account on a plan actually wrote on the post (its reply or quote) and label it hostile, arguing or neutral. When a second model is configured, anything the first reader calls hostile is read again by it, and its label is kept. Labels only; adds nobody. Reads up to 240 accounts per call and reports how many are left; call again to continue.',
+        'Read what each account on a plan actually wrote on the post (its reply or quote) and label it hostile, arguing or neutral. When a second model is configured, anything the first reader calls hostile is read again by it, and its label is kept. Labels only; adds nobody. Reads up to 240 accounts per call and reports how many are left; call again to continue. If failed is above zero and labelled is 0, the reads are failing: tell the owner the error and do not call again.',
       inputSchema: z.object({
         code: z.string().describe('the plan code'),
       }),
@@ -910,6 +910,8 @@ export function buildActionTools(ctx, deps = DEPS) {
           return {
             code,
             labelled: out.labelled,
+            failed: out.failed ?? 0,
+            ...(out.error ? { error: out.error } : {}),
             remaining: out.remaining,
             counts: out.counts,
             notYetAdded: out.pending,

@@ -383,6 +383,30 @@ describe('the write tools', () => {
 });
 
 describe('triage', () => {
+  it('hands the agent the reads that failed and why', async () => {
+    const deps = fakeDeps({
+      runTriage: vi.fn(async () => ({
+        labelled: 0,
+        failed: 40,
+        error: 'gateway 502',
+        remaining: 40,
+        counts: { hostile: 0, arguing: 0, neutral: 0 },
+        pending: { hostile: 0, arguing: 0, neutral: 0 },
+        noText: 0,
+        gone: 0,
+        total: 40,
+      })),
+    });
+    const out = await buildActionTools(ctxFor(), deps).triage_plan.execute({
+      code: '3f9a2c1b',
+    });
+    expect(out).toMatchObject({
+      labelled: 0,
+      failed: 40,
+      error: 'gateway 502',
+    });
+  });
+
   it("labels with the analyst's model, not the agent's", async () => {
     const deps = fakeDeps();
     const tools = buildActionTools(

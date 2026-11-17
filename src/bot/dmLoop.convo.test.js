@@ -526,6 +526,58 @@ describe('what a triage reply counts', () => {
   });
 });
 
+describe('a triage whose reads fail', () => {
+  const failing = () => ({
+    labelled: 0,
+    failed: 40,
+    error: 'gateway 502',
+    remaining: 40,
+    noText: 0,
+    wordless: 0,
+    gone: 0,
+    counts: { hostile: 0, arguing: 0, neutral: 0 },
+    pending: { hostile: 0, arguing: 0, neutral: 0 },
+    total: 40,
+  });
+
+  it('says the reads failed and why, rather than "send it again"', async () => {
+    triage.runTriage = async () => failing();
+    try {
+      const { chat, sent } = chatWith([msg('m1', 'triage 1c2d3e4f')]);
+      await pass(chat);
+      const text = sent.at(-1).text;
+      expect(text).toContain('40 could not be read: gateway 502.');
+      expect(text).toContain(
+        'Nothing was read. Send "triage 1c2d3e4f" again once that is fixed.',
+      );
+      expect(text).not.toContain('40 left.');
+    } finally {
+      triage.runTriage = null;
+    }
+  });
+
+  it('stops after a round of "hostile" that read nothing', async () => {
+    const calls = [];
+    triage.runTriage = async () => {
+      calls.push(1);
+      return failing();
+    };
+    try {
+      const { chat, sent } = chatWith([msg('m1', 'yes')]);
+      await savePending('c1', {
+        commands: ['hostile 1c2d3e4f'],
+        describe: 'read the replies and add the hostile ones',
+        messageIds: ['x'],
+      });
+      await pass(chat);
+      expect(calls).toHaveLength(1);
+      expect(sent.at(-1).text).toContain('40 could not be read: gateway 502.');
+    } finally {
+      triage.runTriage = null;
+    }
+  });
+});
+
 describe('a shared record that is not a post', () => {
   const LIST = 'at://did:plc:listmaker/app.bsky.graph.list/3list';
 
