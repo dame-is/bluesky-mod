@@ -104,6 +104,18 @@ vi.mock('../lib/target.js', async (importOriginal) => ({
   resolveActor: async (a) => `did:plc:${String(a).replace(/\W/g, '')}`,
 }));
 
+// vitest.config.js turns the escalation model on for every test. A test that
+// needs it off sets `escalation.on` to false.
+const escalation = { on: null };
+vi.mock('./tiers.js', async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    escalationEnabled: (...a) =>
+      escalation.on ?? original.escalationEnabled(...a),
+  };
+});
+
 const { runDmPass } = await import('./dmLoop.js');
 const { resetQuiet } = await import('./chatUx.js');
 
@@ -449,6 +461,28 @@ describe('memory and watching', () => {
       auto: false,
     });
     expect(sent[0]).toMatch(/^Watching it for 12h/);
+  });
+
+  it('says two models read an auto watch only when there are two', async () => {
+    let { chat, sent } = chatWith([
+      shared('m1', 'watch this and block the hostile ones'),
+    ]);
+    await pass(chat);
+    expect(watch.startWatch.mock.calls[0][0].auto).toBe(true);
+    expect(sent[0]).toContain('what two models read as hostile');
+
+    escalation.on = false;
+    try {
+      ({ chat, sent } = chatWith([
+        shared('m2', 'watch this and block the hostile ones'),
+      ]));
+      await pass(chat);
+      expect(watch.startWatch).toHaveBeenCalledTimes(2);
+      expect(sent[0]).not.toContain('two models');
+      expect(sent[0]).toContain('what the model reads as hostile');
+    } finally {
+      escalation.on = null;
+    }
   });
 });
 

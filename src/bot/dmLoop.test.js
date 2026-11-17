@@ -7,6 +7,8 @@ import {
   normaliseMode,
   plainText,
 } from './dmLoop.js';
+import { parseCommand } from '../lib/command.js';
+import { NUDGE } from '../lib/phrases.js';
 
 describe('a post shared into a DM', () => {
   // Sharing from the Bluesky app puts no link in the text: the post travels in
@@ -28,6 +30,23 @@ describe('a post shared into a DM', () => {
       }),
     ).toBe(null);
     expect(sharedPostUri(null)).toBe(null);
+  });
+
+  it('is not a post when it is a list, a starter pack or a feed', () => {
+    for (const uri of [
+      'at://did:plc:abc/app.bsky.graph.list/3list',
+      'at://did:plc:abc/app.bsky.graph.starterpack/3pack',
+      'at://did:plc:abc/app.bsky.feed.generator/hot',
+    ]) {
+      expect(sharedPostUri({ text: '', embed: embed(uri) })).toBe(null);
+    }
+  });
+
+  it('still shows the model a shared record that is not a post', () => {
+    const uri = 'at://did:plc:abc/app.bsky.graph.list/3list';
+    const out = composeMessage({ text: 'what is this', embed: embed(uri) });
+    expect(out).toContain(uri);
+    expect(out).not.toContain('The post the owner shared');
   });
 
   it('hands the model the text and the shared post together', () => {
@@ -111,6 +130,17 @@ describe('help', () => {
     expect(out.text).not.toContain('approve ');
     expect(out.text).toContain('pulse');
   });
+});
+
+describe('a verb with no plan code', () => {
+  for (const verb of ['approve', 'cancel', 'review', 'triage']) {
+    it(`asks for the code on a bare "${verb}"`, async () => {
+      const out = await runCommand(parseCommand(verb), null, {
+        canWrite: true,
+      });
+      expect(NUDGE.plan).toContain(out.text);
+    });
+  }
 });
 
 describe('agent mode routing', () => {

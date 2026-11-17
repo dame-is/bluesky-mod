@@ -78,6 +78,16 @@ vi.mock('./agentConfig.js', async (importOriginal) => ({
   loadAgentConfig: async () => null,
 }));
 
+// The real triage unless a test hands in what it found.
+const triage = { runTriage: null };
+vi.mock('./triage.js', async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    runTriage: (...a) => (triage.runTriage || original.runTriage)(...a),
+  };
+});
+
 const db = await import('./db.js');
 const { runDmPass, resetConvoKinds } = await import('./dmLoop.js');
 const { savePending, resetQuiet } = await import('./chatUx.js');
@@ -437,6 +447,42 @@ describe('a stored question and a message that names its own target', () => {
     });
   }
 
+  for (const mode of ['agent', 'classic']) {
+    it(`${mode}: a "yes" written before a digest asked does not run it`, async () => {
+      // The owner answers something said in prose, and a watch digest stores
+      // its question before this pass reads the answer.
+      const early = msg('m1', 'yes');
+      early.message.sentAt = new Date(Date.now() - 30_000).toISOString();
+      await savePending('c1', {
+        commands: ['approve 1c2d3e4f hostile'],
+        describe: 'add the 3 read as hostile (plan 1c2d3e4f)',
+        messageIds: ['b-digest'],
+        background: true,
+      });
+      const { chat } = chatWith([early]);
+      await pass(chat, { mode });
+      expect(plans.applyPlanToTriage).not.toHaveBeenCalled();
+      // The digest's question waits for an answer to it.
+      const rows = await db.select('dm_choice', {
+        select: 'pending',
+        eq: { convo_id: 'c1' },
+      });
+      expect(rows[0].pending.commands).toEqual(['approve 1c2d3e4f hostile']);
+    });
+  }
+
+  it('runs a digest\'s question on a "yes" written after it', async () => {
+    await savePending('c1', {
+      commands: ['approve 1c2d3e4f hostile'],
+      describe: 'add the 3 read as hostile (plan 1c2d3e4f)',
+      messageIds: ['b-digest'],
+      background: true,
+    });
+    const { chat } = chatWith([msg('m1', 'yes')]);
+    await pass(chat);
+    expect(plans.applyPlanToTriage).toHaveBeenCalledTimes(1);
+  });
+
   it('still takes a bare "block them" as the answer', async () => {
     await savePending('c1', {
       commands: ['approve 1c2d3e4f hostile'],
@@ -447,6 +493,61 @@ describe('a stored question and a message that names its own target', () => {
     await pass(chat);
     expect(plans.applyPlanToTriage).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('what a triage reply counts', () => {
+  it('puts posts with no text with the likes, apart from deleted ones', async () => {
+    triage.runTriage = async () => ({
+      labelled: 4,
+      failed: 0,
+      error: null,
+      remaining: 0,
+      noText: 5,
+      wordless: 3,
+      gone: 2,
+      counts: { hostile: 1, arguing: 1, neutral: 2 },
+      pending: { hostile: 1, arguing: 1, neutral: 2 },
+      total: 14,
+    });
+    try {
+      const { chat, sent } = chatWith([msg('m1', 'triage 1c2d3e4f')]);
+      await pass(chat);
+      const text = sent.at(-1).text;
+      expect(text).toContain('No words: 8  (');
+      expect(text).toContain('Deleted or hidden: 2');
+      expect(text).not.toContain('the post is gone');
+    } finally {
+      triage.runTriage = null;
+    }
+  });
+});
+
+describe('a shared record that is not a post', () => {
+  const LIST = 'at://did:plc:listmaker/app.bsky.graph.list/3list';
+
+  for (const mode of ['agent', 'classic']) {
+    it(`${mode}: scans nothing and starts no plan`, async () => {
+      let { chat } = chatWith([msg('m1', '', { embed: LIST })]);
+      await pass(chat, { mode });
+      ({ chat } = chatWith([msg('m2', 'add likers')]));
+      await pass(chat, { mode });
+      ({ chat } = chatWith([msg('m3', 'watch this', { embed: LIST })]));
+      await pass(chat, { mode });
+      expect(plans.proposePlan).not.toHaveBeenCalled();
+      expect(watch.startWatch).not.toHaveBeenCalled();
+    });
+
+    it(`${mode}: still brings its own target, so it answers no question`, async () => {
+      await savePending('c1', {
+        commands: ['approve 1c2d3e4f hostile'],
+        describe: 'add the 3 read as hostile (plan 1c2d3e4f)',
+        messageIds: ['b-asked'],
+      });
+      const { chat } = chatWith([msg('m1', 'block them', { embed: LIST })]);
+      await pass(chat, { mode });
+      expect(plans.applyPlanToTriage).not.toHaveBeenCalled();
+    });
+  }
 });
 
 describe('group conversations', () => {

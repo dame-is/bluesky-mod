@@ -94,7 +94,7 @@ import {
 } from './bulkPlan.js';
 import { loadAgentConfig, clampLimits } from './agentConfig.js';
 import { operate, fallbackText } from './operator.js';
-import { shortModel } from './tiers.js';
+import { shortModel, escalationEnabled } from './tiers.js';
 import { authorOf } from '../lib/trigger.js';
 import {
   REACTION,
@@ -176,18 +176,30 @@ export function routeFor(text, { mode = 'classic' } = {}) {
 }
 
 /**
- * The post attached to a message, if it was shared rather than pasted.
+ * The record attached to a message, if it was shared rather than pasted.
  *
  * Sharing a post into a DM from the Bluesky app puts no link in the text: the
  * post travels in `embed.record.uri`, so scanning the text alone misses it.
  */
-export function sharedPostUri(message) {
+function sharedRecordUri(message) {
   const uri = message?.embed?.record?.uri;
   return typeof uri === 'string' && uri.startsWith('at://') ? uri : null;
 }
 
+const POST_URI = /^at:\/\/[^/]+\/app\.bsky\.feed\.post\/[^/?#]+$/;
+
 /**
- * What the model is asked: what the sender typed, plus the shared post, the
+ * The post attached to a message. A shared list, starter pack or feed is not
+ * one: scanning one of those would read its subscribers or members as people
+ * who engaged with a post.
+ */
+export function sharedPostUri(message) {
+  const uri = sharedRecordUri(message);
+  return uri && POST_URI.test(uri) ? uri : null;
+}
+
+/**
+ * What the model is asked: what the sender typed, plus the shared record, the
  * full links and the mentioned DIDs when there are any. Those lines are built
  * by code from the sender's own message, not copied from anyone else's
  * writing, so they are not untrusted input.
@@ -196,8 +208,11 @@ export function composeMessage(message) {
   const text = message?.text || '';
   const extra = [];
 
-  const uri = sharedPostUri(message);
-  if (uri) extra.push(`The post the owner shared: ${uri}`);
+  const uri = sharedRecordUri(message);
+  if (uri) {
+    const what = sharedPostUri(message) ? 'post' : 'record';
+    extra.push(`The ${what} the owner shared: ${uri}`);
+  }
 
   // A client truncates the visible text of a pasted link and keeps the whole
   // URI in the facet, so the text alone can hold "bsky.app/profile/stra...".
@@ -426,7 +441,7 @@ export async function runCommand(
         ],
       );
     }
-    if (['approve', 'cancel', 'review'].includes(cmd.action)) {
+    if (['approve', 'cancel', 'review', 'triage'].includes(cmd.action)) {
       return say(nudge('plan'));
     }
     return say(nudge('actor'));
@@ -512,14 +527,17 @@ export async function runCommand(
         left[k] === counts[k]
           ? `${counts[k]}`
           : `${counts[k]} (${left[k]} new)`;
+      // A quote or reply that came back with no text (`wordless`) has
+      // nothing to read, like a like.
+      const noWords = out.noText + (out.wordless ?? 0);
       const lines = [
-        `Read ${out.total - out.noText - out.remaining} of the ${out.total} accounts on ${cmd.code}.`,
+        `Read ${out.total - noWords - out.remaining} of the ${out.total} accounts on ${cmd.code}.`,
         '',
         `Hostile: ${seen('hostile')}  (aimed at a person)`,
         `Arguing: ${seen('arguing')}  (aimed at the argument)`,
         `Neutral: ${seen('neutral')}`,
-        `No words: ${out.noText}  (likes and reposts carry nothing to read)`,
-        ...(out.gone ? [`Deleted: ${out.gone}  (the post is gone)`] : []),
+        `No words: ${noWords}  (likes, reposts and posts with no text carry nothing to read)`,
+        ...(out.gone ? [`Deleted or hidden: ${out.gone}`] : []),
         ...(out.secondWave
           ? [
               `Second reader (${shortModel(out.secondWave.model)}): re-read ${out.secondWave.read} flagged as possibly hostile, changed ${out.secondWave.overturned}.`,
@@ -1237,7 +1255,7 @@ async function standingCommand({
   await send(
     `${out.extended ? 'Still watching' : 'Watching'} it for ${watching.hours}h. ` +
       (watching.auto
-        ? "I'll block what two models read as hostile in new quotes and replies, hold anyone CONNECTED or NOTABLE for you, and "
+        ? `I'll block what ${escalationEnabled() ? 'two models read' : 'the model reads'} as hostile in new quotes and replies, hold anyone CONNECTED or NOTABLE for you, and `
         : "I'll read new quotes and replies as they come and ") +
       'send an update each hour there is something new. "stop watching" ends it.',
   );
@@ -1798,16 +1816,27 @@ export async function runDmPass({
       // An answer to a question the bot asked. Anything that is not a yes or
       // a no lets the question lapse, so a later "yes" cannot run something
       // the conversation has moved on from. A message that brings its own
-      // target (a shared post, a link to an account or post, a mention) is
-      // about that target, so "block them" with a post attached blocks its
-      // author rather than answering the question.
+      // target (a shared post or other record, a link to an account or post,
+      // a mention) is about that target, so "block them" with a post attached
+      // blocks its author rather than answering the question.
+      //
+      // A question a watch digest or an alert stored on a timer is not
+      // answered by a message written before it: that message is read as if
+      // nothing were asked, and the question stays for its own answer. The
+      // two times come from different clocks (the chat service's and this
+      // host's), and a message whose time cannot be read counts as earlier.
       const said = entry.message.text || '';
       const ownTarget = Boolean(
-        embedUri ||
+        sharedRecordUri(entry.message) ||
           mentions.length ||
           msgLinks.some((l) => extractTargets(l).length),
       );
-      const pending = canWrite ? await readPending(entry.convoId) : null;
+      const stored = canWrite ? await readPending(entry.convoId) : null;
+      const pending =
+        stored?.background &&
+        !(Date.parse(entry.message.sentAt) >= Date.parse(stored.created_at))
+          ? null
+          : stored;
       if (pending) await clearPending(entry.convoId);
       if (pending && !ownTarget) {
         if (isYes(said)) {
