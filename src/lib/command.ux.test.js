@@ -246,6 +246,17 @@ describe('watch commands', () => {
       parseWatchCommand('watch out, this one is nasty', { embedUri: POST }),
     ).toBe(null);
   });
+
+  it('watches only a post, never a list or a feed', () => {
+    const list = 'at://did:plc:abc/app.bsky.graph.list/3abc';
+    expect(parseWatchCommand(`watch ${list}`)).toMatchObject({
+      action: 'watch',
+      target: null,
+    });
+    expect(
+      parseWatchCommand('watch this', { embedUri: list }),
+    ).toMatchObject({ action: 'watch', target: null });
+  });
 });
 
 describe('approving by what people did', () => {

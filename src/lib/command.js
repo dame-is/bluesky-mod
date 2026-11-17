@@ -1082,11 +1082,7 @@ export function parseLookup(text, { links = [], mentions = [] } = {}) {
 export function parsePostScan(text, { embedUri = null, links = [] } = {}) {
   const raw = String(text ?? '').trim();
 
-  const target =
-    extractTargets(raw)[0] ||
-    links.find((l) => extractTargets(l).length) ||
-    embedUri ||
-    null;
+  const target = postTargetIn(raw, { embedUri, links });
   if (!target) return null;
 
   const leftovers = raw
@@ -1097,6 +1093,24 @@ export function parsePostScan(text, { embedUri = null, links = [] } = {}) {
     .filter((w) => w && !FILLER.has(w) && !SCAN_FILLER.has(w));
 
   return leftovers.length ? null : target;
+}
+
+/** An at:// URI of a post. A link of the /post/ form is always a post. */
+const AT_POST = /^at:\/\/[^/]+\/app\.bsky\.feed\.post\//;
+const isPostTarget = (t) => !/^at:\/\//.test(t) || AT_POST.test(t);
+
+/**
+ * The post a scan or a watch acts on: the first post in the text, a link, or
+ * the shared post. A list, a starter pack or a feed is skipped, since reading
+ * one as a post would take its members or subscribers for people who engaged
+ * with it.
+ */
+function postTargetIn(raw, { embedUri = null, links = [] } = {}) {
+  return (
+    extractTargets(raw).find(isPostTarget) ||
+    links.find((l) => extractTargets(l).some(isPostTarget)) ||
+    (embedUri && isPostTarget(embedUri) ? embedUri : null)
+  );
 }
 
 /** Words that can sit beside a pasted post without making it a question. */
@@ -1325,11 +1339,7 @@ export function parseWatchCommand(text, { embedUri = null, links = [] } = {}) {
   ) {
     return { action: 'watches' };
   }
-  const target =
-    extractTargets(raw)[0] ||
-    links.find((l) => extractTargets(l).length) ||
-    embedUri ||
-    null;
+  const target = postTargetIn(raw, { embedUri, links });
   if (/^(stop watching|unwatch|stop watch|done watching)\b/.test(lower)) {
     return { action: 'unwatch', target };
   }

@@ -23,7 +23,7 @@
 
 import { OWNER_DID, APPVIEW } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
-import { resolveTarget } from '../lib/target.js';
+import { resolveTarget, TargetError } from '../lib/target.js';
 import { harvestPost } from '../lib/harvest.js';
 import { summarise } from '../lib/score.js';
 import { postWebUrl } from '../lib/links.js';
@@ -72,6 +72,11 @@ export async function startWatch({
   now = Date.now(),
 }) {
   const resolved = await resolveTarget(target);
+  // A watch reads a post's quotes and replies. A list's members or a feed's
+  // subscribers are not that, and never harvested as if they were.
+  if (resolved.collection !== 'app.bsky.feed.post') {
+    throw new TargetError('I watch posts, and that is not a post.');
+  }
   const until = new Date(now + hours * 3_600_000).toISOString();
   const mode = auto ? 'auto' : 'ask';
   const running = (await liveWatches({ now })).find(

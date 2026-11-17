@@ -29,13 +29,23 @@ vi.mock('./listWrite.js', () => ({
 vi.mock('./reference.js', () => ({
   loadReference: async () => ({ ref: {}, takenAt: '2026-10-01T00:00:00Z' }),
 }));
-vi.mock('../lib/target.js', () => ({
-  resolveTarget: async () => ({ uri: POST, did: AUTHOR }),
-  resolveActor: async (a) => a,
-}));
+vi.mock('../lib/target.js', async (importOriginal) => {
+  const real = await importOriginal();
+  return {
+    ...real,
+    // An at:// URI resolves offline; anything else is the post.
+    resolveTarget: async (link) =>
+      String(link).startsWith('at://')
+        ? real.resolveTarget(link)
+        : { uri: POST, did: AUTHOR, collection: 'app.bsky.feed.post' },
+    resolveActor: async (a) => a,
+  };
+});
+const harvested = [];
 const participants = [];
 vi.mock('../lib/harvest.js', () => ({
   harvestPost: async (uri) => {
+    harvested.push(uri);
     const engagements = {};
     for (const p of participants) {
       for (const [k, n] of Object.entries(p.engagements)) {
@@ -68,6 +78,7 @@ beforeEach(() => {
   stored.plan.length = 0;
   stored.decision.length = 0;
   participants.length = 0;
+  harvested.length = 0;
 });
 
 describe('who a scan puts in a plan', () => {
@@ -93,5 +104,22 @@ describe('who a scan puts in a plan', () => {
     expect(stored.plan[0].totals).toMatchObject({ participants: 2 });
     // The author is still scored, for the card's own "author" choice.
     expect(out.author).toMatchObject({ did: AUTHOR });
+  });
+});
+
+describe('what a scan reads', () => {
+  it('refuses a list, a starter pack or a feed, and harvests nothing', async () => {
+    for (const uri of [
+      'at://did:plc:maker/app.bsky.graph.list/3abc',
+      'at://did:plc:maker/app.bsky.graph.starterpack/3abc',
+      'at://did:plc:maker/app.bsky.feed.generator/hot',
+    ]) {
+      await expect(
+        proposePlan({ link: uri, kind: 'everyone' }),
+        uri,
+      ).rejects.toThrow('I scan posts, and that is not a post.');
+    }
+    expect(harvested).toEqual([]);
+    expect(stored.plan).toEqual([]);
   });
 });

@@ -79,7 +79,8 @@ vi.mock('./bulkPlan.js', async (importOriginal) => ({
   }),
 }));
 
-const { checkWatch, digestFor } = await import('./watch.js');
+const { checkWatch, digestFor, startWatch } = await import('./watch.js');
+const { harvestPost } = await import('../lib/harvest.js');
 
 const PLAN_ID = '1c2d3e4f-0000-4000-8000-000000000000';
 const POST = 'at://did:plc:owner/app.bsky.feed.post/3abc';
@@ -250,5 +251,19 @@ describe('the thumbs-up in a digest', () => {
     expect(d.pending).toEqual([
       `approve 1c2d3e4f hostile CONNECTED,NOTABLE asof=${w.stats.heldAsOf}`,
     ]);
+  });
+});
+
+describe('starting a watch', () => {
+  it('watches only a post, never a list', async () => {
+    harvestPost.mockClear();
+    await expect(
+      startWatch({
+        convoId: 'c1',
+        target: 'at://did:plc:maker/app.bsky.graph.list/3abc',
+      }),
+    ).rejects.toThrow('I watch posts, and that is not a post.');
+    expect(harvestPost).not.toHaveBeenCalled();
+    expect(db.watch).toEqual([]);
   });
 });

@@ -27,7 +27,7 @@ import crypto from 'node:crypto';
 
 import { APPVIEW, OWNER_DID } from '../constants.js';
 import { fetchWithTimeout } from '../lib/atproto.js';
-import { resolveActor, resolveTarget } from '../lib/target.js';
+import { resolveActor, resolveTarget, TargetError } from '../lib/target.js';
 import { harvestPost } from '../lib/harvest.js';
 import { createScorer, summarise, BANDS } from '../lib/score.js';
 import { KINDS } from '../lib/command.js';
@@ -158,6 +158,11 @@ function withoutSelves(harvest, dids) {
  */
 export async function proposePlan({ link, kind }) {
   const target = await resolveTarget(link);
+  // A list, starter pack or feed has members or subscribers, not people who
+  // engaged with it, and a scan would read them as the second.
+  if (target.collection !== 'app.bsky.feed.post') {
+    throw new TargetError('I scan posts, and that is not a post.');
+  }
   const harvest = withoutSelves(await harvestPost(target.uri), [
     OWNER_DID,
     ownerOf(listUri()),

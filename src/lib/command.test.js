@@ -532,6 +532,20 @@ describe('parsePostScan', () => {
     expect(parsePostScan('hello')).toBe(null);
     expect(parsePostScan('')).toBe(null);
   });
+
+  it('is not a scan of a list, a starter pack or a feed', () => {
+    // Read as a post, a list would put its members among the people who
+    // engaged with it.
+    for (const uri of [
+      'at://did:plc:abc/app.bsky.graph.list/3abc',
+      'at://did:plc:abc/app.bsky.graph.starterpack/3abc',
+      'at://did:plc:abc/app.bsky.feed.generator/hot',
+    ]) {
+      expect(parsePostScan(uri), uri).toBe(null);
+      expect(parsePostScan('', { embedUri: uri }), uri).toBe(null);
+      expect(parsePostScan(`${uri} ${POST}`), uri).toBe(POST);
+    }
+  });
 });
 
 describe('undo and history', () => {
