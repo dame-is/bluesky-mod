@@ -40,12 +40,16 @@ export function providerName(env = process.env) {
 
 export const PROVIDER = providerName();
 
-/** Where each provider's key is read from, first choice first. */
+/**
+ * Where each provider's key is read from. MODEL_API_KEY and MODEL_BASE_URL
+ * belong to openai-compatible alone, so a key meant for one server is never
+ * sent to another company's.
+ */
 const KEYS = {
   gateway: ['AI_GATEWAY_API_KEY'],
-  openrouter: ['OPENROUTER_API_KEY', 'MODEL_API_KEY'],
-  anthropic: ['ANTHROPIC_API_KEY', 'MODEL_API_KEY'],
-  openai: ['OPENAI_API_KEY', 'MODEL_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY'],
+  openai: ['OPENAI_API_KEY'],
 };
 
 const keyFor = (name, env) =>
@@ -83,6 +87,22 @@ export function modelIds(env = process.env, name = providerName(env)) {
 
 export const MODELS = modelIds();
 
+/**
+ * The provider for `none`. With no provider installed the SDK sends a string
+ * id to its own default, the Vercel gateway, so `none` installs one that
+ * refuses: a path that reaches for a model by mistake fails here instead of
+ * sending posts to a provider nobody chose.
+ */
+const refuse = (id) => {
+  throw new Error(`MODEL_PROVIDER=none, so no model is called (asked for ${id})`);
+};
+const REFUSE = {
+  specificationVersion: 'v4',
+  languageModel: refuse,
+  embeddingModel: refuse,
+  imageModel: refuse,
+};
+
 /** Build the provider object the SDK resolves string ids through. */
 export function createProvider(name = PROVIDER, env = process.env) {
   switch (name) {
@@ -92,7 +112,7 @@ export function createProvider(name = PROVIDER, env = process.env) {
     case 'openrouter':
       return createOpenAICompatible({
         name: 'openrouter',
-        baseURL: env.MODEL_BASE_URL || 'https://openrouter.ai/api/v1',
+        baseURL: 'https://openrouter.ai/api/v1',
         apiKey: keyFor('openrouter', env),
       });
     case 'openai-compatible':
@@ -109,7 +129,7 @@ export function createProvider(name = PROVIDER, env = process.env) {
     case 'openai':
       return createOpenAI({ apiKey: keyFor('openai', env) });
     case 'none':
-      return null;
+      return REFUSE;
     default:
       throw new Error(
         `MODEL_PROVIDER=${name} is not one of: ${PROVIDERS.join(', ')}`,
@@ -140,6 +160,18 @@ export function modelProblems(env = process.env) {
   }
   if (name === 'openai-compatible' && !env.MODEL_BASE_URL) {
     problems.push('MODEL_BASE_URL is not set');
+  }
+  // Any other provider ignores these, so a value here is a setting that does
+  // not do what whoever set it meant, such as sending posts to their own
+  // server.
+  if (name !== 'openai-compatible') {
+    for (const k of ['MODEL_BASE_URL', 'MODEL_API_KEY']) {
+      if (env[k]) {
+        problems.push(
+          `${k} is set, but only MODEL_PROVIDER=openai-compatible reads it and the provider is ${name}. Remove it, or set MODEL_PROVIDER=openai-compatible`,
+        );
+      }
+    }
   }
   if (!modelIds(env, name).agent) {
     problems.push(`MOD_AGENT_MODEL is not set (needed with MODEL_PROVIDER=${name})`);

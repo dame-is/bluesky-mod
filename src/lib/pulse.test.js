@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   resolveSlice,
   normalisePost,
@@ -899,5 +899,130 @@ describe('pulse', () => {
     await expect(resolveSlice('my for you feed')).rejects.toThrow(
       /not a slice I can read/,
     );
+  });
+});
+
+describe('the time budget', () => {
+  beforeEach(() => clearPulseCache());
+
+  /**
+   * A fetch whose server accepts the connection and never answers. It settles
+   * only when the request's signal fires, the way a real fetch does.
+   */
+  function stalled() {
+    const seen = [];
+    const impl = vi.fn((url, init) => {
+      seen.push(init?.signal);
+      return new Promise((_, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        if (signal.aborted) return reject(signal.reason);
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    });
+    impl.seen = seen;
+    return impl;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('gives up on a stalled page when the budget runs out, with the default fetch', async () => {
+    // One page that never answers must not hold the job queue that DMs,
+    // public replies and the drift run all wait in.
+    const hang = stalled();
+    vi.stubGlobal('fetch', hang);
+    const started = Date.now();
+    const r = await pulse({
+      source: 'circle',
+      circleDids: ['did:plc:a', 'did:plc:b'],
+      budgetMs: 150,
+      useCache: false,
+      now: NOW,
+    });
+    // No retry after the budget fires: a retry with a fired signal fails at
+    // once and then sleeps.
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(hang).toHaveBeenCalled();
+    // Every request carries a signal, so nothing waits on the server alone.
+    expect(hang.seen.every(Boolean)).toBe(true);
+    // Cut off mid-read counts as unread, not as unreadable.
+    expect(r.coverage).toMatchObject({ accounts: 2, read: 0, unread: 2 });
+  });
+
+  it('gives up on a feed that never answers, and says it ran out of time', async () => {
+    const started = Date.now();
+    await expect(
+      pulse({
+        source: 'at://did:plc:x/app.bsky.feed.generator/slow',
+        fetchImpl: stalled(),
+        budgetMs: 150,
+        useCache: false,
+        now: NOW,
+      }),
+    ).rejects.toThrow(/did not answer in time/);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('keeps what a feed served before the budget ran out', async () => {
+    let calls = 0;
+    const hang = stalled();
+    const fetchImpl = vi.fn((url, init) => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            feed: [item({ at: hoursAgo(1) })],
+            cursor: 'next',
+          }),
+        });
+      }
+      return hang(url, init);
+    });
+    const r = await pulse({
+      source: 'at://did:plc:x/app.bsky.feed.generator/slow',
+      fetchImpl,
+      budgetMs: 150,
+      useCache: false,
+      now: NOW,
+    });
+    expect(r.totals.posts).toBe(1);
+    expect(r.coverage.pagesCapped).toBe(true);
+  });
+
+  it('stops when the caller gives up, before the budget does', async () => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    const started = Date.now();
+    const r = await pulse({
+      source: 'circle',
+      circleDids: ['did:plc:a'],
+      fetchImpl: stalled(),
+      signal: controller.signal,
+      budgetMs: 60_000,
+      useCache: false,
+      now: NOW,
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(r.coverage).toMatchObject({ read: 0, unread: 1 });
+  });
+
+  it('takes a budget a timer cannot, instead of throwing', async () => {
+    // AbortSignal.timeout wants a whole number of milliseconds that fits a
+    // 32-bit timer; config only checks for a number above 0.
+    const fetchImpl = fakeFetch([['getAuthorFeed', { feed: [] }]]);
+    for (const budgetMs of [1500.5, 1e12]) {
+      const r = await pulse({
+        circleDids: ['did:plc:a'],
+        fetchImpl,
+        budgetMs,
+        useCache: false,
+        now: NOW,
+      });
+      expect(r.coverage.read).toBe(1);
+    }
   });
 });

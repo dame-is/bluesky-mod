@@ -8,8 +8,11 @@
 // names, bios, posts. Injection strings aimed at scrapers and other bots are
 // already common, so one will land here sooner or later. The guards are cheap
 // insurance and make no claim to stop a targeted attack: every tool is
-// read-only, untrusted text is fenced as data, and a fully captured turn costs
-// a wrong paragraph, never a write or a band change.
+// read-only and untrusted text is fenced as data. A fully captured turn never
+// writes or changes a band. It can write a wrong paragraph, and its lookups
+// can carry what the turn holds to a host the post's author runs, through a
+// handle, did:web or NSID that resolves there. Lookups by URL or host are
+// refused (src/lib/mcp.js), which closes the widest such channel.
 
 import { tool, stepCountIs } from 'ai';
 import { MODELS, PROVIDER } from '../models.js';
@@ -23,9 +26,15 @@ export const DEFAULT_MODEL = MODELS.agent;
  * How long one model call may take before it is abandoned. Generous, because a
  * tool loop can take tens of seconds. The point is to notice a call that will
  * never return, instead of hanging with the process looking healthy.
+ *
+ * A whole number of milliseconds from 1 to 2^31-1, or else the default.
+ * AbortSignal.timeout throws on a negative, fractional or infinite delay, and
+ * past 2^31-1 Node fires it after 1 ms. Either would break every answer.
  */
-export const MODEL_TIMEOUT_MS =
-  Number(process.env.MOD_MODEL_TIMEOUT_MS) || 120_000;
+export const MODEL_TIMEOUT_MS = (() => {
+  const n = Number(process.env.MOD_MODEL_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 && n <= 2_147_483_647 ? n : 120_000;
+})();
 
 /**
  * Fence text written by someone else so the model can tell content from
@@ -343,7 +352,10 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
                   'include replies. Default false: top-level posts are what someone is bringing up.',
                 ),
             }),
-            execute: async (args) => {
+            // The tool loop's deadline reaches a running tool only through
+            // `abortSignal`, so it is passed on. Without it a digest outlives
+            // the turn that asked for it.
+            execute: async (args, { abortSignal } = {}) => {
               const r = await io.pulse({
                 source: args.source || 'circle',
                 hours: args.hours,
@@ -351,6 +363,7 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
                 sort: args.sort,
                 limit: args.limit,
                 includeReplies: args.include_replies,
+                signal: abortSignal,
               });
               return {
                 slice: r.slice,
@@ -389,8 +402,8 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
                   .map((d) => safeTerm(d.domain))
                   .filter(Boolean)
                   .slice(0, 3),
-                // What `[n]` in the answer resolves to. Links only; see the
-                // marker table in pulse.js.
+                // What `[n]` in the answer resolves to, for code: the links
+                // carry authors' handles, so toModelOutput leaves this out.
                 sample: r.sample,
                 matched: r.matched,
                 shown: r.shown,
@@ -401,6 +414,14 @@ export function buildTools(io, { reviewRows = 40 } = {}) {
                 // returns, fenced as one block.
                 posts: untrusted('network:posts', r.rendered),
               };
+            },
+            // What the model reads. The marker table's links are built from
+            // handles, which other people register, and the model needs only
+            // the markers, which are already in the fenced posts. The full
+            // result stays in the step for pulseCallsIn and the DM links.
+            toModelOutput: ({ output }) => {
+              const { sample, ...seen } = output ?? {};
+              return { type: 'json', value: JSON.parse(JSON.stringify(seen)) };
             },
           }),
         }

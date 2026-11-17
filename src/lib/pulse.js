@@ -18,6 +18,7 @@
 import { APPVIEW } from '../constants.js';
 import { resolveActor } from './target.js';
 import { postWebUrl } from './links.js';
+import { fetchWithTimeout } from './atproto.js';
 
 export const DEFAULT_WINDOW_HOURS = 24;
 
@@ -55,10 +56,16 @@ function firstPageSize(hours) {
   return Math.min(PAGE, Math.max(15, Math.ceil(hours * 0.6)));
 }
 
+/** The longest delay a timer takes. Past it Node fires after 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /**
  * Fetch JSON, and tell a failure that will never succeed from one that might.
  * A deactivated account answers 400 from getAuthorFeed forever, and retrying
  * it spends the fan-out's budget on the one member who cannot be read.
+ *
+ * Once `signal` has fired, the error is thrown rather than retried: a retry
+ * with a fired signal fails at once and then sleeps.
  */
 async function getJson(url, fetchImpl, signal, tries = 3) {
   for (let i = 0; i < tries; i += 1) {
@@ -72,7 +79,7 @@ async function getJson(url, fetchImpl, signal, tries = 3) {
         return { body: null, permanent: true };
       }
     } catch (err) {
-      if (err?.name === 'AbortError') throw err;
+      if (err?.name === 'AbortError' || signal?.aborted) throw err;
     }
     await new Promise((r) => setTimeout(r, 500 * (i + 1)));
   }
@@ -97,7 +104,7 @@ const AT_URI = /^at:\/\/([^/]+)\/([^/]+)\/([^/?#]+)/;
  */
 export async function resolveSlice(
   spec,
-  { fetchImpl = fetch, signal, appview = APPVIEW } = {},
+  { fetchImpl = fetchWithTimeout, signal, appview = APPVIEW } = {},
 ) {
   const raw = String(spec ?? '').trim();
   if (!raw || /^(circle|follows|following|my circle)$/i.test(raw)) {
@@ -256,14 +263,15 @@ export function ampOf(p) {
  * Pages only while the last page was still inside it, so a quiet account
  * costs one small request. `complete: false` means the page cap cut the
  * author off, and the caller reports it: a digest that silently saw half of
- * the busiest account is wrong about the slice.
+ * the busiest account is wrong about the slice. `aborted: true` means time
+ * ran out, between pages or when `signal` fired mid-request.
  */
 export async function authorWindow(
   did,
   {
     sinceMs,
     hours = DEFAULT_WINDOW_HOURS,
-    fetchImpl = fetch,
+    fetchImpl = fetchWithTimeout,
     signal,
     appview = APPVIEW,
     includeReplies = false,
@@ -282,7 +290,14 @@ export async function authorWindow(
       `${appview}/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(did)}` +
       `&limit=${limit}&filter=${filter}` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const { body, permanent } = await getJson(url, fetchImpl, signal);
+    let got;
+    try {
+      got = await getJson(url, fetchImpl, signal);
+    } catch (err) {
+      if (!signal?.aborted) throw err;
+      return { posts: out, complete: false, aborted: true, permanent: false };
+    }
+    const { body, permanent } = got;
     if (!body) {
       return { posts: out, complete: false, aborted: false, permanent };
     }
@@ -317,7 +332,7 @@ export async function circleWindow({
   dids,
   sinceMs,
   hours = DEFAULT_WINDOW_HOURS,
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   signal,
   appview = APPVIEW,
   includeReplies = false,
@@ -393,16 +408,19 @@ export async function circleWindow({
  * the top).
  *
  * Throws when not even the first page can be read. An empty window from a
- * feed that does not exist would read as a quiet day.
+ * feed that does not exist would read as a quiet day. Past `deadline`, or
+ * once `signal` fires, it stops with what it has, and `pagesCapped` says the
+ * stream was not read to the edge of the window.
  */
 export async function feedWindow({
   uri,
   kind = 'feed',
   sinceMs,
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   signal,
   appview = APPVIEW,
   includeReplies = true,
+  deadline = Infinity,
 }) {
   const method =
     kind === 'list' ? 'app.bsky.feed.getListFeed' : 'app.bsky.feed.getFeed';
@@ -416,11 +434,22 @@ export async function feedWindow({
     const url =
       `${appview}/xrpc/${method}?${param}=${encodeURIComponent(uri)}&limit=${PAGE}` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const { body } = await getJson(url, fetchImpl, signal);
+    let body = null;
+    let late = Date.now() >= deadline;
+    if (!late) {
+      try {
+        ({ body } = await getJson(url, fetchImpl, signal));
+      } catch (err) {
+        if (!signal?.aborted) throw err;
+        late = true;
+      }
+    }
     if (!body) {
       if (page === 0) {
         throw new Error(
-          `could not read the ${kind} ${uri}. It may not exist, or its server may be down.`,
+          late
+            ? `the ${kind} ${uri} did not answer in time.`
+            : `could not read the ${kind} ${uri}. It may not exist, or its server may be down.`,
         );
       }
       break;
@@ -731,13 +760,28 @@ export async function pulse({
   limit = 60,
   perAuthor = 3,
   includeReplies = false,
-  fetchImpl = fetch,
+  fetchImpl = fetchWithTimeout,
   signal,
   appview = APPVIEW,
   budgetMs = 60_000,
   now = Date.now(),
   useCache = true,
 } = {}) {
+  // One budget for the whole digest, enforced in flight as well as between
+  // requests. A page that never answers would otherwise hold the job queue
+  // long after the budget ran out. The caller's signal (the tool loop's
+  // deadline) stops it too.
+  const budget = Math.min(
+    MAX_TIMER_MS,
+    Math.max(1, Math.ceil(Number(budgetMs)) || 60_000),
+  );
+  const deadline = Date.now() + budget;
+  const outOfTime = AbortSignal.timeout(budget);
+  const stop = signal ? AbortSignal.any([signal, outOfTime]) : outOfTime;
+  // The combined signal holds its sources weakly, so the timeout is hung off
+  // it to keep it alive until it fires, as atproto.js does.
+  if (stop !== outOfTime) stop.timeoutSignal = outOfTime;
+
   const window = Math.min(
     MAX_WINDOW_HOURS,
     Math.max(1, Number(hours) || DEFAULT_WINDOW_HOURS),
@@ -747,7 +791,11 @@ export async function pulse({
   // context, so it is bounded here.
   const sample = Math.min(MAX_SAMPLE, Math.max(1, Math.floor(limit) || 60));
 
-  const slice = await resolveSlice(source, { fetchImpl, signal, appview });
+  const slice = await resolveSlice(source, {
+    fetchImpl,
+    signal: stop,
+    appview,
+  });
   if (slice.kind === 'circle' && !circleDids.length) {
     throw new Error(
       'the circle is empty in this snapshot, so there is nobody to read. The follow-graph snapshot may still be building.',
@@ -771,19 +819,20 @@ export async function pulse({
             sinceMs,
             hours: window,
             fetchImpl,
-            signal,
+            signal: stop,
             appview,
             includeReplies,
-            budgetMs,
+            budgetMs: deadline - Date.now(),
           })
         : await feedWindow({
             uri: slice.uri,
             kind: slice.kind,
             sinceMs,
             fetchImpl,
-            signal,
+            signal: stop,
             appview,
             includeReplies,
+            deadline,
           });
     if (useCache) cacheSet(key, fetched, now);
   }
@@ -825,11 +874,10 @@ export async function pulse({
     omitted: selection.omitted,
     posts: selection.kept,
     // The marker table: `[n]` in the answer is sample[n - 1], in the order
-    // renderPosts numbers them. Only the link is here. Everything else about
-    // these posts is already inside the fence, and an unfenced copy of a
-    // handle would hand it to the model as bare JSON. The URL is built from
-    // the at:// URI and a shape-checked handle, so it says whose post it is
-    // without carrying anything anyone wrote.
+    // renderPosts numbers them. It is for code, which swaps each marker the
+    // answer cites for its link. The link carries the author's handle, a
+    // domain someone registered, so it is not for the model: agent.js leaves
+    // the table out of what network_pulse hands it.
     sample: selection.kept.map((p, i) => ({
       n: i + 1,
       url: postWebUrl(p.uri, { handle: p.handle }),

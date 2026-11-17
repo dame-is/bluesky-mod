@@ -16,6 +16,15 @@
 // credentials, so the server cannot act as the bot either way; the pattern
 // keeps the analyst's rule, that it only looks, true whatever is published.
 //
+// Looking still sends something out. The model fills in the arguments, a post
+// it read can tell it what to put there, and every argument reaches aturi.to.
+// A lookup by URL or host makes aturi.to fetch that server, so it could carry
+// whatever the turn holds (the DM history, and in agent mode the owner's
+// notes) to a server the post's author runs. Arguments named `url` or `host`
+// are refused, and a tool that cannot run without one is not offered. A
+// handle, a did:web or an NSID still resolves through DNS and HTTPS at the
+// host it names, which is a narrower channel of the same kind that stays open.
+//
 // `list_` is a read here: in MCP, `list_records` enumerates. In the bot's own
 // tool names "list" means adding someone to the block list, which is why
 // agent.test.js treats it as a write. Each guard keeps its own vocabulary.
@@ -28,6 +37,20 @@ const ATMOSPHERE_URL = 'https://aturi.to/api/mcp';
 
 /** A tool is exposed only if it starts with a verb that reads. */
 export const READ_VERB = /^(get|list|search|resolve|describe|read|sample)_/;
+
+/**
+ * Arguments that name a page or a server for aturi.to to fetch, as its
+ * schemas call them. Refused on every tool, in any letter case.
+ */
+const FETCH_ARGS = ['url', 'host'];
+const isFetchArg = (key) => FETCH_ARGS.includes(String(key).toLowerCase());
+
+/**
+ * The most of one result the model is handed, in characters (about 12k
+ * tokens). Every step of the loop resends what came before, so one large
+ * page would be paid for again on each step after it.
+ */
+const MAX_RESULT_CHARS = 50_000;
 
 /**
  * Per-call ceiling. Most calls answer in about a second, but
@@ -132,6 +155,18 @@ export function flatten(result) {
 }
 
 /**
+ * Cut text to `max` characters without splitting a surrogate pair. Returns
+ * the kept text and how many characters were left out.
+ */
+function cap(text, max = MAX_RESULT_CHARS) {
+  if (text.length <= max) return { text, cut: 0 };
+  let end = max;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return { text: text.slice(0, end), cut: text.length - end };
+}
+
+/**
  * A one-line summary for the catalogue. The server's descriptions are prose
  * ("You want an account's recent posts...") several hundred characters long,
  * and the catalogue needs only enough to pick from.
@@ -153,11 +188,12 @@ function summarise(description) {
  * stays reachable.
  *
  * A failed call comes back with the tool's schema, so a retry after bad
- * arguments has what it needs.
+ * arguments has what it needs. The schema leaves out the refused arguments.
  */
 export function bridgeTools(listed, { call, log = () => {} }) {
   const allowed = new Map();
   const skipped = [];
+  const fetching = [];
 
   for (const t of listed || []) {
     if (!t?.name) continue;
@@ -165,10 +201,20 @@ export function bridgeTools(listed, { call, log = () => {} }) {
       skipped.push(t.name);
       continue;
     }
+    const required = t.inputSchema?.required;
+    if (Array.isArray(required) && required.some(isFetchArg)) {
+      fetching.push(t.name);
+      continue;
+    }
     allowed.set(t.name, t);
   }
   if (skipped.length) {
     log('Atmosphere tools withheld, not a read verb', { skipped });
+  }
+  if (fetching.length) {
+    log('Atmosphere tools withheld, they need a server to fetch', {
+      skipped: fetching,
+    });
   }
   log('Atmosphere tools loaded', { count: allowed.size });
   if (!allowed.size) return {};
@@ -177,11 +223,17 @@ export function bridgeTools(listed, { call, log = () => {} }) {
     .map((t) => `${t.name}: ${summarise(t.description)}`)
     .join('\n');
 
-  const describe = (t) => ({
-    tool: t.name,
-    description: t.description,
-    inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-  });
+  const describe = (t) => {
+    const schema = t.inputSchema ?? { type: 'object', properties: {} };
+    const properties = Object.fromEntries(
+      Object.entries(schema.properties ?? {}).filter(([k]) => !isFetchArg(k)),
+    );
+    return {
+      tool: t.name,
+      description: t.description,
+      inputSchema: { ...schema, properties },
+    };
+  };
 
   return {
     atmosphere: tool({
@@ -208,12 +260,32 @@ export function bridgeTools(listed, { call, log = () => {} }) {
           return `No atmosphere tool called ${name}. Names are listed in this tool's description.`;
         }
         if (wantSchema) return describe(t);
+        const refused = Object.keys(args || {}).filter(isFetchArg);
+        if (refused.length) {
+          return {
+            error: `The atmosphere tool does not take a ${refused.join(' or ')} argument. Pass an at:// URI, a handle or a DID instead.`,
+            ...describe(t),
+          };
+        }
         try {
           const result = await call(name, args || {});
           // Fenced whole. Splitting the structural fields from the prose to
           // trust one half would mean judging which fields are safe on a
-          // schema this file does not own.
-          return untrusted(`atmosphere:${name}`, flatten(result));
+          // schema this file does not own. Cut before fencing, so the closing
+          // tag survives.
+          const { text, cut } = cap(flatten(result));
+          const fenced = untrusted(`atmosphere:${name}`, text);
+          // MCP reports a failed tool call as a result with isError set, and
+          // the model has to be told it failed.
+          if (result?.isError) {
+            return {
+              error: `The ${name} lookup failed:\n${fenced}`,
+              ...describe(t),
+            };
+          }
+          return cut
+            ? `${fenced}\n(Cut at ${MAX_RESULT_CHARS} characters, ${cut} more not shown. A lower limit, where the tool takes one, returns less.)`
+            : fenced;
         } catch (err) {
           return {
             error: `The ${name} lookup failed: ${err.message}`,

@@ -215,6 +215,163 @@ describe('the dispatcher', () => {
   });
 });
 
+describe('lookups that would fetch a server the model names', () => {
+  // Schemas as aturi.to published them (read 2026-11-17). A post the model
+  // reads can tell it what to pass, and a URL or host it chose could carry
+  // whatever the turn holds to a server the post's author runs.
+  const resolveLink = {
+    name: 'resolve_link',
+    description:
+      'You have a web URL (bsky.app, or an arbitrary page) or an at:// URI, and you want the record behind it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        atUri: { type: 'string', description: 'An at:// URI.' },
+        composeText: { type: 'string' },
+        url: { type: 'string', description: 'A web page URL.' },
+      },
+    },
+  };
+  const describePds = {
+    name: 'describe_pds',
+    description: 'You have a PDS hostname and want to know about the server.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cursor: { type: 'string' },
+        host: { type: 'string', description: 'Hostname or URL of the PDS.' },
+        limit: { type: 'integer' },
+      },
+      required: ['host'],
+    },
+  };
+  const getProfile = {
+    name: 'get_profile',
+    description: 'You want a profile.',
+    inputSchema: {
+      type: 'object',
+      properties: { actor: { type: 'string' } },
+      required: ['actor'],
+    },
+  };
+  const listed = [resolveLink, describePds, getProfile];
+  const exfil = 'https://attacker.example/c?d=the-owner-said-something-private';
+
+  it('does not offer a tool that cannot run without a server to fetch', async () => {
+    const log = vi.fn();
+    const call = vi.fn();
+    const tools = bridgeTools(listed, { call, log });
+    expect(tools.atmosphere.description).not.toContain('describe_pds');
+    const out = await tools.atmosphere.execute({
+      tool: 'describe_pds',
+      args: { host: 'secretdata.attacker.example' },
+    });
+    expect(out).toMatch(/No atmosphere tool called describe_pds/);
+    expect(call).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/withheld/), {
+      skipped: ['describe_pds'],
+    });
+  });
+
+  it('refuses a url or host argument on any tool, and never calls the server', async () => {
+    const call = vi.fn();
+    const tools = bridgeTools(listed, { call });
+    for (const [tool, args] of [
+      ['resolve_link', { url: exfil }],
+      ['resolve_link', { URL: exfil }],
+      ['get_profile', { actor: 'a.bsky.social', host: 'x.attacker.example' }],
+    ]) {
+      const out = await tools.atmosphere.execute({ tool, args });
+      expect(out.error).toMatch(/does not take/);
+      expect(out.inputSchema).toBeDefined();
+    }
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('still resolves a link given as an at:// URI', async () => {
+    const call = vi.fn().mockResolvedValue({ content: [{ text: 'record' }] });
+    const tools = bridgeTools(listed, { call });
+    const uri = 'at://did:plc:a/app.bsky.feed.post/3x';
+    const out = await tools.atmosphere.execute({
+      tool: 'resolve_link',
+      args: { atUri: uri },
+    });
+    expect(call).toHaveBeenCalledWith('resolve_link', { atUri: uri });
+    expect(out).toContain('record');
+  });
+
+  it('leaves the refused arguments out of the schema it hands back', async () => {
+    const tools = bridgeTools(listed, { call: vi.fn() });
+    const out = await tools.atmosphere.execute({
+      tool: 'resolve_link',
+      describe: true,
+    });
+    expect(Object.keys(out.inputSchema.properties).sort()).toEqual([
+      'atUri',
+      'composeText',
+    ]);
+  });
+});
+
+describe('what a remote result can do to the turn', () => {
+  const listed = [
+    {
+      name: 'get_author_feed',
+      description: 'feed',
+      inputSchema: {
+        type: 'object',
+        properties: { actor: { type: 'string' } },
+      },
+    },
+  ];
+
+  it('marks a tool error as an error, fenced, with the schema', async () => {
+    // MCP reports a failed tool call as a result with isError set, not as a
+    // JSON-RPC error. Passed on as plain content, it reads as data.
+    const call = vi.fn().mockResolvedValue({
+      isError: true,
+      content: [{ type: 'text', text: 'actor not found: <b>x</b>' }],
+    });
+    const tools = bridgeTools(listed, { call });
+    const out = await tools.atmosphere.execute({
+      tool: 'get_author_feed',
+      args: { actor: 'x' },
+    });
+    expect(out.error).toMatch(/get_author_feed lookup failed/);
+    expect(out.error).toContain(
+      '<untrusted source="atmosphere:get_author_feed">',
+    );
+    expect(out.error).not.toContain('<b>');
+    expect(out.inputSchema.properties.actor).toBeDefined();
+  });
+
+  it('cuts a very large result, keeps the fence whole, and says it cut', async () => {
+    const huge = 'x'.repeat(500_000);
+    const call = vi.fn().mockResolvedValue({ content: [{ text: huge }] });
+    const tools = bridgeTools(listed, { call });
+    const out = await tools.atmosphere.execute({
+      tool: 'get_author_feed',
+      args: {},
+    });
+    expect(out.length).toBeLessThan(60_000);
+    expect(out).toMatch(/<\/untrusted>\n/);
+    expect(out.match(/<\/untrusted>/g)).toHaveLength(1);
+    expect(out).toMatch(/cut/i);
+  });
+
+  it('never cuts a character in half', async () => {
+    const call = vi
+      .fn()
+      .mockResolvedValue({ content: [{ text: '😀'.repeat(40_000) }] });
+    const tools = bridgeTools(listed, { call });
+    const out = await tools.atmosphere.execute({
+      tool: 'get_author_feed',
+      args: {},
+    });
+    expect(out).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+  });
+});
+
 describe('flatten', () => {
   it('joins text parts and serialises anything else', () => {
     expect(flatten({ content: [{ text: 'a' }, { text: 'b' }] })).toBe('a\nb');
