@@ -17,8 +17,9 @@
 //    owner follows.
 //  - Per-call caps: ten accounts per add_to_list, remove_from_list or
 //    approval by name, 500 adds per approval by band or label, 240 reads per
-//    triage, 1,000 removals per undo. The model can call again; it cannot
-//    write thousands in one step.
+//    triage, 1,000 removals per undo. The model can call again. The calls in
+//    one step run one at a time, so two approvals of one plan cannot both
+//    read the same waiting accounts and write each of them twice.
 //  - The write check (tiers.js). Every write is first put to a separate call
 //    as one question, "did the owner ask for exactly this?", over a
 //    description code wrote, including where each target came from. A no
@@ -100,12 +101,15 @@ const OPERATOR_STEPS = Math.max(
 );
 
 /**
- * The deadline for a whole agent turn, tools included.
+ * The deadline for a whole agent turn.
  *
  * Longer than the analyst's two minutes because the tools here are slow on
  * purpose: a harvest of a viral post is sixty pages per source, and a triage
  * is a wave of model calls of its own. A socket that never returns must still
- * not wedge the process's one job queue.
+ * not wedge the process's one job queue. It ends a model call in flight, the
+ * calls left in a step do not start after it, and scan_post, triage_plan and
+ * watch_post hand it on as the signal of the work they start. A tool already
+ * running stops only when that work honours the signal.
  */
 const OPERATOR_TIMEOUT_MS = num(process.env.MOD_OPERATOR_TIMEOUT_MS, 300_000);
 
@@ -302,16 +306,32 @@ const DEPS = {
 };
 
 /**
- * A plan's note, as plain text. Written by this system: either "bulk <kind>
- * from <post>" or the owner's own message with the agent's reason in brackets.
- * Not fenced as untrusted, because it is not other people's writing, and a
- * fence leads the agent to tell the owner their own words came from the
- * network. Angle brackets and backticks are replaced so it cannot forge one.
+ * A plan's note, as a model reads it back. Either "bulk <kind> from <post>",
+ * or the asker's own message followed by the agent's reason in brackets (see
+ * noteFor).
+ *
+ * The part before the reason is not fenced as untrusted, because it is not
+ * other people's writing, and a fence leads the agent to tell the owner their
+ * own words came from the network. Angle brackets and backticks are replaced
+ * so it cannot forge one. The reason IS fenced: a model wrote it in a turn
+ * that read strangers' posts, so it can carry their words. Everything after
+ * the first marker counts as the reason, so a reason that writes a marker of
+ * its own stays inside the fence.
  */
-const noteText = (note) =>
-  String(note || '')
+const AGENT_MARK = ' [agent: ';
+const noteText = (note) => {
+  const s = String(note || '');
+  const at = s.indexOf(AGENT_MARK);
+  const own = (at === -1 ? s : s.slice(0, at))
     .replace(/[`<>]/g, "'")
     .slice(0, 200);
+  if (at === -1) return own;
+  const why = s
+    .slice(at + AGENT_MARK.length)
+    .replace(/\]$/, '')
+    .slice(0, 200);
+  return `${own} ${untrusted('agent-reason', why)}`;
+};
 
 /** A tool failure the model can read and explain, instead of a dead turn. */
 const failed = (err) => ({
@@ -331,7 +351,7 @@ function noteFor(raw, reason) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 200);
-  return why ? `${raw} [agent: ${why}]` : raw;
+  return why ? `${raw}${AGENT_MARK}${why}]` : raw;
 }
 
 /**
@@ -827,9 +847,13 @@ export function buildActionTools(ctx, deps = DEPS) {
           .optional()
           .describe('which engagement to plan for. Default everyone.'),
       }),
-      execute: async ({ post, who = 'everyone' }) => {
+      execute: async ({ post, who = 'everyone' }, { abortSignal } = {}) => {
         try {
-          const plan = await deps.proposePlan({ link: post, kind: who });
+          const plan = await deps.proposePlan({
+            link: post,
+            kind: who,
+            signal: abortSignal,
+          });
           const postUrl = postWebUrl(plan.uri);
           if (postUrl) ctx.links.add(postUrl);
           ctx.plans?.push(plan.code);
@@ -871,13 +895,14 @@ export function buildActionTools(ctx, deps = DEPS) {
       inputSchema: z.object({
         code: z.string().describe('the plan code'),
       }),
-      execute: async ({ code }) => {
+      execute: async ({ code }, { abortSignal } = {}) => {
         try {
           const plan = await findOrFail(code);
           const out = await deps.runTriage(plan, {
             generate: ctx.generate,
             model: ctx.triageModel || ctx.model,
             log: ctx.log,
+            signal: abortSignal,
           });
           return {
             code,
@@ -1285,7 +1310,10 @@ export function buildActionTools(ctx, deps = DEPS) {
       hours: z.number().int().min(1).max(168).optional(),
       block_hostile: z.boolean().optional(),
     }),
-    execute: async ({ post, hours = 24, block_hostile: auto = false }) => {
+    execute: async (
+      { post, hours = 24, block_hostile: auto = false },
+      { abortSignal } = {},
+    ) => {
       if (!ctx.convoId) {
         return { error: 'a watch needs a conversation to report to' };
       }
@@ -1311,6 +1339,7 @@ export function buildActionTools(ctx, deps = DEPS) {
           target: post,
           hours,
           auto,
+          signal: abortSignal,
         });
         record(
           `${out.extended ? 'extended the watch on' : 'started watching'} a post for ${hours}h${auto ? ', blocking the hostile ones' : ''}`,
@@ -1539,14 +1568,33 @@ async function runTurn({
       onStepEnd: (step) =>
         trace.push(stepNote(step, modelMs, Date.now() - callAt - modelMs)),
       tools,
+      // One at a time: calls in one step that read and then mark the same
+      // rows (two approvals of a plan, two triages of it) would otherwise
+      // each read them before either marked them, and do the work twice.
+      toolCallConcurrency: 1,
       stopWhen: [stepCountIs(maxSteps), hasToolCall('hand_off')],
       messages: [...history, { role: 'user', content: message }],
       ...(reasoning ? { reasoning } : {}),
     });
     const steps = result.steps?.length ?? trace.length;
+    const last = result.steps?.at(-1);
+    // hasToolCall matches on the name alone, so a hand_off whose arguments
+    // failed validation stopped the loop without running. It is a hand-off
+    // all the same.
+    if (stage === 'first' && !ctx.handoff) {
+      const call = last?.toolCalls?.find((c) => c.toolName === 'hand_off');
+      if (call) {
+        ctx.handoff = String(call.input?.reason || 'handed off').slice(0, 200);
+      }
+    }
+    // A last step that still called tools is one the step cap stopped before
+    // the model read what those calls returned. Its text was written before
+    // them and can claim a write that was refused, so it is dropped: the turn
+    // reads as unanswered, which steps up or sends the code-built fallback.
+    const cutOff = !ctx.handoff && (last?.toolCalls?.length ?? 0) > 0;
     return done({
       ok: true,
-      text: (result.text || '').trim(),
+      text: cutOff ? '' : (result.text || '').trim(),
       steps,
       outOfSteps: steps >= maxSteps,
       usage: result.usage ?? null,
@@ -1724,7 +1772,10 @@ export async function operate({
     model: escalation,
     callTimeoutMs: escalationCallTimeoutMs,
     stage: 'second',
-    reason,
+    // A hand-off reason is the first model's own words, written in a turn
+    // that read strangers' posts, so it is fenced like anything else read
+    // from them. The other reasons are code's.
+    reason: first.handoff ? untrusted('hand-off', first.handoff) : reason,
     prior: first.actions,
     priorPlans: first.plans,
   });
