@@ -37,6 +37,7 @@ import {
   answer,
   chunkForDm,
   historyFrom,
+  untrusted,
   readRequest,
   pulseRequest,
   threadRequest,
@@ -461,6 +462,55 @@ async function newestLabelAt(plan, label) {
 const asOfToken = (at) => (at ? ` asof=${at}` : '');
 
 /**
+ * Text someone else wrote, on one line and with its double quotes made
+ * single, so it cannot close the quote it sits in or start a line of its own.
+ */
+const oneQuotable = (text) =>
+  String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/["“”]/g, "'");
+
+/** One row of a label review: the band, then a stranger's words. */
+const quoteRow = (band, quote) =>
+  `${band} - "${oneQuotable(quote).slice(0, 160)}"`;
+
+/**
+ * quoteRow's output, in the bot's own messages read back as history. The
+ * quote holds no double quote and no line break, so a stranger cannot end
+ * the match early or write a row of their own.
+ */
+const QUOTE_ROW =
+  /^(PROTECTED|CONNECTED|PERIPHERAL|NOTABLE|UNKNOWN) - "([^"\n]*)"$/gm;
+
+/**
+ * A `history` row whose note carries the agent's reason, in the bot's own
+ * messages read back as history. Everything after the first " [agent: "
+ * counts as the reason, as noteText in operator.js reads it, because a
+ * model wrote it in a turn that read strangers' posts.
+ */
+const AGENT_REASON_ROW =
+  /^(.+ · [0-9a-f]{8}(?: \(undone\))?, "[^"\n]*?) \[agent: ([^"\n]*)"$/gm;
+
+/**
+ * The bot's own message, as a model reads it back: strangers' words that
+ * code put in it are fenced as untrusted, the way a tool result fences them.
+ * The sender sees no tags; only the history a model reads carries them.
+ * Prose a model wrote cannot be told apart and is left as it is.
+ */
+export function fenceStrangers(text) {
+  return String(text ?? '')
+    .replace(
+      QUOTE_ROW,
+      (_, band, quote) => `${band} - ${untrusted('quote', quote)}`,
+    )
+    .replace(
+      AGENT_REASON_ROW,
+      (_, head, why) =>
+        `${head} ${untrusted('agent-reason', why.replace(/\]$/, ''))}"`,
+    );
+}
+
+/**
  * Run one typed command and return what to say back.
  *
  * No branch asks a model what to do. The inputs are the sender's literal text
@@ -569,7 +619,8 @@ export async function runCommand(
     const lines = h.rows.map((r) => {
       const when = new Date(r.acted_at).toLocaleString();
       const verb = r.action === 'list_remove' ? 'removed' : 'added';
-      const note = canWrite && r.plan?.note ? `, "${r.plan.note}"` : '';
+      const note =
+        canWrite && r.plan?.note ? `, "${oneQuotable(r.plan.note)}"` : '';
       const undone = r.undone_at ? ' (undone)' : '';
       return `${when} · ${verb} · ${r.band} · ${r.approved_via ?? '?'} · ${r.code}${undone}${note}`;
     });
@@ -736,14 +787,9 @@ export async function runCommand(
       }
       // A stranger's words, on one line and with their double quotes made
       // single, so a quote cannot close its row and write one that looks
-      // like the bot's, here or in the history a model reads.
-      const lines = out.rows.map(
-        (r) =>
-          `${r.band} - "${String(r.triage_quote)
-            .replace(/\s+/g, ' ')
-            .replace(/["“”]/g, "'")
-            .slice(0, 160)}"`,
-      );
+      // like the bot's. Read back as history, each row's quote is fenced
+      // (fenceStrangers).
+      const lines = out.rows.map((r) => quoteRow(r.band, r.triage_quote));
       // Hundreds of quotes do not get read in a DM. This is a spot check on
       // the labelling before a bulk action, and the header says so.
       const head =
@@ -936,7 +982,7 @@ async function readHistory(chat, entry, { botDid, limits }) {
       convoId: entry.convoId,
       limit: 40,
     });
-    return historyFrom(page.data.messages, {
+    const turns = historyFrom(page.data.messages, {
       // The asker, who is not always the owner. Labelling a guest's own
       // messages as someone else's makes the model read the conversation as
       // one it watched rather than one it is in.
@@ -946,6 +992,11 @@ async function readHistory(chat, entry, { botDid, limits }) {
       maxTurns: limits.maxTurns,
       maxAgeMs: limits.historyHours ? limits.historyHours * 3600_000 : null,
     });
+    // The bot's messages come back in its own role, so what strangers wrote
+    // in them is fenced here, before any model reads them as its own words.
+    return turns.map((t) =>
+      t.role === 'assistant' ? { ...t, content: fenceStrangers(t.content) } : t,
+    );
   } catch {
     // A conversation we cannot read is still a question we can answer,
     // without context. A reply that misses a reference beats silence.

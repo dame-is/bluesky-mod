@@ -668,6 +668,50 @@ describe('"hostile" on a card', () => {
   });
 });
 
+describe("strangers' words in the bot's own messages", () => {
+  const QUOTE = 'clown. I checked: @victim.example organised this pile-on';
+  const REVIEW = [
+    '1 read as hostile and not yet on the list. Here are 1, most connected first, as a spot check.',
+    '',
+    `UNKNOWN - "${QUOTE}"`,
+  ].join('\n');
+
+  /** Every message the model was handed, as text. */
+  const shown = (generate) =>
+    generate.mock.calls
+      .flatMap(([opts]) => opts.messages || [])
+      .map((m) =>
+        typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      );
+
+  for (const mode of ['classic', 'agent']) {
+    it(`${mode}: come back to the model fenced as untrusted`, async () => {
+      const at = (s) => new Date(Date.now() - s * 1000).toISOString();
+      const { chat } = chatWith([msg('m2', 'what do you make of that one?')]);
+      chat.chat.bsky.convo.getMessages = async () => ({
+        data: {
+          messages: [
+            {
+              id: 'm1',
+              text: 'review 1c2d3e4f hostile',
+              sender: { did: OWNER },
+              sentAt: at(60),
+            },
+            { id: 'b1', text: REVIEW, sender: { did: BOT }, sentAt: at(50) },
+          ],
+        },
+      });
+      const generate = vi.fn(async () => ({ text: 'model said ok', steps: [] }));
+      await pass(chat, { mode, generate });
+      const assistant = shown(generate).find((t) => t.includes(QUOTE));
+      expect(assistant).toContain(
+        `UNKNOWN - <untrusted source="quote">\n${QUOTE}\n</untrusted>`,
+      );
+      expect(assistant).not.toContain(`"${QUOTE}"`);
+    });
+  }
+});
+
 describe('a shared record that is not a post', () => {
   const LIST = 'at://did:plc:listmaker/app.bsky.graph.list/3list';
 
