@@ -87,12 +87,15 @@ const b64 = (part) => JSON.parse(Buffer.from(part, 'base64url').toString('utf8')
  * @param {string} token
  * @param {object} opts
  * @param {string} opts.audience  the bot's DID
+ * @param {Function} [opts.allow]  did => whether the bot answers it. Asked
+ *   before anything is fetched, so a stranger's token, or a did:web naming a
+ *   host of the sender's choosing, never makes the bot fetch a document.
  * @param {Function} [opts.readDoc]  did => its DID document
  * @returns {Promise<{ did: string, scope: 'read'|'write', exp: number }>}
  */
 export async function verifyServiceAuth(
   token,
-  { audience, readDoc = readDidDocument, now = Date.now() } = {},
+  { audience, allow = null, readDoc = readDidDocument, now = Date.now() } = {},
 ) {
   const parts = String(token || '').split('.');
   if (parts.length !== 3) throw new Error('malformed token');
@@ -125,6 +128,7 @@ export async function verifyServiceAuth(
   if (typeof payload.iat === 'number' && payload.iat * 1000 > now + SKEW_MS) {
     throw new Error('the token was made in the future');
   }
+  if (allow && !allow(iss)) throw new Error('that account is not one the bot answers');
 
   const signed = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
   const sig = new Uint8Array(Buffer.from(parts[2], 'base64url'));

@@ -215,6 +215,7 @@ export function createPanel({ settings, roster, deps, log = () => {}, readDoc })
       try {
         claim = await verifyServiceAuth(token, {
           audience: deps.status().bot?.did || null,
+          allow: (did) => Boolean(tierOf(did, roster)),
           ...(readDoc ? { readDoc } : {}),
         });
       } catch (err) {

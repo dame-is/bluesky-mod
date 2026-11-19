@@ -19,6 +19,7 @@ let panel;
 let seeded;
 let base;
 const keys = {};
+const docReads = [];
 
 beforeAll(async () => {
   await closeDb();
@@ -30,6 +31,7 @@ beforeAll(async () => {
   for (const did of [owner, READER, STRANGER]) keys[did] = await Secp256k1Keypair.create();
   keys.other = await Secp256k1Keypair.create();
   const readDoc = async (did) => {
+    docReads.push(did);
     if (!keys[did]) throw new Error('no such account');
     return {
       id: did,
@@ -121,10 +123,14 @@ describe('a token from the account’s own PDS', () => {
     expect((await res.json()).error).toMatch(/bad signature/);
   });
 
-  it('is refused for an account the bot does not answer, even signed properly', async () => {
+  it('is refused for an account the bot does not answer, without fetching anything', async () => {
     const res = await call('/api/me', { bearer: await token({ iss: STRANGER }) });
     expect(res.status).toBe(401);
     expect((await res.json()).error).toMatch(/not one the bot answers/);
+    expect(docReads).not.toContain(STRANGER);
+    const web = await call('/api/me', { bearer: await token({ iss: 'did:web:169.254.169.254', key: keys.other }) });
+    expect(web.status).toBe(401);
+    expect(docReads).not.toContain('did:web:169.254.169.254');
   });
 
   it('accepts an audience naming one of the bot’s services', async () => {
