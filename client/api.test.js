@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import * as pkg from './index.js';
-import { ApiError, LXM, createClient } from './api.js';
+import { ApiError, createClient } from './api.js';
 
 /** A fetch that records requests and answers from `answer`. */
 function fakeFetch(answer = () => ({ status: 200, body: { ok: true } })) {
@@ -44,32 +44,46 @@ describe('the client', () => {
 
   it('asks for a service-auth token once, and again when it is nearly out', async () => {
     const { fetch, sent } = fakeFetch();
-    const asked = [];
-    let exp = Math.floor(Date.now() / 1000) + 120;
-    const c = createClient({
-      auth: { serviceAuth: async (lxm) => (asked.push(lxm), jwt(exp)) },
-      fetch,
-    });
+    let asked = 0;
+    let exp = Math.floor(Date.now() / 1000) + 60;
+    const c = createClient({ auth: { serviceAuth: async () => ((asked += 1), jwt(exp)) }, fetch });
     await c.me();
     await c.me();
-    expect(asked).toEqual([LXM.write]);
+    expect(asked).toBe(1);
     exp = Math.floor(Date.now() / 1000) + 5;
     // Nearly out: the held one is replaced on the next call after it.
-    const d = createClient({ auth: { serviceAuth: async (lxm) => (asked.push(lxm), jwt(exp)) }, fetch });
+    const d = createClient({ auth: { serviceAuth: async () => ((asked += 1), jwt(exp)) }, fetch });
     await d.me();
     await d.me();
-    expect(asked).toHaveLength(3);
+    expect(asked).toBe(3);
     expect(sent.every((s) => s.headers.Authorization?.startsWith('Bearer x.'))).toBe(true);
   });
 
-  it('asks for a read token when told to', async () => {
-    const asked = [];
+  it('shares one token between calls made together', async () => {
+    let asked = 0;
     const c = createClient({
-      auth: { serviceAuth: async (lxm) => (asked.push(lxm), jwt(Math.floor(Date.now() / 1000) + 60)), scope: 'read' },
+      auth: { serviceAuth: async () => ((asked += 1), jwt(Math.floor(Date.now() / 1000) + 60)) },
       fetch: fakeFetch().fetch,
     });
+    await Promise.all([c.me(), c.queue(), c.lists()]);
+    expect(asked).toBe(1);
+  });
+
+  it('asks again after a token fails to come', async () => {
+    let asked = 0;
+    const c = createClient({
+      auth: {
+        serviceAuth: async () => {
+          asked += 1;
+          if (asked === 1) throw new Error('the PDS is down');
+          return jwt(Math.floor(Date.now() / 1000) + 60);
+        },
+      },
+      fetch: fakeFetch().fetch,
+    });
+    await expect(c.me()).rejects.toThrow('the PDS is down');
     await c.me();
-    expect(asked).toEqual([LXM.read]);
+    expect(asked).toBe(2);
   });
 
   it('throws the bot’s words, and says when it was signed out', async () => {

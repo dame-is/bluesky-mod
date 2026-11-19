@@ -1,28 +1,29 @@
 // Signing in with an atproto account, for an admin page on another site.
 //
-// A site that already signs its owner in with atproto OAuth can ask the
-// owner's PDS for a short-lived token addressed to the bot
-// (com.atproto.server.getServiceAuth, with `aud` the bot's DID and `lxm` one
-// of the two below) and send it as `Authorization: Bearer <token>`. The token
+// A site that already signs its owner in with atproto (OAuth, or an app
+// password on a server) can ask the owner's PDS for a short-lived token
+// addressed to the bot (com.atproto.server.getServiceAuth with `aud` the bot's
+// DID and no `lxm`) and send it as `Authorization: Bearer <token>`. The token
 // is signed with the account's own key, which is checked here against the key
 // in its DID document. Nothing is shared between the site and the bot, so
-// there is no secret to leak, and a token stops working within minutes.
+// there is no secret to leak, and a PDS makes such a token for a minute at
+// most.
 //
-// Who the account is to the bot (owner, writer, reader, or nobody) is still
-// read from the roster, as for a DM or a panel cookie. The token's `lxm` can
-// only narrow that: a read token never writes, whoever holds it.
+// The token names no method, so nothing about it belongs to a domain. What
+// the account may do (owner, writer, reader, or nobody) is read from the
+// roster, as for a DM or a panel cookie.
 
 import { parseDidKey, verifySignature } from '@atproto/crypto';
 
-import { LXM } from '../../client/api.js';
 import { PLC_DIRECTORY } from '../constants.js';
 import { didWebDocumentUrl, fetchWithTimeout } from '../lib/atproto.js';
 
-/** The two methods a token may be scoped to, as the client names them. */
-export { LXM };
-
-/** Tokens that claim to live longer than this are refused, whatever `exp` says. */
-const MAX_LIFETIME_MS = 10 * 60_000;
+/**
+ * Tokens that claim to live longer than this are refused, whatever `exp`
+ * says. A PDS makes a method-less token for a minute at most; the rest is
+ * room for clocks that disagree.
+ */
+const MAX_LIFETIME_MS = 5 * 60_000;
 /** How far a clock may be ahead of this one. */
 const SKEW_MS = 60_000;
 /** How long a signing key is trusted before its document is read again. */
@@ -81,8 +82,8 @@ const b64 = (part) => JSON.parse(Buffer.from(part, 'base64url').toString('utf8')
 /**
  * Check a service-auth token.
  *
- * Cheap checks first, the signature last: issuer, audience, method, expiry,
- * lifetime, algorithm, then the key from the DID document.
+ * Cheap checks first, the signature last: issuer, audience, no method,
+ * expiry, lifetime, the roster, algorithm, then the key from the DID document.
  *
  * @param {string} token
  * @param {object} opts
@@ -91,7 +92,7 @@ const b64 = (part) => JSON.parse(Buffer.from(part, 'base64url').toString('utf8')
  *   before anything is fetched, so a stranger's token, or a did:web naming a
  *   host of the sender's choosing, never makes the bot fetch a document.
  * @param {Function} [opts.readDoc]  did => its DID document
- * @returns {Promise<{ did: string, scope: 'read'|'write', exp: number }>}
+ * @returns {Promise<{ did: string, exp: number }>}
  */
 export async function verifyServiceAuth(
   token,
@@ -116,14 +117,17 @@ export async function verifyServiceAuth(
   if (aud !== audience && !aud.startsWith(`${audience}#`)) {
     throw new Error('the token was made for another service');
   }
-  const scope = payload.lxm === LXM.write ? 'write' : payload.lxm === LXM.read ? 'read' : null;
-  if (!scope) throw new Error(`the token is for ${payload.lxm || 'nothing'}, not ${LXM.read} or ${LXM.write}`);
+  // A token made for one method of the bot's, by some other software, is not
+  // a sign-in, so only a token that names none is taken as one.
+  if (payload.lxm != null) {
+    throw new Error(`the token is for ${payload.lxm}; ask for one with no method (no lxm)`);
+  }
 
   if (typeof payload.exp !== 'number' || payload.exp * 1000 <= now) {
     throw new Error('the token has expired');
   }
   if (payload.exp * 1000 - now > MAX_LIFETIME_MS) {
-    throw new Error('the token lives longer than ten minutes');
+    throw new Error('the token lives longer than five minutes');
   }
   if (typeof payload.iat === 'number' && payload.iat * 1000 > now + SKEW_MS) {
     throw new Error('the token was made in the future');
@@ -142,5 +146,5 @@ export async function verifyServiceAuth(
   if (!ok) ok = await check(await cachedKey(iss, readDoc, { fresh: true }));
   if (!ok) throw new Error('bad signature');
 
-  return { did: iss, scope, exp: payload.exp };
+  return { did: iss, exp: payload.exp };
 }

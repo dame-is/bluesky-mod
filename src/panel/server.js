@@ -226,8 +226,7 @@ export function createPanel({ settings, roster, deps, log = () => {}, readDoc })
       return {
         did: claim.did,
         tier,
-        // The token's method can narrow what the roster allows, never widen it.
-        canWrite: tier !== 'reader' && claim.scope === 'write',
+        canWrite: tier !== 'reader',
         id: null,
         createdAt: null,
         expiresAt: new Date(claim.exp * 1000).toISOString(),

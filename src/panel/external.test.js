@@ -9,7 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { closeDb, openDb } from '../bot/db.js';
 import { issueCode } from './auth.js';
 import { forgetList } from './queries.js';
-import { forgetKeys, LXM } from './serviceAuth.js';
+import { forgetKeys } from './serviceAuth.js';
 
 const READER = 'did:plc:reader000000000000000000';
 const STRANGER = 'did:plc:stranger0000000000000000';
@@ -54,16 +54,16 @@ afterAll(async () => {
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
 
-/** A service-auth token as a PDS makes one, signed by `key`. */
+/** A service-auth token as a PDS makes one with no lxm, signed by `key`. */
 async function token({
   iss = seeded.owner,
   aud = seeded.bot,
-  lxm = LXM.write,
+  lxm,
   exp = Math.floor(Date.now() / 1000) + 60,
   key = keys[iss],
 } = {}) {
   const head = b64({ typ: 'JWT', alg: 'ES256K' });
-  const body = b64({ iss, aud, lxm, exp, iat: Math.floor(Date.now() / 1000), jti: String(Math.random()) });
+  const body = b64({ iss, aud, ...(lxm ? { lxm } : {}), exp, iat: Math.floor(Date.now() / 1000), jti: String(Math.random()) });
   const sig = Buffer.from(await key.sign(new TextEncoder().encode(`${head}.${body}`))).toString('base64url');
   return `${head}.${body}.${sig}`;
 }
@@ -94,23 +94,19 @@ describe('a token from the account’s own PDS', () => {
     expect((await call('/api/queue/reopen', { bearer: t, body: { did: 'did:plc:demo000601' } })).status).toBe(200);
   });
 
-  it('only reads when it was made for reading', async () => {
-    const t = await token({ lxm: LXM.read });
-    expect((await (await call('/api/me', { bearer: t })).json()).canWrite).toBe(false);
+  it('keeps a reader on the roster read-only', async () => {
+    const t = await token({ iss: READER });
+    const me = await (await call('/api/me', { bearer: t })).json();
+    expect(me).toMatchObject({ tier: 'reader', canWrite: false });
     const res = await call('/api/queue/keep', { bearer: t, body: { did: 'did:plc:demo000601', band: 'CONNECTED' } });
     expect(res.status).toBe(403);
   });
 
-  it('keeps a reader on the roster read-only, whatever the token says', async () => {
-    const me = await (await call('/api/me', { bearer: await token({ iss: READER }) })).json();
-    expect(me).toMatchObject({ tier: 'reader', canWrite: false });
-  });
-
   it.each([
     ['made for another service', { aud: 'did:plc:someoneelse0000000000000' }, /another service/],
-    ['for another method', { lxm: 'com.example.other' }, /not is\.dame/],
+    ['made for a method', { lxm: 'com.example.other' }, /no method/],
     ['out of date', { exp: Math.floor(Date.now() / 1000) - 5 }, /expired/],
-    ['living longer than ten minutes', { exp: Math.floor(Date.now() / 1000) + 3600 }, /ten minutes/],
+    ['living longer than five minutes', { exp: Math.floor(Date.now() / 1000) + 3600 }, /five minutes/],
   ])('is refused when %s', async (_, opts, why) => {
     const res = await call('/api/me', { bearer: await token(opts) });
     expect(res.status).toBe(401);
@@ -267,7 +263,6 @@ describe('what an admin page needs', () => {
     for (const path of ['/api/graph/rebuild', '/api/rescore']) {
       expect(await (await call(path, { bearer: owner, body: {} })).json()).toEqual({ started: true });
       expect((await call(path, { bearer: reader, body: {} })).status).toBe(403);
-      expect((await call(path, { bearer: await token({ lxm: LXM.read }), body: {} })).status).toBe(403);
     }
   });
 

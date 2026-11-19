@@ -11,17 +11,10 @@ Every route but `POST /api/sign-in` needs a signed-in account from the bot's ros
 | How | Sent as | For |
 | --- | --- | --- |
 | The panel's cookie | `Cookie: bm_panel=…` | The panel's own page. Same site only. |
-| A token from your own PDS | `Authorization: Bearer <jwt>` | A site that signs you in with atproto OAuth |
+| A token from your own PDS | `Authorization: Bearer <jwt>` | A site that signs you in with atproto, or a server with an app password for your account |
 | A panel session token | `Authorization: Bearer <token>` | A site without atproto sign-in, a server of your own, a script |
 
-**A token from your own PDS** is a service-auth token: your site asks your PDS for it with `com.atproto.server.getServiceAuth`, with `aud` set to the bot's DID and `lxm` set to one of:
-
-| `lxm` | Gives |
-| --- | --- |
-| `is.dame.blueskymod.read` | Reading only, whatever the roster allows |
-| `is.dame.blueskymod.write` | What the roster allows |
-
-The bot checks the token's signature against the key in your DID document (did:plc or did:web), and refuses one that lives longer than ten minutes. Nothing is shared between your site and the bot.
+**A token from your own PDS** is a service-auth token: your site asks your PDS for it with `com.atproto.server.getServiceAuth`, with `aud` set to the bot's DID and no `lxm`. A PDS makes such a token for a minute. The bot checks that the account is on its roster, then the token's signature against the key in the account's DID document (did:plc or did:web), and refuses a token that names a method or lives longer than five minutes. What you may do is what the roster says. Nothing is shared between your site and the bot, and nothing in the token belongs to a domain.
 
 **A panel session token** is what the cookie holds, handed over instead of set. Ask the bot for a code by DM (`panel`), then:
 

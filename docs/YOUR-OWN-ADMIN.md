@@ -25,7 +25,7 @@ Your page signs in as an account on the bot's roster and gets what that account 
 
 ### Your site already signs you in with atproto
 
-Ask your own PDS for a short-lived token addressed to the bot, and let the client ask again when it runs out. With an OAuth session from `@atproto/oauth-client-browser` and an `Agent` over it:
+You sign in to your site with your own account, and the bot does the work with its own. Your page asks your PDS for a short-lived token addressed to the bot, and the client asks for another when it runs out. With an OAuth session from `@atproto/oauth-client-browser` and an `Agent` over it:
 
 ```js
 import { createClient } from 'bluesky-mod-client';
@@ -35,24 +35,15 @@ const BOT_DID = 'did:plc:…'; // the bot account's DID
 const bot = createClient({
   baseUrl: 'https://mod.example.com',
   auth: {
-    serviceAuth: async (lxm) => {
-      const exp = Math.floor(Date.now() / 1000) + 5 * 60;
-      const res = await agent.com.atproto.server.getServiceAuth({ aud: BOT_DID, lxm, exp });
-      return res.data.token;
-    },
+    serviceAuth: async () =>
+      (await agent.com.atproto.server.getServiceAuth({ aud: BOT_DID })).data.token,
   },
 });
 ```
 
-The token is signed with your account's key and checked by the bot against your DID document, so nothing is shared between your site and the bot and there is no secret to keep. Add `scope: 'read'` to `auth` for a page that only reads.
+The token is signed with your account's key and checked by the bot against your DID document, so nothing is shared between your site and the bot and there is no secret to keep. It names no method, so a PDS makes it for a minute at most; the client reuses it until shortly before then.
 
-Your OAuth client has to be allowed to ask for these tokens. `transition:generic` allows it. With granular permissions, ask for:
-
-```
-rpc?lxm=is.dame.blueskymod.read&lxm=is.dame.blueskymod.write&aud=*
-```
-
-(from the [permission spec](https://atproto.com/specs/permission), read 2026-11-19).
+Your OAuth client has to be allowed to ask for these tokens. `transition:generic` allows it. With granular permissions, ask for `rpc?lxm=*&aud=<the bot's DID>%23bluesky_mod`, and ask for the token with `` aud: `${BOT_DID}#bluesky_mod` ``. The name after `#` can be anything; the bot takes its DID with or without one. That comes from the [permission spec](https://atproto.com/specs/permission) and the PDS's own `getServiceAuth`, read 2026-11-19, and has not yet been tried against a PDS with granular permissions.
 
 ### Your site has no atproto sign-in
 
@@ -69,14 +60,24 @@ The token lasts `PANEL_SESSION_DAYS`, and anything that can run script on your p
 
 ### From a server or a scheduled job
 
-The same session token, kept in your server's environment and never sent to a browser:
+If your server already logs in as you with an app password for your account, it can ask for the same token as a page does, and needs nothing else:
 
 ```js
-const bot = createClient({ baseUrl: process.env.BOT_URL, auth: { token: process.env.BOT_TOKEN } });
+import { AtpAgent } from '@atproto/api';
+
+const agent = new AtpAgent({ service: 'https://your.pds.example' });
+await agent.login({ identifier: process.env.BSKY_IDENTIFIER, password: process.env.BSKY_APP_PASSWORD });
+
+const bot = createClient({
+  baseUrl: process.env.BOT_URL,
+  auth: { serviceAuth: async () => (await agent.com.atproto.server.getServiceAuth({ aud: BOT_DID })).data.token },
+});
 const { vouches } = await bot.vouches({ min: 2, limit: 500 });
 ```
 
-A server needs no `PANEL_CORS_ORIGINS` entry; that is for browsers.
+The app password is for your account, not the bot's. The bot's own app password stays with the bot: whoever holds it can write to the list directly, past the PROTECTED veto and the decision log.
+
+Otherwise, a panel session token kept in your server's environment works the same way, until it runs out (`PANEL_SESSION_DAYS`). A server needs no `PANEL_CORS_ORIGINS` entry; that is for browsers.
 
 ## A first page
 
