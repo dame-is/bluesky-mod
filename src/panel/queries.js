@@ -12,6 +12,7 @@ import { select, selectAll, count, rpc, upsert, del } from '../bot/db.js';
 import { shortCode, findPlan } from '../bot/bulkPlan.js';
 import { BANDS } from '../lib/score.js';
 import { usableSnapshot } from '../snapshot.js';
+import { CLOSE, viaFamily } from '../../client/bands.js';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -22,29 +23,13 @@ const dayOf = (ms) => iso(ms).slice(0, 10);
 export const WRITE_LIMITS = { hour: 5000, day: 35_000 };
 const POINTS = { create: 3, delete: 1 };
 
-/** Bands that are not strangers, closest first. */
-export const CLOSE = ['PROTECTED', 'CONNECTED', 'PERIPHERAL', 'NOTABLE'];
+export { CLOSE, viaFamily };
 const closeness = (band) => {
   const i = CLOSE.indexOf(band);
   return i === -1 ? CLOSE.length : i;
 };
 
 const CANCELLED = /\(cancelled\)\s*$/;
-
-/**
- * How someone came to be on the list, as one of a few families, from the
- * `approved_via` on their decision: by name (a typed block, or an approval
- * that named them), by band, by a tone label, or by agent mode or a watch
- * acting on what the owner asked. 'none' is someone the log has no add for.
- */
-export function viaFamily(via) {
-  const v = String(via || '');
-  if (!v) return 'none';
-  if (/^(agent|watch):/.test(v)) return 'agent';
-  if (v.includes('triage')) return 'label';
-  if (v === 'band') return 'band';
-  return 'name';
-}
 
 /**
  * The words that asked for what a plan did. A typed block's note is the

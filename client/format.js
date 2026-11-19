@@ -1,7 +1,9 @@
 // Numbers, dates and names as the panel writes them. Pure, so the tests can
 // run them without a browser.
 
-export const BANDS = ['PROTECTED', 'CONNECTED', 'PERIPHERAL', 'NOTABLE', 'UNKNOWN'];
+import { BANDS } from './bands.js';
+
+export { BANDS };
 
 /** A band as a word: "Connected". The store's capitals are its own. */
 export const bandName = (band) =>
@@ -144,7 +146,7 @@ export const KIND_WORDS = {
   watch: 'Newcomers since a watch began',
 };
 
-/** How someone came to be on the list, in words (viaFamily in queries.js). */
+/** How someone came to be on the list, in words (viaFamily in bands.js). */
 export const FAMILY_WORDS = {
   name: 'By name',
   band: 'By band',

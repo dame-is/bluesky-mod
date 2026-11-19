@@ -3,7 +3,7 @@
 
 import { get } from '../api.js';
 import { h, fill } from '../dom.js';
-import { BANDS, FAMILY_WORDS, ago, bandName, compact, nf, viaWords } from '../lib/format.js';
+import { BANDS, FAMILY_WORDS, ago, bandName, compact, nf, viaWords } from '/client/format.js';
 import { band, chips, empty, listChips, loading, pager, problem, table, who } from '../ui.js';
 import { legend, listRadar, view } from './shared.js';
 

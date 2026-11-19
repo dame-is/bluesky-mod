@@ -40,6 +40,7 @@ A web panel, if you turn it on:
 
 - **The list and every scan as pages.** A radar puts you at the centre and each band in a ring, so a batch of 4,000 has a shape you can see before you approve any of it. Click a ring to tick it, read the names of anyone near you, and the page shows the command it will send.
 - **The same gate.** The panel changes the list only by sending the bot its own commands, so the PROTECTED veto, the decision log and undo are the ones the DMs use. You sign in with a code the bot sends you by DM. [docs/PANEL.md](docs/PANEL.md) has the rest.
+- **Or a page on your own site.** The panel's API, with the `bluesky-mod-client` package, lets you build the admin into your own site in your own styles, signed in with your atproto account. [docs/YOUR-OWN-ADMIN.md](docs/YOUR-OWN-ADMIN.md) walks through it.
 
 ## How it decides who is close to you
 

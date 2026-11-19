@@ -10,7 +10,7 @@
 // that table is what a screen reader is given.
 
 import { h, fill } from './dom.js';
-import { nf } from './lib/format.js';
+import { nf } from '/client/format.js';
 import {
   EDGES,
   nearest,
@@ -19,7 +19,7 @@ import {
   sectorAngles,
   texture,
   walkOrder,
-} from './lib/radar-layout.js';
+} from '/client/radar-layout.js';
 
 /** The well's own colours. Not the page's: it is dark in both themes. */
 export const WELL = {

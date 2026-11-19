@@ -19,7 +19,7 @@ import {
   postAuthor,
   postLink,
   writeCost,
-} from '../lib/format.js';
+} from '/client/format.js';
 import {
   addable,
   approveByName,
@@ -30,7 +30,7 @@ import {
   selected,
   triageCommand,
   undoCommand,
-} from '../lib/commands.js';
+} from '/client/commands.js';
 import { bandMark } from '../radar.js';
 import { band, chips, confirm, empty, listPicker, pager, run, section, table, toast, tone, who, whoName } from '../ui.js';
 import { legend, scanRadar, stateWords, view } from './shared.js';

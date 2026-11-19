@@ -4,8 +4,8 @@
 
 import { get } from '../api.js';
 import { h, fill, icon } from '../dom.js';
-import { BAND_RULE, ago, clock, compact, nf, shortDid, viaWords } from '../lib/format.js';
-import { blockCommand, onList, unblockCommand } from '../lib/commands.js';
+import { BAND_RULE, ago, clock, compact, nf, shortDid, viaWords } from '/client/format.js';
+import { blockCommand, onList, unblockCommand } from '/client/commands.js';
 import { avatar, band, closeButton, confirm, listPicker, loadProfile, loading, problem, run, tone } from '../ui.js';
 
 function reasonLine(live) {

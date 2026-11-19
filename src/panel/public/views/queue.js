@@ -7,8 +7,8 @@
 
 import { get, post } from '../api.js';
 import { h, fill } from '../dom.js';
-import { BAND_RULE, ago, bandName, compact, nf, viaWords } from '../lib/format.js';
-import { onList, unblockCommand } from '../lib/commands.js';
+import { BAND_RULE, ago, bandName, compact, nf, viaWords } from '/client/format.js';
+import { onList, unblockCommand } from '/client/commands.js';
 import { band, chips, empty, pager, run, toast, who } from '../ui.js';
 import { view } from './shared.js';
 

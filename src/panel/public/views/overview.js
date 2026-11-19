@@ -3,8 +3,8 @@
 
 import { get } from '../api.js';
 import { h } from '../dom.js';
-import { BANDS, ago, bandName, bytes, clock, nf, plural, postLink, until } from '../lib/format.js';
-import { cancelCommand } from '../lib/commands.js';
+import { BANDS, ago, bandName, bytes, clock, nf, plural, postLink, until } from '/client/format.js';
+import { cancelCommand } from '/client/commands.js';
 import { band, chips, confirm, empty, listChips, meter, run, section, table } from '../ui.js';
 import { bars, changeCols, legend, listRadar, scanCols, view } from './shared.js';
 

@@ -7,6 +7,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
+COPY client ./client
 COPY scripts ./scripts
 COPY config/bot.example.json ./config/bot.example.json
 

@@ -48,6 +48,8 @@ import { looksLikeJwt, verifyServiceAuth } from './serviceAuth.js';
 export const API_VERSION = 1;
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+/** The client package (client/), whose modules the page imports from /client/. */
+const CLIENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'client');
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -697,9 +699,16 @@ export function createPanel({ settings, roster, deps, log = () => {}, readDoc })
       throw new HttpError(400, 'Bad address.');
     }
     if (rel === '/') rel = '/index.html';
-    const file = path.join(PUBLIC_DIR, rel);
-    // Inside ./public and nowhere else, whatever the path spells.
-    if (!file.startsWith(PUBLIC_DIR + path.sep) || rel.includes('\0')) {
+    let root = PUBLIC_DIR;
+    if (rel.startsWith('/client/')) {
+      // The client's modules, and nothing else from that folder.
+      root = CLIENT_DIR;
+      rel = rel.slice('/client'.length);
+      if (!rel.endsWith('.js') || rel.endsWith('.test.js')) throw new HttpError(404, 'Not found.');
+    }
+    const file = path.join(root, rel);
+    // Inside that folder and nowhere else, whatever the path spells.
+    if (!file.startsWith(root + path.sep) || rel.includes('\0')) {
       throw new HttpError(404, 'Not found.');
     }
     const type = TYPES[path.extname(file)];

@@ -14,14 +14,12 @@
 
 import { parseDidKey, verifySignature } from '@atproto/crypto';
 
+import { LXM } from '../../client/api.js';
 import { PLC_DIRECTORY } from '../constants.js';
 import { didWebDocumentUrl, fetchWithTimeout } from '../lib/atproto.js';
 
-/** The two methods a token may be scoped to. */
-export const LXM = {
-  read: 'is.dame.blueskymod.read',
-  write: 'is.dame.blueskymod.write',
-};
+/** The two methods a token may be scoped to, as the client names them. */
+export { LXM };
 
 /** Tokens that claim to live longer than this are refused, whatever `exp` says. */
 const MAX_LIFETIME_MS = 10 * 60_000;

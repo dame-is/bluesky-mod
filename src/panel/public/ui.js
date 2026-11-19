@@ -3,7 +3,7 @@
 
 import { get, post } from './api.js';
 import { h, fill, icon, sr } from './dom.js';
-import { bandName, nf, shortDid } from './lib/format.js';
+import { bandName, nf, shortDid } from '/client/format.js';
 import { bandMark } from './radar.js';
 
 // --- names and faces -------------------------------------------------------------

@@ -1,6 +1,7 @@
 {
   "name": "bluesky-mod",
   "version": "1.0.0",
+  "private": true,
   "description": "A Bluesky moderation bot you run yourself. It owns a block list, takes orders by DM, and refuses to block people you follow.",
   "license": "MIT",
   "type": "module",

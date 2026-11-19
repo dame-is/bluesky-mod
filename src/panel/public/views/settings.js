@@ -4,7 +4,7 @@
 
 import { get } from '../api.js';
 import { h } from '../dom.js';
-import { ago, bytes, clock, nf, plural } from '../lib/format.js';
+import { ago, bytes, clock, nf, plural } from '/client/format.js';
 import { section } from '../ui.js';
 import { view } from './shared.js';
 
