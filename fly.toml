@@ -16,6 +16,16 @@ app = "bluesky-mod"
   auto_extend_size_increment = "1GB"
   auto_extend_size_limit = "10GB"
 
+# The web panel (docs/PANEL.md). Uncomment to give the bot an HTTPS address,
+# and set PANEL_PORT=8787, PANEL_HOST=0.0.0.0 and PANEL_URL. "off" keeps Fly
+# from stopping the machine when the panel is idle: the bot must keep running.
+# [http_service]
+#   internal_port = 8787
+#   force_https = true
+#   auto_stop_machines = "off"
+#   auto_start_machines = false
+#   min_machines_running = 1
+
 [[vm]]
   memory = "512mb"
   cpu_kind = "shared"

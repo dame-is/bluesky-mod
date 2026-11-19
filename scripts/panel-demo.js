@@ -372,7 +372,7 @@ export function demoDeps(seeded) {
 }
 
 /** Seed a store and build the panel over it. */
-export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}, empty = false, corsOrigins = [], readDoc } = {}) {
+export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}, empty = false, corsOrigins = [], readDoc, readOnly = false } = {}) {
   // `empty` leaves the store as a new install has it, to see every page
   // with nothing on it.
   const seeded = empty
@@ -380,7 +380,7 @@ export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}
     : await fx.seedDemo({ lists: multiListOn() });
   const roster = makeRoster({ owner: seeded.owner, ...extraRoster });
   const panel = createPanel({
-    settings: { port, host, url: '', sessionDays: 30, corsOrigins },
+    settings: { port, host, url: '', sessionDays: 30, corsOrigins, readOnly },
     roster,
     deps: demoDeps(seeded),
     ...(readDoc ? { readDoc } : {}),

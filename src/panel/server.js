@@ -127,7 +127,8 @@ async function readJson(req) {
  * Build the panel.
  *
  * @param {object} opts
- * @param {object} opts.settings  config.panel: { port, host, url, sessionDays, corsOrigins }
+ * @param {object} opts.settings  config.panel: { port, host, url, sessionDays,
+ *   corsOrigins }, and `readOnly` for a dry run: everyone may read, nobody writes
  * @param {object} opts.roster    who is answered and who may write
  * @param {object} opts.deps      what the panel borrows from the running bot:
  *   enqueue(label, job)  run a job on the bot's queue and resolve with its result
@@ -589,6 +590,9 @@ export function createPanel({ settings, roster, deps, log = () => {}, readDoc })
     },
 
     'POST /api/command': async ({ session, body }) => {
+      if (settings.readOnly) {
+        throw new HttpError(403, 'This is a dry run, so the panel only reads. Commands go through once DRY_RUN is off.');
+      }
       const out = await runPanelCommand(body.command, session, deps);
       if (!out.ok) throw new HttpError(out.status, out.error);
       q.forgetList();
@@ -657,10 +661,11 @@ export function createPanel({ settings, roster, deps, log = () => {}, readDoc })
     }
     const bearer = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || ''))?.[1] || null;
     req.bearer = bearer;
-    const session = bearer
+    let session = bearer
       ? await bearerSession(bearer)
       : await sessionFor(cookieOf(req, SESSION_COOKIE), { roster });
     if (!session) throw new HttpError(401, 'Sign in first.');
+    if (settings.readOnly) session = { ...session, canWrite: false };
     // Past here the caller is someone the bot answers (see `handle`).
     req.signedIn = true;
     const route = routes[`${req.method} ${url.pathname}`];

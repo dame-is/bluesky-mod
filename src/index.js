@@ -852,11 +852,9 @@ async function start() {
   // so a misconfigured URL shows up now rather than mid-answer.
   await atmosphereTools();
 
-  // The web panel. Signing in is a DM, and a dry run reads none, so it stays
-  // off then. A port that cannot be opened is logged and the bot carries on.
-  if (config.panel.port && config.dryRun) {
-    logger.info('DRY_RUN: the panel is off, since signing in to it is a DM');
-  } else if (config.panel.port) {
+  // The web panel. In a dry run it only reads (attach.js). A port that cannot
+  // be opened is logged and the bot carries on.
+  if (config.panel.port) {
     panel = await startPanel({
       queued,
       agent: () => agent,

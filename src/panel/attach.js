@@ -232,7 +232,9 @@ export async function startPanel(bot) {
   }
 
   const panel = createPanel({
-    settings: config.panel,
+    // A dry run writes nothing, and the list's write path does not look at
+    // DRY_RUN, so the panel only reads then.
+    settings: { ...config.panel, readOnly: config.dryRun },
     roster: config.roster,
     log: (msg, fields) => logger.info(msg, fields),
     deps: {
