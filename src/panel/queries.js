@@ -140,11 +140,14 @@ async function summarise(plans) {
  * is told only to someone who may write, in a DM and here, so without
  * `canWrite` those plans are left out.
  */
-export async function scans({ state = null, limit = 60, canWrite = true } = {}) {
+export async function scans({ state = null, limit = 60, canWrite = true, before = null } = {}) {
   const plans = (
     (await select('plan', {
       select: PLAN_COLUMNS,
-      where: { totals: 'not.is.null' },
+      where: {
+        totals: 'not.is.null',
+        ...(before ? { created_at: `lt.${before}` } : {}),
+      },
       order: 'created_at.desc',
       limit: 200,
     })) || []
@@ -153,17 +156,28 @@ export async function scans({ state = null, limit = 60, canWrite = true } = {}) 
   const shown = state ? all.filter((p) => p.state === state) : all;
   const tally = {};
   for (const p of all) tally[p.state] = (tally[p.state] || 0) + 1;
-  return { scans: shown.slice(0, limit), counts: tally };
+  const page = shown.slice(0, limit);
+  // The next page starts after the last plan read, shown or not, so a page
+  // filtered by state still moves on. Counts are of the 200 read.
+  const more = shown.length > limit || plans.length === 200;
+  const last = shown.length > limit ? page[page.length - 1] : plans[plans.length - 1];
+  return {
+    scans: page,
+    counts: tally,
+    more,
+    next: more && last ? last.createdAt || last.created_at : null,
+  };
 }
 
 /**
- * One scan with every account in it, for the radar and the table under it.
+ * One plan with every account in it, for the radar and the table under it:
+ * a scan, or a typed block or removal (`scan` false), which has no totals.
  * `words` and the plan's note are for someone who may write; a reader sees
  * what was done and not the words that asked for it, as in the DMs.
  */
 export async function scan(code, { canWrite = false } = {}) {
   const plan = await findPlan(code);
-  if (!plan || !plan.totals) return null;
+  if (!plan) return null;
   const [rows, protectedRows, [summary]] = await Promise.all([
     selectAll('decision', {
       select:
@@ -177,6 +191,7 @@ export async function scan(code, { canWrite = false } = {}) {
   const vetoed = new Set(protectedRows.map((r) => r.did));
   return {
     ...summary,
+    scan: Boolean(plan.totals),
     words: canWrite ? wordsOf(plan) : [],
     rows: rows.map((r) => ({
       did: r.did,
@@ -440,7 +455,7 @@ export async function listIndex({
         })
       : [],
     selectAll('decision', {
-      select: 'plan_id,did,band,acted_at,approved_via',
+      select: 'plan_id,did,band,acted_at,approved_via,triage,triage_quote',
       eq: { action: 'list_add' },
       where: { acted_at: 'not.is.null', undone_at: 'is.null' },
       order: 'acted_at.asc',
@@ -481,6 +496,10 @@ export async function listIndex({
       code: a ? shortCode(a.plan_id) : null,
       addedAt: a?.acted_at || null,
       keptBand: k?.band || null,
+      // The tone label and the words it was given for, when the add came
+      // from one.
+      label: a?.triage || null,
+      quote: a?.triage_quote || null,
     };
   });
   rows.sort(
@@ -517,12 +536,18 @@ export async function listPage({
   band = null,
   q = '',
   family = null,
+  sort = 'closest',
   offset = 0,
   limit = 50,
 } = {}) {
   const index = await listIndex({ members, list, primary });
   const needle = String(q || '').trim().toLowerCase().replace(/^@/, '');
-  const matched = index.rows.filter(
+  const rows =
+    sort === 'recent'
+      ? // Newest add first; someone the log has no add for goes last.
+        [...index.rows].sort((x, y) => String(y.addedAt || '').localeCompare(String(x.addedAt || '')))
+      : index.rows;
+  const matched = rows.filter(
     (r) =>
       (!band || (r.band || 'UNSCORED') === band) &&
       (!family || r.family === family) &&
@@ -604,7 +629,12 @@ export async function queue({
     total: open.length,
     counts,
     matched: shown.length,
-    rows: shown.slice(offset, offset + limit),
+    rows: shown.slice(offset, offset + limit).map((r) => ({
+      ...r,
+      // Why they are here: the re-score put them closer than when they were
+      // added, or they were close already.
+      reason: r.bandThen && closeness(r.band) < closeness(r.bandThen) ? 'closer' : 'close',
+    })),
   };
 }
 
@@ -746,6 +776,37 @@ export async function graph({ now = Date.now() } = {}) {
     protected: await protectedCounts(),
     audits: audited,
   };
+}
+
+/**
+ * Vouch counts from the snapshot scoring uses: for the accounts in `dids`, or
+ * the `limit` most vouched with at least `min`. An account with none is left
+ * out. With no usable snapshot, `takenAt` is null and there are none.
+ */
+export async function vouches({ dids = null, min = 1, limit = 1000 } = {}) {
+  const usable = await usableSnapshot();
+  if (!usable) return { takenAt: null, scoring: null, vouches: {} };
+  const out = {};
+  if (dids) {
+    for (let i = 0; i < dids.length; i += 200) {
+      const rows = await select('vouch', {
+        select: 'did,vouches',
+        eq: { taken_at: usable.takenAt },
+        where: { did: { in: dids.slice(i, i + 200) } },
+      });
+      for (const r of rows || []) out[r.did] = r.vouches;
+    }
+  } else {
+    const rows = await select('vouch', {
+      select: 'did,vouches',
+      eq: { taken_at: usable.takenAt },
+      where: { vouches: `gte.${min}` },
+      order: 'vouches.desc,did.asc',
+      limit,
+    });
+    for (const r of rows || []) out[r.did] = r.vouches;
+  }
+  return { takenAt: usable.takenAt, scoring: usable.scoring, vouches: out };
 }
 
 /** Tokens spent on model calls over the last `days`, by day, kind and model. */

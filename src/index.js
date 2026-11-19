@@ -419,15 +419,18 @@ let snapshotBusy = false;
  * answered between steps. `force` skips the quiet check, for the first build
  * after install, when nothing can be scored until it exists.
  */
-function runSnapshot({ force = false } = {}) {
-  if (snapshotBusy) return;
-  if (!force && !quiet()) return;
+function runSnapshot({ force = false, restart = false } = {}) {
+  if (snapshotBusy) return false;
+  if (!force && !quiet()) return false;
   snapshotBusy = true;
+  // Only the first step starts afresh; the rest carry on with what it began.
+  let fresh = restart;
   const step = () =>
     enqueue('snapshot', async () => {
       let res;
       try {
-        res = await snapshotStep();
+        res = await snapshotStep({ restart: fresh });
+        fresh = false;
       } catch (err) {
         snapshotBusy = false;
         throw err;
@@ -471,6 +474,7 @@ function runSnapshot({ force = false } = {}) {
       }
     });
   step();
+  return true;
 }
 
 function scheduleSnapshot() {
@@ -858,6 +862,21 @@ async function start() {
       agent: () => agent,
       chat: () => chat,
       reference,
+      // The panel's buttons for a new snapshot and a re-score now. Each starts
+      // the work and returns; it runs on the queue between DMs, and a failure
+      // is logged like any other job's.
+      rebuild: () =>
+        runSnapshot({ force: true, restart: true })
+          ? { started: true }
+          : { started: false, reason: 'A snapshot is already being built.' },
+      rescore: () => {
+        enqueue('drift', async () => {
+          const convoId = await ownerConvo(chat);
+          const body = await maybeRunDrift(agent, chat, convoId, { force: true });
+          if (body) logger.info('Sent a drift brief');
+        });
+        return { started: true };
+      },
       vitals: () => ({
         queued: pending,
         dmAnswers: stats.dmAnswers,

@@ -398,7 +398,7 @@ async function deliver(chat, convoId, brief) {
  * its audit stays out of the baseline, so a run that falls due meanwhile
  * compares with the audit before it and finds the same things.
  */
-export async function maybeRunDrift(agent, chat, convoId) {
+export async function maybeRunDrift(agent, chat, convoId, { force = false } = {}) {
   // Nowhere to send it: wait for the next check rather than spend the week's
   // run on a brief nobody receives.
   if (!convoId) return null;
@@ -412,7 +412,8 @@ export async function maybeRunDrift(agent, chat, convoId) {
   // `for_date` is the moment of the run, so a run every few hours is due
   // from then and not from the start of its day.
   const last = latest?.for_date ? Date.parse(latest.for_date) : 0;
-  if (Date.now() - last < dueAfter) {
+  // `force` is the owner asking for a re-score now (the panel's button).
+  if (!force && Date.now() - last < dueAfter) {
     if (latest && !latest.sent_at && latest.body !== NO_DRIFT) {
       return deliver(chat, convoId, latest);
     }

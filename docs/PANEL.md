@@ -158,9 +158,11 @@ On Render, Railway or Fly the bot is deployed as a worker with no web address (s
 
 Do not serve it over plain HTTP on a public address. The sign-in code and the cookie would cross the network in the clear.
 
+The same address serves the panel's API, which an admin page on your own site can call instead of this page ([API.md](API.md), [YOUR-OWN-ADMIN.md](YOUR-OWN-ADMIN.md)).
+
 ### What stands between the internet and your list
 
-- **A session comes only from a code the bot sent by DM** to someone on its roster. Whoever can read that person's DMs with the bot could already tell it what to do.
+- **A session comes only from a code the bot sent by DM** to someone on its roster, or from a short-lived token signed by a roster account's own key (for an admin page on your own site, [YOUR-OWN-ADMIN.md](YOUR-OWN-ADMIN.md)). Whoever can read that person's DMs with the bot, or sign as them, could already tell it what to do.
 - **Five wrong codes** from one address, or twenty-five from all addresses together, and the panel refuses every code for ten minutes. A try is counted when it starts, so many sent at once are held to the same five. Behind a reverse proxy every visitor arrives from the proxy's address, so there the limit is five for everyone together. Either way, someone guessing can keep you out for ten minutes at a time.
 - **An error says why only to someone signed in.** Anyone else is told that it broke, and the reason is in the bot's log.
 - **The cookie** cannot be read by the page's scripts, and is not sent with requests from other sites.

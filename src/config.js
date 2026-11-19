@@ -51,6 +51,17 @@ function wanted({ positive, min, max, whole }) {
   return `${!positive && min > 0 ? '0 (off) or ' : ''}${kind}${range}`;
 }
 
+/** A site's origin: scheme, host and an optional port, nothing after. */
+const ORIGIN = /^https?:\/\/[a-z0-9.-]+(:\d{1,5})?$/i;
+
+/** PANEL_CORS_ORIGINS as a list. Anything that is not an origin is left out (and named by assertConfig). */
+export function corsOrigins(raw) {
+  return String(raw || '')
+    .split(',')
+    .map((s) => s.trim().replace(/\/+$/, ''))
+    .filter((s) => ORIGIN.test(s));
+}
+
 /**
  * Which surface answers by default. Anything but "agent" is classic, so an
  * unset or misspelt value gets the mode where the model holds no write tools.
@@ -276,6 +287,8 @@ export const config = {
     url: String(process.env.PANEL_URL || '').trim().replace(/\/+$/, ''),
     /** How long a sign-in lasts before the panel asks for a new code. */
     sessionDays: num('PANEL_SESSION_DAYS', 30, { positive: true, max: 365 }),
+    /** Other sites whose pages may call the API with a bearer token (docs/YOUR-OWN-ADMIN.md). */
+    corsOrigins: corsOrigins(process.env.PANEL_CORS_ORIGINS),
   },
 };
 
@@ -354,6 +367,11 @@ export function assertConfig(env = process.env) {
   }
   if (env.PANEL_URL && !/^https?:\/\/[^\s/]+(\/[^\s]*)?$/i.test(String(env.PANEL_URL).trim())) {
     problems.push('PANEL_URL must be the address the panel is reached at, like https://mod.example.com');
+  }
+  for (const origin of String(env.PANEL_CORS_ORIGINS || '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean)) {
+    if (!ORIGIN.test(origin)) {
+      problems.push(`PANEL_CORS_ORIGINS takes sites like https://example.com, with no path; "${origin}" is not one`);
+    }
   }
   const scoring = String(env.MOD_SCORING ?? '').trim().toLowerCase();
   if (scoring && scoring !== 'full' && scoring !== 'simple') {

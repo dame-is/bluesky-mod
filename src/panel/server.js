@@ -39,6 +39,13 @@ import { TargetError } from '../lib/target.js';
 import { runPanelCommand } from './commands.js';
 import { MAX_PER_REQUEST } from './profiles.js';
 import * as q from './queries.js';
+import { looksLikeJwt, verifyServiceAuth } from './serviceAuth.js';
+
+/**
+ * The shape of the JSON API. Raised when a change would break a page or a
+ * client written against an older one (docs/API.md).
+ */
+export const API_VERSION = 1;
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 
@@ -70,6 +77,7 @@ const HEADERS = {
 };
 
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_VOUCH_DIDS = 1000;
 const DID = /^did:[a-z]+:[a-zA-Z0-9._:%-]+$/;
 const CODE = /^[0-9a-f]{8}$/;
 
@@ -117,7 +125,7 @@ async function readJson(req) {
  * Build the panel.
  *
  * @param {object} opts
- * @param {object} opts.settings  config.panel: { port, host, url, sessionDays }
+ * @param {object} opts.settings  config.panel: { port, host, url, sessionDays, corsOrigins }
  * @param {object} opts.roster    who is answered and who may write
  * @param {object} opts.deps      what the panel borrows from the running bot:
  *   enqueue(label, job)  run a job on the bot's queue and resolve with its result
@@ -135,11 +143,18 @@ async function readJson(req) {
  *   status()             what the process is doing
  *   health()             the same, with the disk and the database
  *   settings(session)    the settings worth showing
+ *   preflight(link)      score who engaged with a post, storing nothing
+ *   rebuild()            start a new follow-graph snapshot: { started, reason }
+ *   rescore()            re-score the list now: { started, reason }
+ *   shield()             the shield's state, or null where it is not running
+ *   runShield(text, o)   shieldDm.js's runShieldCommand
  * @param {Function} [opts.log]
+ * @param {Function} [opts.readDoc]  did => DID document, for checking tokens
  */
-export function createPanel({ settings, roster, deps, log = () => {} }) {
+export function createPanel({ settings, roster, deps, log = () => {}, readDoc }) {
   const limiter = attemptLimiter();
   const secureCookie = /^https:/i.test(settings.url || '');
+  const corsOrigins = new Set(settings.corsOrigins || []);
 
   const json = (res, status, body, extra = {}) => {
     const text = JSON.stringify(body);
@@ -147,6 +162,7 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       ...HEADERS,
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
+      ...(res.cors || {}),
       ...extra,
     });
     res.end(text);
@@ -167,17 +183,65 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       throw new HttpError(403, 'That request did not come from the panel.');
     }
     const origin = req.headers.origin;
-    if (!origin) return;
-    // With PANEL_URL set, that address and no other. Without it, the address
-    // the request was sent to, as this server or a proxy in front of it saw it.
+    if (origin && !ownOrigin(req, origin)) {
+      throw new HttpError(403, 'That request came from another site.');
+    }
+  }
+
+  /**
+   * Is this the panel's own address? With PANEL_URL set, that address and no
+   * other. Without it, the address the request was sent to, as this server or
+   * a proxy in front of it saw it.
+   */
+  function ownOrigin(req, origin) {
     const forwarded = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
     const allowed = settings.url
       ? [new URL(settings.url).origin]
       : [`http://${req.headers.host}`, ...(forwarded ? [`${forwarded}://${req.headers.host}`] : [])];
-    if (!allowed.includes(origin)) {
-      throw new HttpError(403, 'That request came from another site.');
-    }
+    return allowed.includes(origin);
   }
+
+  /**
+   * The session a bearer token stands for. Two kinds are taken: a service-auth
+   * token from the account's own PDS (serviceAuth.js), and a panel session
+   * token, which is what a cookie holds, asked for at sign-in with
+   * `"token": true` (docs/API.md).
+   */
+  async function bearerSession(token) {
+    if (looksLikeJwt(token)) {
+      let claim;
+      try {
+        claim = await verifyServiceAuth(token, {
+          audience: deps.status().bot?.did || null,
+          ...(readDoc ? { readDoc } : {}),
+        });
+      } catch (err) {
+        throw new HttpError(401, `That token was refused: ${err.message}.`);
+      }
+      const tier = tierOf(claim.did, roster);
+      if (!tier) throw new HttpError(401, 'That account is not one the bot answers.');
+      return {
+        did: claim.did,
+        tier,
+        // The token's method can narrow what the roster allows, never widen it.
+        canWrite: tier !== 'reader' && claim.scope === 'write',
+        id: null,
+        createdAt: null,
+        expiresAt: new Date(claim.exp * 1000).toISOString(),
+        via: 'atproto',
+      };
+    }
+    const session = await sessionFor(token, { roster });
+    if (!session) throw new HttpError(401, 'That token is wrong or out of date. Sign in again.');
+    return { ...session, via: 'token' };
+  }
+
+  /** Only the account the bot works for, signed in to write. */
+  const needOwner = (session) => {
+    if (session.tier !== 'owner' || !session.canWrite) {
+      throw new HttpError(403, 'Only the account the bot works for can do that.');
+    }
+  };
 
   const members = async (uri) => {
     try {
@@ -231,9 +295,11 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     'GET /api/me': async ({ session }) => {
       const status = deps.status();
       return {
+        apiVersion: API_VERSION,
         did: session.did,
         tier: session.tier,
         canWrite: session.canWrite,
+        via: session.via || 'cookie',
         expiresAt: session.expiresAt,
         bot: status.bot,
         owner: status.owner,
@@ -270,11 +336,14 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
 
     'GET /api/scans': async ({ session, url }) => {
       const state = url.searchParams.get('state');
+      const before = String(url.searchParams.get('before') || '');
       return q.scans({
         canWrite: session.canWrite,
         state: ['waiting', 'adding', 'added', 'cancelled', 'undone'].includes(state)
           ? state
           : null,
+        before: /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(before) ? before : null,
+        limit: int(url.searchParams.get('limit'), 60, { min: 1, max: 100 }),
       });
     },
 
@@ -303,7 +372,7 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     'GET /api/scan': async ({ session, url }) => {
       const code = String(url.searchParams.get('code') || '').toLowerCase();
       const found = CODE.test(code) ? await q.scan(code, session) : null;
-      if (!found) throw new HttpError(404, 'There is no scan with that code.');
+      if (!found) throw new HttpError(404, 'There is no plan with that code.');
       // The list its approvals go to, once one has bound it. Only asked for
       // with several lists; with one there is nothing to say.
       const all = await listsNow().catch(() => null);
@@ -346,9 +415,18 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
         band: url.searchParams.get('band') || null,
         family: url.searchParams.get('family') || null,
         q: String(url.searchParams.get('q') || '').slice(0, 200),
+        sort: url.searchParams.get('sort') === 'recent' ? 'recent' : 'closest',
         offset: int(url.searchParams.get('offset'), 0),
         limit: int(url.searchParams.get('limit'), 50, { min: 1, max: 200 }),
       });
+    },
+
+    // Who is on the list by the bot's own repo. Lists are public, so any tier.
+    'GET /api/list/members': async ({ url }) => {
+      const at = await chosenList(url);
+      const held = await members(at.list.uri);
+      if (!held) throw new HttpError(502, 'The list could not be read just now. Try again in a minute.');
+      return { list: at.list.rkey, complete: Boolean(held.complete), dids: held.dids };
     },
 
     'GET /api/list/radar': async ({ url }) => {
@@ -397,6 +475,51 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       }),
 
     'GET /api/graph': async () => q.graph(),
+
+    // Vouch counts from the snapshot: for the accounts named, or the most
+    // vouched, for a site's own use of the follow graph.
+    'POST /api/graph/vouches': async ({ body }) => {
+      const dids = Array.isArray(body.dids) ? body.dids.filter((d) => DID.test(String(d))) : null;
+      if (dids && dids.length > MAX_VOUCH_DIDS) {
+        throw new HttpError(400, `Ask for at most ${MAX_VOUCH_DIDS} accounts at a time.`);
+      }
+      return q.vouches({
+        dids,
+        min: int(body.min, 1, { min: 1, max: 10_000 }),
+        limit: int(body.limit, 1000, { min: 1, max: 5000 }),
+      });
+    },
+
+    'POST /api/graph/rebuild': async ({ session }) => {
+      needOwner(session);
+      return deps.rebuild();
+    },
+
+    'POST /api/rescore': async ({ session }) => {
+      needOwner(session);
+      return deps.rescore();
+    },
+
+    // Who engaged with a post and how close they are, without storing a plan.
+    'POST /api/check': async ({ body }) => {
+      const link = String(body.link || '').trim();
+      if (!link || link.length > 600) throw new HttpError(400, 'Paste a link to a post.');
+      try {
+        return await deps.enqueue('panel-check', () => deps.preflight(link));
+      } catch (err) {
+        throw new HttpError(
+          err instanceof TargetError ? 400 : 502,
+          `That check failed: ${String(err?.message || err).slice(0, 200)}`,
+        );
+      }
+    },
+
+    // What the shield is set to do and what it has limited. Its commands go
+    // through POST /api/command, owner only, as in a DM.
+    'GET /api/shield': async () => {
+      const state = await deps.shield();
+      return state || { running: false };
+    },
 
     'GET /api/models': async ({ url }) => {
       const status = deps.status();
@@ -476,7 +599,7 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     },
 
     'POST /api/sign-out': async ({ req }) => {
-      await endSession(cookieOf(req, SESSION_COOKIE));
+      await endSession(req.bearer && !looksLikeJwt(req.bearer) ? req.bearer : cookieOf(req, SESSION_COOKIE));
       return { ok: true, _headers: { 'Set-Cookie': sessionCookie('', 0) } };
     },
 
@@ -487,7 +610,17 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
   };
 
   async function signIn(req, res) {
-    assertOwnPage(req);
+    // Another site's page may sign in too, when PANEL_CORS_ORIGINS names it,
+    // but only for a token it holds itself: a cookie stays the panel's own.
+    const origin = req.headers.origin;
+    const crossSite = Boolean(origin && res.cors && !ownOrigin(req, origin));
+    if (crossSite) {
+      if (req.headers['x-panel-request'] !== '1') {
+        throw new HttpError(403, 'That request did not come from a page that may sign in.');
+      }
+    } else {
+      assertOwnPage(req);
+    }
     const who = req.socket.remoteAddress || 'unknown';
     // Counted before the body is read, so a burst of requests opened
     // together is held to the limit too. A right code gets its try back.
@@ -496,6 +629,9 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       throw new HttpError(429, 'Too many wrong codes. Wait ten minutes, then ask the bot for a new one.');
     }
     const body = await readJson(req);
+    if (crossSite && body.token !== true) {
+      throw new HttpError(403, 'Another site may sign in only for a token. Send "token": true.');
+    }
     const session = await redeemCode(body.code, {
       sessionDays: settings.sessionDays,
       roster,
@@ -504,7 +640,10 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
       throw new HttpError(401, 'That code is wrong, used or out of date. Send the bot "panel" for a new one.');
     }
     tried.refund();
-    log('Signed in to the panel', { tier: tierOf(session.did, roster) });
+    log('Signed in to the panel', { tier: tierOf(session.did, roster), token: body.token === true });
+    if (body.token === true) {
+      return json(res, 200, { ok: true, token: session.token, expiresAt: session.expiresAt });
+    }
     json(res, 200, { ok: true }, {
       'Set-Cookie': sessionCookie(session.token, Math.round(settings.sessionDays * 86400)),
     });
@@ -514,7 +653,11 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     if (req.method === 'POST' && url.pathname === '/api/sign-in') {
       return signIn(req, res);
     }
-    const session = await sessionFor(cookieOf(req, SESSION_COOKIE), { roster });
+    const bearer = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || ''))?.[1] || null;
+    req.bearer = bearer;
+    const session = bearer
+      ? await bearerSession(bearer)
+      : await sessionFor(cookieOf(req, SESSION_COOKIE), { roster });
     if (!session) throw new HttpError(401, 'Sign in first.');
     // Past here the caller is someone the bot answers (see `handle`).
     req.signedIn = true;
@@ -522,11 +665,25 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
     if (!route) throw new HttpError(404, 'There is nothing at that address.');
     let body = {};
     if (req.method !== 'GET') {
-      assertOwnPage(req);
+      // A bearer token is sent on purpose, never by a browser on its own, so
+      // the check for a forged request is for cookies alone.
+      if (!bearer) assertOwnPage(req);
       body = await readJson(req);
     }
     const { _headers, ...out } = (await route({ req, session, url, body })) || {};
     return json(res, 200, out, _headers);
+  }
+
+  /** A browser asking whether another site's page may call the API. */
+  function preflight(req, res) {
+    if (!res.cors) throw new HttpError(403, 'That site may not call this bot.');
+    res.writeHead(204, {
+      ...res.cors,
+      'Access-Control-Allow-Methods': 'GET, POST',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Panel-Request',
+      'Access-Control-Max-Age': '600',
+    });
+    res.end();
   }
 
   function serveFile(req, res, url) {
@@ -576,8 +733,16 @@ export function createPanel({ settings, roster, deps, log = () => {} }) {
   async function handle(req, res) {
     try {
       const url = new URL(req.url, 'http://panel.invalid');
-      if (url.pathname.startsWith('/api/')) await api(req, res, url);
-      else serveFile(req, res, url);
+      if (url.pathname.startsWith('/api/')) {
+        // Another site's page, when PANEL_CORS_ORIGINS names it. Cookies are
+        // never allowed across sites, so what it can send is a bearer token.
+        const origin = req.headers.origin;
+        if (origin && corsOrigins.has(origin)) {
+          res.cors = { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' };
+        }
+        if (req.method === 'OPTIONS') return preflight(req, res);
+        await api(req, res, url);
+      } else serveFile(req, res, url);
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) log('The panel could not answer', { err: String(err?.message || err) });

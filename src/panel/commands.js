@@ -10,10 +10,13 @@
 // command as the words that asked for the change, as it does for a DM.
 //
 // The panel has its own pages for reading, so only commands that change the
-// list or label a plan are run here. Questions for a model stay in the DMs.
+// list or label a plan are run here, and the shield's commands, which change
+// replies and quotes on the owner's own posts. Questions for a model stay in
+// the DMs.
 
 import { parseCommand, isWrite, readOnlyReply } from '../lib/command.js';
 import { listTokenOf } from '../lib/listChoice.js';
+import { parseShieldCommand } from '../lib/shieldCommand.js';
 
 /** The commands the panel runs. */
 export const PANEL_ACTIONS = new Set([
@@ -25,6 +28,23 @@ export const PANEL_ACTIONS = new Set([
   'triage',
 ]);
 
+/**
+ * The shield's commands the panel runs (src/lib/shieldCommand.js). Not
+ * "shield watch", which starts a watch and belongs to the DM it reports to.
+ */
+export const PANEL_SHIELD_ACTIONS = new Set([
+  'status',
+  'up',
+  'down',
+  'close',
+  'open',
+  'quotesOff',
+  'quotesOn',
+  'keep',
+  'guard',
+  'unguard',
+]);
+
 const MAX_COMMAND_CHARS = 4000;
 
 /**
@@ -33,12 +53,27 @@ const MAX_COMMAND_CHARS = 4000;
  *
  * @returns {{ ok: true, cmd: object } | { ok: false, status: number, error: string }}
  */
-export function checkCommand(text, { canWrite = false } = {}) {
+export function checkCommand(text, { canWrite = false, tier = null } = {}) {
   const raw = String(text ?? '').trim();
   const no = (status, error) => ({ ok: false, status, error });
   if (!raw) return no(400, 'There is no command in that request.');
   if (raw.length > MAX_COMMAND_CHARS || /[\r\n]/.test(raw)) {
     return no(400, 'Send one command on one line.');
+  }
+  // The shield first, as in a DM (dmLoop.js), so "close replies <post>" is
+  // never read as anything else.
+  const shield = parseShieldCommand(raw);
+  if (shield) {
+    if (!PANEL_SHIELD_ACTIONS.has(shield.action)) {
+      return no(400, `"${raw}" is not something the panel runs. Send it to the bot in a DM.`);
+    }
+    if (shield.write && !(canWrite && tier === 'owner')) {
+      return no(403, 'Only the account the bot works for can change who may reply to or quote their posts.');
+    }
+    if (shield.ruleError) return no(400, `${shield.ruleError}.`);
+    // A DM can mean the post sent last; a page names it.
+    if (shield.needsPost) return no(400, 'Name the post, as in "close replies <link>".');
+    return { ok: true, shield };
   }
   const cmd = parseCommand(raw);
   if (!cmd) return no(400, 'That is not a command the bot knows.');
@@ -68,6 +103,7 @@ export function checkCommand(text, { canWrite = false } = {}) {
 export async function runPanelCommand(text, session, deps) {
   const checked = checkCommand(text, session);
   if (!checked.ok) return checked;
+  if (checked.shield) return runShieldFromPanel(checked.shield, session, deps);
   const { cmd } = checked;
   const reply = await deps.enqueue('panel', async () => {
     const writeAgent = deps.writeAgent();
@@ -84,10 +120,52 @@ export async function runPanelCommand(text, session, deps) {
       convoId,
     });
   });
-  // Follow-ups the bot offers with its receipt ("undo 3f2a1b7c"), kept only
-  // where the panel could run every command in them. An option can run more
-  // than one: "Every list" takes someone off each list in turn.
-  const options = (reply?.options || [])
+  const options = followUps(reply, session);
+  return {
+    ok: true,
+    status: 200,
+    action: cmd.action,
+    text: reply?.text || '',
+    outcome: reply?.outcome ?? null,
+    options,
+    // The bot's "Which list?": nothing was done, and every option is the same
+    // write with a list named on it. The page asks, where a DM would wait for
+    // a number.
+    choice:
+      (reply?.outcome ?? null) === null &&
+      options.length > 0 &&
+      options.every((o) => o.commands.every((c) => listTokenOf(c))),
+  };
+}
+
+/** A shield command, run by the function a DM's is run by, on the queue. */
+async function runShieldFromPanel(shield, session, deps) {
+  if (!deps.runShield) {
+    return { ok: false, status: 503, error: 'The shield is not running here.' };
+  }
+  const reply = await deps.enqueue('panel-shield', async () => {
+    const convoId =
+      session.tier === 'owner' ? await deps.ownerConvo().catch(() => null) : null;
+    return deps.runShield(shield.raw, { isOwner: session.tier === 'owner', convoId });
+  });
+  return {
+    ok: true,
+    status: 200,
+    action: `shield.${shield.action}`,
+    text: reply?.text || '',
+    outcome: reply?.outcome ?? null,
+    options: followUps(reply, session),
+    choice: false,
+  };
+}
+
+/**
+ * Follow-ups the bot offers with its receipt ("undo 3f2a1b7c"), kept only
+ * where the panel could run every command in them. An option can run more
+ * than one: "Every list" takes someone off each list in turn.
+ */
+function followUps(reply, session) {
+  return (reply?.options || [])
     .map((o) => ({
       label: o.label,
       commands: (o.commands?.length ? o.commands : [o.command]).map(String),
@@ -105,19 +183,4 @@ export async function runPanelCommand(text, session, deps) {
         ['undo', 'list_remove'].includes(parseCommand(c)?.action),
       ),
     }));
-  return {
-    ok: true,
-    status: 200,
-    action: cmd.action,
-    text: reply?.text || '',
-    outcome: reply?.outcome ?? null,
-    options,
-    // The bot's "Which list?": nothing was done, and every option is the same
-    // write with a list named on it. The page asks, where a DM would wait for
-    // a number.
-    choice:
-      (reply?.outcome ?? null) === null &&
-      options.length > 0 &&
-      options.every((o) => o.commands.every((c) => listTokenOf(c))),
-  };
 }
