@@ -3,7 +3,7 @@
 
 import { get, post } from '../api.js';
 import { h } from '../dom.js';
-import { ago, clock, nf, postAuthor, postLink, until } from '../lib/format.js';
+import { ago, clock, nf, postAuthor, postLink, until } from '/client/format.js';
 import { confirm, empty, section, table, toast, whoName } from '../ui.js';
 import { view } from './shared.js';
 

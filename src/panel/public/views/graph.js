@@ -3,7 +3,7 @@
 
 import { get } from '../api.js';
 import { h } from '../dom.js';
-import { BANDS, ago, bandName, clock, nf, plural } from '../lib/format.js';
+import { BANDS, ago, bandName, clock, nf, plural } from '/client/format.js';
 import { empty, section, table } from '../ui.js';
 import { view } from './shared.js';
 

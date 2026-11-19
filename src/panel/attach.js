@@ -23,8 +23,10 @@ import { runCommand } from '../bot/dmLoop.js';
 import { graphFacts, heldListed } from '../bot/graphFacts.js';
 import { botLists, multiListOn } from '../bot/lists.js';
 import { listNotes } from '../bot/memory.js';
+import { runShieldCommand, shieldDeps } from '../bot/shieldDm.js';
 import { checkModelFor, ESCALATION_MODEL } from '../bot/tiers.js';
 import { stopWatch } from '../bot/watch.js';
+import { attackOn, liveGates, liveGuards, NO_PASSWORD, readState } from '../shield.js';
 import { createProfiles } from './profiles.js';
 import { createPanel } from './server.js';
 
@@ -38,6 +40,8 @@ const REFRESH_LIST_EVERY_MS = 60_000;
  * @param {Function} bot.chat       () => the chat view of it
  * @param {Function} bot.reference  async () => the held scoring reference
  * @param {Function} bot.vitals     () => what the process is doing right now
+ * @param {Function} bot.rebuild    () => start a new snapshot: { started, reason }
+ * @param {Function} bot.rescore    () => re-score the list now: { started, reason }
  * @returns {Promise<object|null>} the panel, listening, or null if it could not start
  */
 export async function startPanel(bot) {
@@ -178,8 +182,59 @@ export async function startPanel(bot) {
     };
   }
 
+  /**
+   * What the shield is set to do and what it has done, for a page to draw.
+   * The same facts as the answer to "shield" in a DM (shield.js statusText).
+   */
+  async function shield() {
+    const d = shieldDeps();
+    if (!d) return null;
+    const [state, gates, guards] = await Promise.all([
+      readState(),
+      liveGates(),
+      liveGuards(),
+    ]);
+    const rate = (r) => (r ? { count: r.count, windowMs: r.windowMs } : null);
+    return {
+      running: true,
+      // Without the owner's app password the shield can only tell.
+      canAct: Boolean(d.gates),
+      problem: d.gates ? null : d.gatesProblem || NO_PASSWORD,
+      attack: {
+        on: attackOn(state),
+        since: state.attackSince,
+        until: state.attackUntil,
+        why: state.attackWhy,
+        mode: d.cfg.attack.mode,
+        trip: rate(d.cfg.attack.trip),
+      },
+      triggers: {
+        mode: d.cfg.mode,
+        replies: rate(d.cfg.replies),
+        quotes: rate(d.cfg.quotes),
+        replyRule: d.cfg.replyRule || null,
+      },
+      stream: {
+        on: d.streaming !== false,
+        live: Boolean(d.activity?.live?.()),
+        coversMs: d.activity?.coversMs?.() ?? 0,
+        held: d.activity?.size?.() ?? 0,
+      },
+      limits: gates.map((g) => ({
+        post: g.post,
+        kind: g.kind === 'threadgate' ? 'replies' : 'quotes',
+        why: g.why,
+        appliedAt: g.applied_at,
+        restoreAfter: g.restore_after,
+      })),
+      guards: [...guards].map(([post, g]) => ({ post, mode: g.mode, until: g.until })),
+    };
+  }
+
   const panel = createPanel({
-    settings: config.panel,
+    // A dry run writes nothing, and the list's write path does not look at
+    // DRY_RUN, so the panel only reads then.
+    settings: { ...config.panel, readOnly: config.dryRun },
     roster: config.roster,
     log: (msg, fields) => logger.info(msg, fields),
     deps: {
@@ -198,6 +253,11 @@ export async function startPanel(bot) {
       status,
       health,
       settings,
+      preflight: async (link) => (await bot.reference()).io.preflight(link),
+      rebuild: bot.rebuild,
+      rescore: bot.rescore,
+      shield,
+      runShield: runShieldCommand,
       log: (msg, fields) => logger.info(msg, fields),
     },
   });

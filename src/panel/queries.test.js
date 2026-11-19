@@ -256,6 +256,49 @@ for (const [kind, target] of storesFor('panel_queries_test')) {
       expect(g.audits[1].bands.CONNECTED).toBeLessThan(9);
     });
 
+    it('pages scans, newest first, and moves on past a filtered page', async () => {
+      const first = await q.scans({ limit: 1 });
+      expect(first.scans).toHaveLength(1);
+      expect(first.more).toBe(true);
+      const next = await q.scans({ limit: 1, before: first.next });
+      expect(next.scans[0].createdAt < first.scans[0].createdAt).toBe(true);
+    });
+
+    it('opens a typed block as a plan, which is not a scan', async () => {
+      const [typed] = await select('plan', { select: 'id', where: { totals: 'is.null' }, limit: 1 });
+      const plan = await q.scan(typed.id.slice(0, 8), { canWrite: true });
+      expect(plan.scan).toBe(false);
+      expect(plan.rows.length).toBeGreaterThan(0);
+    });
+
+    it('lists the newest adds first when asked', async () => {
+      const page = await q.listPage({ members, sort: 'recent', limit: 40 });
+      const at = page.rows.map((r) => r.addedAt || '');
+      expect(at).toEqual([...at].sort().reverse());
+    });
+
+    it('says why each account is in the queue', async () => {
+      const out = await q.queue({ members, limit: 100 });
+      // A stranger's band is further than any close one.
+      const far = (b) => (q.CLOSE.includes(b) ? q.CLOSE.indexOf(b) : q.CLOSE.length);
+      expect(out.rows.some((r) => r.reason === 'closer')).toBe(true);
+      for (const r of out.rows) {
+        expect(r.reason).toBe(r.bandThen && far(r.band) < far(r.bandThen) ? 'closer' : 'close');
+      }
+    });
+
+    it('gives vouch counts for named accounts, or the most vouched', async () => {
+      const named = await q.vouches({ dids: [demoDid(601), demoDid(999_999)] });
+      expect(named.takenAt).toBeTruthy();
+      expect(typeof named.vouches[demoDid(601)]).toBe('number');
+      expect(named.vouches).not.toHaveProperty(demoDid(999_999));
+      const top = await q.vouches({ min: 3, limit: 5 });
+      const counts = Object.values(top.vouches);
+      expect(counts).toHaveLength(5);
+      expect(counts.every((n) => n >= 3)).toBe(true);
+      expect(counts).toEqual([...counts].sort((a, b) => b - a));
+    });
+
     it('adds up tokens by day, kind and model', async () => {
       const u = await q.usage({ days: 30, now: NOW });
       expect(u.days).toHaveLength(30);

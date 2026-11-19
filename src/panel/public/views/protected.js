@@ -3,7 +3,7 @@
 
 import { get } from '../api.js';
 import { h } from '../dom.js';
-import { ago, nf } from '../lib/format.js';
+import { ago, nf } from '/client/format.js';
 import { empty, pager, table, who } from '../ui.js';
 import { view } from './shared.js';
 

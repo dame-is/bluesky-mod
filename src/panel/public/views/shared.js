@@ -14,8 +14,8 @@ import {
   postAuthor,
   shortDid,
   viaWords,
-} from '../lib/format.js';
-import { primaryKind, selected } from '../lib/commands.js';
+} from '/client/format.js';
+import { primaryKind, selected } from '/client/commands.js';
 import { createRadar, bandMark } from '../radar.js';
 import { band, closeness, loading, problem, profileOf, tone, who, whoName } from '../ui.js';
 

@@ -7,8 +7,8 @@
 
 import { get, post, ApiError } from './api.js';
 import { h, fill, icon } from './dom.js';
-import { nf } from './lib/format.js';
-import { blockCommand, onList } from './lib/commands.js';
+import { nf } from '/client/format.js';
+import { blockCommand, onList } from '/client/commands.js';
 import { listPicker, openOver, resetProfiles, run, toast } from './ui.js';
 import { openAccount } from './views/account.js';
 import { signIn } from './views/signin.js';

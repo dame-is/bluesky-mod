@@ -342,12 +342,37 @@ export function demoDeps(seeded) {
         ? (await select('memory', { select: 'text,created_at,author_did', is: { removed_at: 'null' }, order: 'created_at.asc' })).map((n) => ({ text: n.text, at: n.created_at, byOwner: true }))
         : null,
     }),
+    async preflight(link) {
+      if (!/\/post\/|app\.bsky\.feed\.post/.test(link)) throw new TargetError('I scan posts, and that is not a post.');
+      return {
+        target: { uri: 'at://did:plc:demo000821/app.bsky.feed.post/3mdemocheck', did: 'did:plc:demo000821' },
+        totals: { participants: 139, selected: 139, byBand: { PROTECTED: 0, CONNECTED: 2, PERIPHERAL: 6, NOTABLE: 1, UNKNOWN: 130 }, engagements: { like: 90, reply: 30, quote: 19 }, alreadyListed: 0 },
+        truncated: false,
+        requiresReview: [601, 602, 701, 702, 703, 704, 705, 706, 801].map((i) => ({ did: fx.demoDid(i), handle: fx.demoAccount(i).handle, band: bandOf(i) })),
+        autoEligible: 130,
+      };
+    },
+    rebuild: () => ({ started: true }),
+    rescore: () => ({ started: true }),
+    // The shield as a stand-in: on, asking, with one post limited and one
+    // guarded. Its commands answer without writing anything.
+    shield: async () => ({
+      running: true,
+      canAct: false,
+      problem: 'Closing replies or turning quotes off needs MOD_OWNER_APP_PASSWORD.',
+      attack: { on: false, since: null, until: null, why: null, mode: 'ask', trip: { count: 40, windowMs: 1_800_000 } },
+      triggers: { mode: 'ask', replies: { count: 12, windowMs: 900_000 }, quotes: { count: 6, windowMs: 900_000 }, replyRule: ['following', 'mentioned'] },
+      stream: { on: true, live: true, coversMs: 4 * 3_600_000, held: 318 },
+      limits: [{ post: `at://${seeded.owner}/app.bsky.feed.post/3mbikelanes`, kind: 'replies', why: 'trigger', appliedAt: iso(Date.now() - 2 * 3_600_000), restoreAfter: iso(Date.now() + 22 * 3_600_000) }],
+      guards: [{ post: `at://${seeded.owner}/app.bsky.feed.post/3mfarecap2026`, mode: 'ask', until: iso(Date.now() + 48 * 3_600_000) }],
+    }),
+    runShield: async (text) => ({ text: `The demo has no shield to change, so "${text}" changed nothing.`, options: null, outcome: null }),
     log: () => {},
   };
 }
 
 /** Seed a store and build the panel over it. */
-export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}, empty = false } = {}) {
+export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}, empty = false, corsOrigins = [], readDoc, readOnly = false } = {}) {
   // `empty` leaves the store as a new install has it, to see every page
   // with nothing on it.
   const seeded = empty
@@ -355,9 +380,10 @@ export async function demoPanel({ port = 0, host = '127.0.0.1', extraRoster = {}
     : await fx.seedDemo({ lists: multiListOn() });
   const roster = makeRoster({ owner: seeded.owner, ...extraRoster });
   const panel = createPanel({
-    settings: { port, host, url: '', sessionDays: 30 },
+    settings: { port, host, url: '', sessionDays: 30, corsOrigins, readOnly },
     roster,
     deps: demoDeps(seeded),
+    ...(readDoc ? { readDoc } : {}),
   });
   return { panel, seeded, roster };
 }
@@ -369,6 +395,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     port,
     extraRoster: { allowed: [guest] },
     empty: process.env.PANEL_DEMO_EMPTY === '1',
+    // To try an admin page on another site against the demo, name it here.
+    corsOrigins: String(process.env.PANEL_CORS_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean),
   });
   await panel.listen();
   // The real bot sends a code by DM. Here they are printed, once each.

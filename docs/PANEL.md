@@ -29,7 +29,7 @@ and in `compose.yaml`, under the `bot` service, the line that is there commented
 
 That publishes the port to the machine running Docker and to nothing else. Then `docker compose up -d` and open `http://127.0.0.1:8787`.
 
-A dry run (`DRY_RUN=true`) leaves the panel off, because signing in is a DM and a dry run reads none.
+In a dry run (`DRY_RUN=true`) the panel opens read-only: everyone can look and nobody can change anything, since the list's write path does not check for a dry run. A dry run reads no DMs, so the bot cannot send a sign-in code then. A sign-in from before, or a token from your PDS ([YOUR-OWN-ADMIN.md](YOUR-OWN-ADMIN.md)), still works.
 
 ## Signing in
 
@@ -154,13 +154,68 @@ Out of the box the panel can be opened only from the machine the bot runs on. To
 
   `PANEL_URL` makes the cookie HTTPS-only, is the address the bot's DM tells you to type the code at, and is the only origin a request that changes something may come from.
 
-On Render, Railway or Fly the bot is deployed as a worker with no web address (see [DEPLOY.md](DEPLOY.md)). Giving it one means changing it to a web service that routes to `PANEL_PORT`, with `PANEL_HOST=0.0.0.0` and `PANEL_URL` set to the address the host gives you.
+### On Render, Fly or Railway
+
+These hosts run the bot as a worker with no web address ([DEPLOY.md](DEPLOY.md)), and each gives it one differently. All three provide HTTPS themselves. In every case `PANEL_HOST` is `0.0.0.0`, and `PANEL_URL` is the address the host gives you, so the cookie is HTTPS-only and the bot's DM names the right place.
+
+**Fly** keeps the same machine and volume. Add this to `fly.toml` (it is there, commented out):
+
+```toml
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+```
+
+`auto_stop_machines = "off"` matters: Fly stops idle machines otherwise, and the bot has to keep running to read DMs. Then:
+
+```bash
+fly secrets set PANEL_PORT=8787 PANEL_HOST=0.0.0.0 PANEL_URL=https://<your-app>.fly.dev
+fly deploy --ha=false
+```
+
+**Railway** keeps the same service and volume. In the service's Variables, add `PANEL_PORT=8787` and `PANEL_HOST=0.0.0.0`, and let it redeploy. Then Settings > Networking > Public Networking > **Generate Domain**, and check that the target port it chose is 8787 (the edit icon beside the domain changes it). Add the domain it gives you as `PANEL_URL=https://<name>.up.railway.app`.
+
+**Render** cannot turn a background worker into a web service, and a disk belongs to the one service it was made for (Render's docs, read 2026-11-19). So the panel needs a web service of its own.
+
+If you have not deployed yet, make it a web service from the start instead of using the button:
+
+1. **New > Web Service**, from this repository or your fork. Render builds it from the Dockerfile.
+2. A paid instance type. Free web services have no disk and stop when idle, and the bot must keep running.
+3. Under Advanced, add a disk mounted at `/app/data` (2 GB is enough for most; [DEPLOY.md](DEPLOY.md#how-much-disk-it-needs) has the sizes).
+4. The three settings from [DEPLOY.md](DEPLOY.md#before-you-start), plus `PANEL_PORT=10000` (the port Render sends traffic to) and `PANEL_HOST=0.0.0.0`.
+5. Turn off auto-deploy, so a change to this repository does not redeploy your bot without you choosing to, and leave it at one instance.
+6. Once it is up, add `PANEL_URL=https://<name>.onrender.com`, with the address Render shows.
+
+If the bot already runs as a worker, its database has to come across, and the two must never answer DMs at once:
+
+1. Create the web service as above, with one more setting, `DRY_RUN=true`. It reads no DMs and only opens the panel read-only, so it does nothing while the data moves.
+2. In the worker's **Shell**, take a consistent copy of the database:
+
+   ```bash
+   node -e "new (require('node:sqlite').DatabaseSync)('/app/data/bluesky-mod.db').exec(\"vacuum into '/app/data/moving.db'\")"
+   ```
+
+3. Copy `/app/data/moving.db` to your computer, then to `/app/data/moved.db` on the web service, with `scp` and the SSH address in each service's **Connect** menu (it needs an SSH key added to your Render account). Render's docs cover this under Disks, transferring files.
+4. Suspend the worker.
+5. In the web service's **Shell**, clear the bot's place in the DM log, so it starts from now and does not answer again what the worker already did:
+
+   ```bash
+   node -e "new (require('node:sqlite').DatabaseSync)('/app/data/moved.db').exec('delete from dm_cursor')"
+   ```
+
+6. In the web service's Environment, add `DATABASE_PATH=/app/data/moved.db` and remove `DRY_RUN`. It restarts on the moved database, live.
+7. Once a DM to it gets an answer, delete the worker.
 
 Do not serve it over plain HTTP on a public address. The sign-in code and the cookie would cross the network in the clear.
 
+The same address serves the panel's API, which an admin page on your own site can call instead of this page ([API.md](API.md), [YOUR-OWN-ADMIN.md](YOUR-OWN-ADMIN.md)).
+
 ### What stands between the internet and your list
 
-- **A session comes only from a code the bot sent by DM** to someone on its roster. Whoever can read that person's DMs with the bot could already tell it what to do.
+- **A session comes only from a code the bot sent by DM** to someone on its roster, or from a short-lived token signed by a roster account's own key (for an admin page on your own site, [YOUR-OWN-ADMIN.md](YOUR-OWN-ADMIN.md)). Whoever can read that person's DMs with the bot, or sign as them, could already tell it what to do.
 - **Five wrong codes** from one address, or twenty-five from all addresses together, and the panel refuses every code for ten minutes. A try is counted when it starts, so many sent at once are held to the same five. Behind a reverse proxy every visitor arrives from the proxy's address, so there the limit is five for everyone together. Either way, someone guessing can keep you out for ten minutes at a time.
 - **An error says why only to someone signed in.** Anyone else is told that it broke, and the reason is in the bot's log.
 - **The cookie** cannot be read by the page's scripts, and is not sent with requests from other sites.

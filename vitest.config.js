@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.js', 'scripts/**/*.test.js'],
+    include: ['src/**/*.test.js', 'scripts/**/*.test.js', 'client/**/*.test.js'],
     // A stand-in owner, so modules that read the owner at import time have
     // one. Tests never reach the network or a real account.
     env: {

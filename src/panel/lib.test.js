@@ -20,7 +20,7 @@ import {
   triageCommand,
   undoCommand,
   unblockCommand,
-} from './public/lib/commands.js';
+} from '../../client/commands.js';
 import {
   EDGES,
   RINGS,
@@ -33,7 +33,7 @@ import {
   spots,
   texture,
   walkOrder,
-} from './public/lib/radar-layout.js';
+} from '../../client/radar-layout.js';
 import {
   ago,
   bandName,
@@ -48,7 +48,7 @@ import {
   until,
   viaWords,
   writeCost,
-} from './public/lib/format.js';
+} from '../../client/format.js';
 import { checkCommand } from './commands.js';
 
 const CODE = '3f2a1b7c';

@@ -2,7 +2,7 @@
 
 import { get, post } from '../api.js';
 import { h } from '../dom.js';
-import { ago, clock, dayMonth } from '../lib/format.js';
+import { ago, clock, dayMonth } from '/client/format.js';
 import { confirm, section, table, who } from '../ui.js';
 import { view } from './shared.js';
 

@@ -1,6 +1,7 @@
 {
   "name": "bluesky-mod",
   "version": "1.0.0",
+  "private": true,
   "description": "A Bluesky moderation bot you run yourself. It owns a block list, takes orders by DM, and refuses to block people you follow.",
   "license": "MIT",
   "type": "module",
@@ -22,6 +23,7 @@
     "@ai-sdk/openai": "^4.0.118",
     "@ai-sdk/openai-compatible": "^3.0.92",
     "@atproto/api": "^0.19.17",
+    "@atproto/crypto": "^0.5.7",
     "ai": "^7.0.126",
     "pg": "^8.23.1",
     "zod": "^3.25.76"

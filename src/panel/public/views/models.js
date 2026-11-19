@@ -4,7 +4,7 @@
 
 import { get } from '../api.js';
 import { h } from '../dom.js';
-import { compact, nf } from '../lib/format.js';
+import { compact, nf } from '/client/format.js';
 import { chips, empty, section, table } from '../ui.js';
 import { bars, view } from './shared.js';
 
